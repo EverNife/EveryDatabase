@@ -1,0 +1,62 @@
+plugins {
+    id 'com.avast.gradle.docker-compose' version '0.17.12'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+configure([tasks.compileJava]) {
+    sourceCompatibility = 16
+    options.release = 8
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(16)
+    }
+}
+
+dependencies {
+    // Jabel: permite sintaxe Java 16 compilando para bytecode Java 8
+    annotationProcessor 'com.github.bsideup.jabel:jabel-javac-plugin:0.4.2'
+    compileOnly 'com.github.bsideup.jabel:jabel-javac-plugin:0.4.2'
+
+    // Core storage (versoes compativeis com Java 8 runtime)
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+    implementation 'org.mongodb:mongodb-driver-sync:4.11.2'
+    implementation 'com.h2database:h2:2.3.232'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.4'
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.15.4'
+
+    compileOnly 'org.slf4j:slf4j-api:1.7.36'
+
+    // JUnit 5
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.0")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.0")
+
+    // JDBC drivers para testes de integracao
+    testRuntimeOnly 'com.mysql:mysql-connector-j:9.4.0'
+    testRuntimeOnly 'org.postgresql:postgresql:42.7.7'
+
+    // Geracao de dados aleatorios para stress tests
+    testImplementation 'org.instancio:instancio-junit:6.0.0-RC2'
+}
+
+// ======================================================================
+//  Docker Compose - sobe Mongo/MariaDB/Postgres antes dos testes
+// ======================================================================
+dockerCompose {
+    useComposeFiles = [rootProject.file('docker-compose.yml').path]
+    projectName = 'evernifecore-space'
+    waitForHealthyStateTimeout = java.time.Duration.ofMinutes(2)
+    stopContainers   = project.hasProperty('docker.stop')
+    removeContainers = project.hasProperty('docker.stop')
+    forceRecreate = project.hasProperty('docker.recreate')
+    captureContainersOutput = project.hasProperty('docker.logs')
+}
+
+dockerCompose.isRequiredBy(test)
