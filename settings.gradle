@@ -16,7 +16,6 @@ rootProject.name = 'EverNifeCore'
 
 include 'minecraft'
 include 'common'
-include 'common-tests'
 include 'common-storage'
 include 'api'
 include 'api-contracts'
