@@ -10,8 +10,8 @@ import com.mongodb.client.MongoDatabase;
  * <p>Exposes the standard document field names used by {@link MongoRepository}
  * so migration subclasses can reference them without accessing the package-private class:
  * <ul>
- *   <li>{@link #FIELD_KEY}  - {@code "_sk"}: the serialised entity key</li>
- *   <li>{@link #FIELD_DATA} - {@code "_data"}: the JSON-encoded entity blob</li>
+ *   <li>{@link #COL_KEY}  - {@code "storage_key"}: the serialised entity key</li>
+ *   <li>{@link #COL_DATA} - {@code "storage_data"}: the JSON-encoded entity blob</li>
  * </ul>
  *
  *
@@ -33,7 +33,7 @@ import com.mongodb.client.MongoDatabase;
  *
  *     protected void executeOnDatabase(MongoDatabase db) {
  *         db.getCollection("player_data")
- *           .createIndex(Indexes.ascending(MongoRepository.FIELD_DATA + ".name"));
+ *           .createIndex(Indexes.ascending(COL_DATA + ".name"));
  *     }
  * }
  * }</pre>
@@ -46,11 +46,11 @@ import com.mongodb.client.MongoDatabase;
  */
 public abstract class MongoMigration implements Migration {
 
-    /** MongoDB field that stores the serialised entity key ({@code "_sk"}). */
-    public static final String FIELD_KEY  = MongoRepository.FIELD_KEY;
+    /** MongoDB field that stores the serialised entity key ({@code "storage_key"}). */
+    public static final String COL_KEY  = MongoRepository.COL_KEY;
 
-    /** MongoDB field that stores the JSON-encoded entity blob ({@code "_data"}). */
-    public static final String FIELD_DATA = MongoRepository.FIELD_DATA;
+    /** MongoDB field that stores the JSON-encoded entity blob ({@code "storage_data"}). */
+    public static final String COL_DATA = MongoRepository.COL_DATA;
 
     /**
      * Unwraps the {@link MongoDatabase} from the context and delegates to

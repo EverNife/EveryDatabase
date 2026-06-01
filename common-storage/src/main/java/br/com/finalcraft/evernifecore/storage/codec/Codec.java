@@ -35,6 +35,21 @@ public interface Codec<V> {
     String contentType();
 
     /**
+     * Returns {@code true} when this codec produces JSON output.
+     *
+     * <p>Several backends (SQL, MongoDB, InMemory) require a JSON codec because they
+     * parse or store the payload as native JSON. YAML and other formats are only
+     * accepted by backends that treat the payload as opaque bytes (LocalFile).
+     *
+     * <p>The default implementation checks {@link #contentType()} for the string
+     * {@code "json"}. Custom codec implementations should override this when the
+     * content-type string does not follow that convention.
+     */
+    default boolean isJsonCodec() {
+        return contentType().contains("json");
+    }
+
+    /**
      * File extension (without the leading dot) used by backends that store one
      * entity per file, e.g. {@code "json"} or {@code "yml"}.
      *

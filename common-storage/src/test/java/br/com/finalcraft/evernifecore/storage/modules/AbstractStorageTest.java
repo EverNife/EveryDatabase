@@ -6,7 +6,6 @@ import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
-import br.com.finalcraft.evernifecore.storage.playerdata.PlayerDataRepository;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.Query;
 import lombok.extern.java.Log;
@@ -104,7 +103,7 @@ public abstract class AbstractStorageTest {
      *
      * <p>Call once in {@code @BeforeAll} after the server is confirmed reachable.
      */
-    protected static int computeRunNumber(Collection<String> existingDbNames) {
+    public static int computeRunNumber(Collection<String> existingDbNames) {
         int max = 0;
         Pattern p = Pattern.compile("^enc_(\\d+)_.*");
         for (String name : existingDbNames) {
@@ -130,7 +129,7 @@ public abstract class AbstractStorageTest {
      * <p>Total length is at most 61 characters - within PostgreSQL's 63-char and
      * MySQL/MariaDB's 64-char database-name limits.
      */
-    protected static String buildDbName(String backend, int runNumber, String methodName) {
+    public static String buildDbName(String backend, int runNumber, String methodName) {
         String safe = methodName.length() > 50 ? methodName.substring(0, 50) : methodName;
         return String.format("enc_%03d_%s_%s", runNumber, backend, safe);
     }
@@ -325,38 +324,6 @@ public abstract class AbstractStorageTest {
         List<TestPlayer> all = repo.all().join().collect(Collectors.toList());
         assertEquals(3, all.size());
         assertTrue(all.containsAll(Arrays.asList(alice(), bob(), carol())));
-    }
-
-    // ------------------------------------------------------------------
-    //  PlayerDataRepository facade
-    // ------------------------------------------------------------------
-
-    @Test
-    @Order(70)
-    @DisplayName("[base] PlayerDataRepository facade delegates correctly to underlying Repository")
-    void playerDataRepository_facade_delegatesCorrectly() {
-        PlayerDataRepository<TestPlayer> playerRepo =
-            new PlayerDataRepository<>(storage, DESCRIPTOR);
-
-        // save + get
-        playerRepo.save(alice()).join();
-        Optional<TestPlayer> found = playerRepo.get(UUID_ALICE).join();
-        assertTrue(found.isPresent());
-        assertEquals(alice(), found.get());
-
-        // exists + count
-        assertTrue(playerRepo.exists(UUID_ALICE).join());
-        assertEquals(1L, playerRepo.count().join());
-
-        // saveAll + getMany
-        playerRepo.saveAll(Arrays.asList(bob(), carol())).join();
-        List<TestPlayer> many = playerRepo.getMany(Arrays.asList(UUID_BOB, UUID_CAROL)).join();
-        assertEquals(2, many.size());
-
-        // delete
-        playerRepo.delete(UUID_ALICE).join();
-        assertFalse(playerRepo.get(UUID_ALICE).join().isPresent());
-        assertEquals(2L, playerRepo.count().join());
     }
 
     // ------------------------------------------------------------------

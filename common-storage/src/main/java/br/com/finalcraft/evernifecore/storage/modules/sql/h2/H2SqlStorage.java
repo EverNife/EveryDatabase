@@ -66,16 +66,27 @@ public class H2SqlStorage extends SqlStorage {
         }
 
         @Override
+        protected boolean supportsVersioning() {
+            return false;
+        }
+
+        /** H2 indexes {@code TEXT} columns without any prefix length. */
+        @Override
+        protected String indexLengthFor(IndexHint hint) {
+            return "";
+        }
+
+        @Override
         protected String dataColumnType() {
             return "TEXT";
         }
 
         @Override
-        protected String sqlTypeFor(IndexHint.FieldType type) {
+        protected String sqlTypeFor(IndexHint hint) {
             // H2 does not support DATETIME; its native type is TIMESTAMP.
-            if (type == IndexHint.FieldType.TIMESTAMP)
+            if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP)
                 return "TIMESTAMP(3)";
-            return super.sqlTypeFor(type);
+            return super.sqlTypeFor(hint);
         }
 
         @Override

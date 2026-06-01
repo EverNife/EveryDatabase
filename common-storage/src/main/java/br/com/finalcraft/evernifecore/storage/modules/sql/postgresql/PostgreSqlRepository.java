@@ -6,6 +6,9 @@ import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.util.List;
 
 /**
@@ -14,10 +17,13 @@ import java.util.List;
  * <p>Differences from the MySQL default:
  * <ul>
  *   <li>Identifier quoting uses double-quote ({@code "name"}) instead of backtick.</li>
- *   <li>Data column uses {@code TEXT} instead of {@code MEDIUMTEXT}.</li>
+ *   <li>Data column uses {@code JSON} (plain text JSON, not JSONB).</li>
+ *   <li>{@link #setDataParam} uses {@code setObject(..., Types.OTHER)} because PostgreSQL
+ *       rejects binding a JSON column with {@code setString}.</li>
  *   <li>Upsert uses {@code INSERT ... ON CONFLICT (...) DO UPDATE SET} instead of
  *       {@code ON DUPLICATE KEY UPDATE}.</li>
  *   <li>{@code DOUBLE PRECISION} for double columns (PostgreSQL rejects {@code DOUBLE} alone).</li>
+ *   <li>{@code TIMESTAMPTZ} for timestamp columns.</li>
  * </ul>
  *
  * @param <K> the key type
@@ -37,16 +43,32 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
 
     @Override
     protected String dataColumnType() {
-        return "TEXT";
+        return "JSON";
+    }
+
+    /**
+     * PostgreSQL's type system rejects binding a {@code JSON} column via {@code setString}.
+     * Using {@code setObject(slot, json, Types.OTHER)} lets the driver pass the value through
+     * as-is, and PostgreSQL casts it to JSON on the server side.
+     */
+    @Override
+    protected void setDataParam(PreparedStatement ps, int slot, String json) throws SQLException {
+        ps.setObject(slot, json, Types.OTHER);
+    }
+
+    /** PostgreSQL indexes {@code TEXT} columns without any prefix length. */
+    @Override
+    protected String indexLengthFor(IndexHint hint) {
+        return "";
     }
 
     @Override
-    protected String sqlTypeFor(IndexHint.FieldType type) {
+    protected String sqlTypeFor(IndexHint hint) {
         // PostgreSQL rejects bare DOUBLE; use the SQL-standard keyword.
-        if (type == IndexHint.FieldType.DOUBLE)    return "DOUBLE PRECISION";
+        if (hint.fieldType() == IndexHint.FieldType.DOUBLE)    return "DOUBLE PRECISION";
         // PostgreSQL native timestamp with timezone (8 bytes, UTC-normalised).
-        if (type == IndexHint.FieldType.TIMESTAMP) return "TIMESTAMPTZ";
-        return super.sqlTypeFor(type);
+        if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) return "TIMESTAMPTZ";
+        return super.sqlTypeFor(hint);
     }
 
     @Override

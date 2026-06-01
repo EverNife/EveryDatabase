@@ -1,5 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql;
 
+import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
 import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
@@ -57,8 +58,9 @@ import java.util.stream.Stream;
  */
 public class SqlRepository<K, V> implements Repository<K, V> {
 
-    protected static final String COL_KEY  = "storage_key";
-    protected static final String COL_DATA = "storage_data";
+    protected static final String COL_KEY     = "storage_key";
+    protected static final String COL_DATA    = "storage_data";
+    protected static final String COL_VERSION = "lock_version";
 
     protected final EntityDescriptor<K, V> descriptor;
     protected final DataSource dataSource;
@@ -92,22 +94,62 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         return "`" + identifier + "`";
     }
 
-    /** SQL column type for the storage_data column. Default: {@code MEDIUMTEXT} (MySQL). */
+    /** SQL column type for the storage_data column. Default: {@code JSON} (MySQL/MariaDB). */
     protected String dataColumnType() {
-        return "MEDIUMTEXT";
+        return "JSON";
     }
 
-    /** Maps an {@link IndexHint.FieldType} to a SQL column type. Default: portable choices. */
-    protected String sqlTypeFor(IndexHint.FieldType type) {
-        switch (type) {
-            case STRING:    return "VARCHAR(255)";
+    /**
+     * Maps an {@link IndexHint} to a SQL column type for the backing index column.
+     * Default: portable choices for MySQL/MariaDB.
+     */
+    protected String sqlTypeFor(IndexHint hint) {
+        switch (hint.fieldType()) {
+            case STRING:    return "TEXT";
             case INT:       return "INT";
             case LONG:      return "BIGINT";
             case DOUBLE:    return "DOUBLE";
             case BOOLEAN:   return "BOOLEAN";
             case TIMESTAMP: return "DATETIME(3)";   // MySQL/MariaDB native; override in dialects
-            default: throw new IllegalArgumentException("Unknown FieldType: " + type);
+            default: throw new IllegalArgumentException("Unknown FieldType: " + hint.fieldType());
         }
+    }
+
+    /**
+     * Returns the index key length suffix (e.g. {@code "(191)"}) to append to the column name
+     * inside a {@code CREATE INDEX} statement for the given hint.
+     *
+     * <p>MySQL/MariaDB cannot index {@code TEXT} columns without declaring an explicit prefix
+     * length. The default prefix for STRING hints is {@code 191} characters, derived from the
+     * InnoDB legacy index key size limit:
+     * <ul>
+     *   <li>InnoDB legacy limit (Compact/Redundant row format): <b>767 bytes</b></li>
+     *   <li>utf8mb4 encoding: up to <b>4 bytes per character</b></li>
+     *   <li>191 × 4 = 764 bytes — the largest multiple of 4 that fits under 767</li>
+     * </ul>
+     * This value is conservative and works on all MySQL/MariaDB versions. Servers using
+     * {@code ROW_FORMAT=DYNAMIC} (the default since MySQL 5.7.7 / MariaDB 10.2) have a
+     * 3072-byte limit, which would allow up to 768 chars — but 191 is always safe.
+     *
+     * <p>All other field types (INT, BIGINT, DOUBLE, BOOLEAN, DATETIME) use fixed-size
+     * column types and need no prefix.
+     *
+     * <p>Override and return {@code ""} for dialects that support indexing {@code TEXT} directly
+     * without a prefix (PostgreSQL, H2).
+     */
+    protected String indexLengthFor(IndexHint hint) {
+        return hint.fieldType() == IndexHint.FieldType.STRING ? "(191)" : "";
+    }
+
+    /**
+     * Binds the JSON string for the {@link #COL_DATA} column to the prepared statement.
+     *
+     * <p>Default: {@code setString} (works for MySQL/MariaDB {@code JSON} columns).
+     * Override for PostgreSQL, which requires {@code setObject(slot, json, Types.OTHER)}
+     * to satisfy its type system.
+     */
+    protected void setDataParam(PreparedStatement ps, int slot, String json) throws SQLException {
+        ps.setString(slot, json);
     }
 
     /**
@@ -150,8 +192,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         sql.append(q(tableName())).append(" (");
         sql.append(q(COL_KEY)).append(" VARCHAR(255) NOT NULL, ");
         sql.append(q(COL_DATA)).append(' ').append(dataColumnType()).append(" NOT NULL, ");
+        // Extra column for versioned descriptors only - non-versioned tables keep the 2-column schema.
+        if (descriptor.isVersioned()) {
+            sql.append(q(COL_VERSION)).append(" BIGINT NOT NULL DEFAULT 0, ");
+        }
         for (IndexHint hint : indexes) {
-            sql.append(q(hint.indexColumnName())).append(' ').append(sqlTypeFor(hint.fieldType())).append(", ");
+            sql.append(q(hint.indexColumnName())).append(' ').append(sqlTypeFor(hint)).append(", ");
         }
         sql.append("PRIMARY KEY (").append(q(COL_KEY)).append("))");
 
@@ -181,7 +227,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("ALTER TABLE " + q(tableName())
                 + " ADD COLUMN " + q(hint.indexColumnName())
-                + " " + sqlTypeFor(hint.fieldType()));
+                + " " + sqlTypeFor(hint));
         }
     }
 
@@ -214,7 +260,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         String name = "idx_" + tableName() + "_" + hint.fieldPath().replace('.', '_');
         String sql = "CREATE " + (hint.unique() ? "UNIQUE " : "") + "INDEX IF NOT EXISTS "
             + q(name) + " ON " + q(tableName())
-            + " (" + q(hint.indexColumnName())
+            + " (" + q(hint.indexColumnName()) + indexLengthFor(hint)
             + (hint.order() == IndexHint.Order.DESCENDING ? " DESC" : "") + ")";
         try (Statement stmt = conn.createStatement()) {
             stmt.execute(sql);
@@ -228,6 +274,18 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     // ------------------------------------------------------------------
     //  Upsert dialect - override for non-MySQL databases
     // ------------------------------------------------------------------
+
+    /**
+     * Returns {@code true} when this SQL dialect supports optimistic locking.
+     * Override and return {@code false} for embedded/single-process dialects (e.g. H2)
+     * where concurrent multi-process writes cannot occur and the extra SELECT+conditional
+     * UPDATE overhead brings no benefit.
+     * When {@code false}, save() falls through to the plain upsert path regardless of
+     * whether the descriptor declares versioning.
+     */
+    protected boolean supportsVersioning() {
+        return true;
+    }
 
     /**
      * Builds the upsert SQL for this dialect.
@@ -257,11 +315,16 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         return sb.toString();
     }
 
-    /** Ordered column list used in {@code INSERT (col1, col2, ...)} and {@code setX(i, ...)}. */
+    /**
+     * Ordered column list used in {@code INSERT (col1, col2, ...)} and {@code setX(i, ...)}.
+     * For versioned descriptors the list includes {@code lock_version} after {@code storage_data}.
+     * Non-versioned descriptors keep the existing 2-column (+ index columns) schema.
+     */
     protected List<String> allColumnsForWrite() {
-        List<String> cols = new ArrayList<>(2 + indexes.size());
+        List<String> cols = new ArrayList<>(3 + indexes.size());
         cols.add(COL_KEY);
         cols.add(COL_DATA);
+        if (descriptor.isVersioned()) cols.add(COL_VERSION);
         for (IndexHint hint : indexes) cols.add(hint.indexColumnName());
         return cols;
     }
@@ -333,6 +396,9 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
+        if (descriptor.isVersioned() && supportsVersioning()) {
+            return saveVersioned(entity);
+        }
         K key = descriptor.keyExtractor().apply(entity);
         return withConnection(conn -> {
             byte[] data = descriptor.codec().encode(entity);
@@ -344,8 +410,169 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         });
     }
 
+    /**
+     * Versioned save: SELECT current lock_version -> INSERT v=0 or UPDATE WHERE lock_version=expected.
+     * All steps run inside a single transaction so the check-then-act is atomic.
+     *
+     * <p>IMPORTANT: the version is applied to the entity (via the setter) BEFORE encoding, so that
+     * the JSON blob stored in {@code storage_data} always reflects the correct version. On read-back,
+     * {@code find()} decodes the blob which already carries the right version - no extra column read
+     * is needed.
+     */
+    private CompletableFuture<Void> saveVersioned(V entity) {
+        K key = descriptor.keyExtractor().apply(entity);
+        long incomingVersion = descriptor.versionGetter().apply(entity);
+        return withConnection(conn -> {
+            boolean autoCommit = conn.getAutoCommit();
+            if (autoCommit) conn.setAutoCommit(false);
+            try {
+                // 1. Read current version (if any) for this key.
+                Long dbVersion = selectVersion(conn, key);
+
+                if (dbVersion == null) {
+                    // Row is absent: INSERT with lock_version = 0.
+                    // Set the version on the entity first so the JSON blob is correct.
+                    descriptor.versionSetter().accept(entity, 0L);
+                    byte[] data = descriptor.codec().encode(entity);
+                    String dataStr = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+                    insertVersioned(conn, key, dataStr, entity, 0L);
+                } else if (dbVersion == incomingVersion) {
+                    // Versions agree: apply the new version to the entity first, then encode.
+                    long newVersion = incomingVersion + 1;
+                    descriptor.versionSetter().accept(entity, newVersion);
+                    byte[] data = descriptor.codec().encode(entity);
+                    String dataStr = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+                    // Attempt conditional UPDATE (expects old version in WHERE clause).
+                    int rows = updateVersioned(conn, key, dataStr, entity, incomingVersion);
+                    if (rows == 0) {
+                        // Another writer updated between our SELECT and UPDATE; undo setter.
+                        descriptor.versionSetter().accept(entity, incomingVersion);
+                        if (autoCommit) conn.rollback();
+                        throw new OptimisticLockException(
+                            descriptor.type(), key, incomingVersion, dbVersion);
+                    }
+                } else {
+                    // In-memory version differs from DB version before we even try to write.
+                    if (autoCommit) conn.rollback();
+                    throw new OptimisticLockException(
+                        descriptor.type(), key, incomingVersion, dbVersion);
+                }
+
+                if (autoCommit) conn.commit();
+                return null;
+            } catch (OptimisticLockException ole) {
+                if (autoCommit) { try { conn.rollback(); } catch (SQLException ignored) {} }
+                throw ole;
+            } catch (Exception e) {
+                if (autoCommit) { try { conn.rollback(); } catch (SQLException ignored) {} }
+                throw e;
+            } finally {
+                if (autoCommit) conn.setAutoCommit(true);
+            }
+        });
+    }
+
+    /** Reads the {@code lock_version} for {@code key}, or {@code null} if the row is absent. */
+    private Long selectVersion(Connection conn, K key) throws SQLException {
+        String sql = "SELECT " + q(COL_VERSION) + " FROM " + q(tableName())
+            + " WHERE " + q(COL_KEY) + " = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /** Inserts a new versioned row with the given lock_version. */
+    private void insertVersioned(Connection conn, K key, String dataStr,
+                                 V entity, long lockVersion) throws SQLException {
+        // Columns: storage_key, storage_data, lock_version, _idx_* ...
+        int colCount = 3 + indexes.size();
+        StringBuilder sb = new StringBuilder("INSERT INTO ").append(q(tableName())).append(" (");
+        sb.append(q(COL_KEY)).append(", ").append(q(COL_DATA)).append(", ").append(q(COL_VERSION));
+        for (IndexHint hint : indexes) sb.append(", ").append(q(hint.indexColumnName()));
+        sb.append(") VALUES (");
+        for (int i = 0; i < colCount; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append('?');
+        }
+        sb.append(')');
+
+        try (PreparedStatement ps = conn.prepareStatement(sb.toString())) {
+            int slot = 1;
+            ps.setString(slot++, key.toString());
+            setDataParam(ps, slot++, dataStr);
+            ps.setLong(slot++, lockVersion);
+            if (!indexes.isEmpty()) {
+                JsonNode tree = IndexValueExtractor.toTree(entity);
+                for (IndexHint hint : indexes) {
+                    Object value = IndexValueExtractor.extract(tree, hint);
+                    ps.setObject(slot++, toJdbcValue(value, hint));
+                }
+            }
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Issues {@code UPDATE ... SET storage_data=?, lock_version=lock_version+1
+     * WHERE storage_key=? AND lock_version=?} and returns affected row count.
+     */
+    private int updateVersioned(Connection conn, K key, String dataStr,
+                                V entity, long expectedVersion) throws SQLException {
+        StringBuilder sb = new StringBuilder("UPDATE ").append(q(tableName())).append(" SET ");
+        sb.append(q(COL_DATA)).append(" = ?, ");
+        sb.append(q(COL_VERSION)).append(" = ").append(q(COL_VERSION)).append(" + 1");
+
+        // Update _idx_* columns too.
+        if (!indexes.isEmpty()) {
+            for (IndexHint hint : indexes) {
+                sb.append(", ").append(q(hint.indexColumnName())).append(" = ?");
+            }
+        }
+        sb.append(" WHERE ").append(q(COL_KEY)).append(" = ? AND ")
+          .append(q(COL_VERSION)).append(" = ?");
+
+        try (PreparedStatement ps = conn.prepareStatement(sb.toString())) {
+            int slot = 1;
+            setDataParam(ps, slot++, dataStr);
+            if (!indexes.isEmpty()) {
+                JsonNode tree = IndexValueExtractor.toTree(entity);
+                for (IndexHint hint : indexes) {
+                    Object value = IndexValueExtractor.extract(tree, hint);
+                    ps.setObject(slot++, toJdbcValue(value, hint));
+                }
+            }
+            ps.setString(slot++, key.toString());
+            ps.setLong(slot, expectedVersion);
+            return ps.executeUpdate();
+        }
+    }
+
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        if (descriptor.isVersioned() && supportsVersioning()) {
+            // For versioned descriptors: loop save() per entity within a single connection
+            // to ensure each entity's optimistic lock check is atomic.
+            return withConnection(conn -> {
+                boolean autoCommit = conn.getAutoCommit();
+                if (autoCommit) conn.setAutoCommit(false);
+                try {
+                    for (V entity : entities) {
+                        saveVersionedOnConn(conn, entity);
+                    }
+                    if (autoCommit) conn.commit();
+                    return null;
+                } catch (Exception e) {
+                    if (autoCommit) { try { conn.rollback(); } catch (SQLException ignored) {} }
+                    throw e;
+                } finally {
+                    if (autoCommit) conn.setAutoCommit(true);
+                }
+            });
+        }
         return withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(buildUpsertSql())) {
                 for (V entity : entities) {
@@ -360,10 +587,43 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         });
     }
 
+    /**
+     * Performs a versioned save of a single entity on an already-open connection (no own tx mgmt).
+     * Used by {@link #saveAll} for versioned descriptors.
+     *
+     * <p>Version is applied to the entity BEFORE encoding so the stored JSON blob is correct.
+     */
+    private void saveVersionedOnConn(Connection conn, V entity) throws SQLException, CodecException {
+        K key = descriptor.keyExtractor().apply(entity);
+        long incomingVersion = descriptor.versionGetter().apply(entity);
+        Long dbVersion = selectVersion(conn, key);
+
+        if (dbVersion == null) {
+            descriptor.versionSetter().accept(entity, 0L);
+            byte[] data = descriptor.codec().encode(entity);
+            String dataStr = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+            insertVersioned(conn, key, dataStr, entity, 0L);
+        } else if (dbVersion == incomingVersion) {
+            long newVersion = incomingVersion + 1;
+            descriptor.versionSetter().accept(entity, newVersion);
+            byte[] data = descriptor.codec().encode(entity);
+            String dataStr = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+            int rows = updateVersioned(conn, key, dataStr, entity, incomingVersion);
+            if (rows == 0) {
+                descriptor.versionSetter().accept(entity, incomingVersion); // undo
+                throw new OptimisticLockException(
+                    descriptor.type(), key, incomingVersion, dbVersion);
+            }
+        } else {
+            throw new OptimisticLockException(
+                descriptor.type(), key, incomingVersion, dbVersion);
+        }
+    }
+
     /** Binds {@code (storage_key, storage_data, _idx_a, _idx_b, ...)} parameters. */
     private void bindUpsertParameters(PreparedStatement ps, K key, V entity, byte[] data) throws SQLException {
         ps.setString(1, key.toString());
-        ps.setString(2, new String(data, StandardCharsets.UTF_8));
+        setDataParam(ps, 2, new String(data, StandardCharsets.UTF_8));
         if (!indexes.isEmpty()) {
             JsonNode tree = IndexValueExtractor.toTree(entity);
             int slot = 3;

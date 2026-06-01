@@ -48,6 +48,12 @@ public final class InMemoryStorage implements Storage, TransactionalStorage {
     @Override
     @SuppressWarnings("unchecked")
     public <K, V> Repository<K, V> repository(EntityDescriptor<K, V> descriptor) {
+        if (!descriptor.codec().isJsonCodec()) {
+            throw new IllegalArgumentException(
+                "InMemoryStorage requires a JSON codec (e.g. JacksonJsonCodec), but descriptor '"
+                + descriptor.collection() + "' uses '" + descriptor.codec().contentType() + "'. "
+                + "YAML and other non-JSON codecs are only supported by LocalFileStorage.");
+        }
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
             k -> new InMemoryRepository<>(descriptor)

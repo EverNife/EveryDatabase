@@ -177,6 +177,12 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     @Override
     @SuppressWarnings("unchecked")
     public <K, V> Repository<K, V> repository(EntityDescriptor<K, V> descriptor) {
+        if (!descriptor.codec().isJsonCodec()) {
+            throw new IllegalArgumentException(
+                "SqlStorage requires a JSON codec (e.g. JacksonJsonCodec), but descriptor '"
+                + descriptor.collection() + "' uses '" + descriptor.codec().contentType() + "'. "
+                + "YAML and other non-JSON codecs are only supported by LocalFileStorage.");
+        }
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
             k -> {

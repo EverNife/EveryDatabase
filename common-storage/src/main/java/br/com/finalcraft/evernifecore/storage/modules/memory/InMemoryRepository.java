@@ -75,10 +75,10 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
-        K key  = descriptor.keyExtractor().apply(entity);
-        V copy = deepCopy(entity); // defensive copy: isolates stored state from caller mutations
+        K key = descriptor.keyExtractor().apply(entity);
         synchronized (this) {
-            V existing = store.get(key); // capture BEFORE put - avoids same-reference aliasing
+            V copy = deepCopy(entity);
+            V existing = store.get(key);
             store.put(key, copy);
             if (existing != null) removeFromIndexes(key, existing);
             addToIndexes(key, copy);
@@ -90,7 +90,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         synchronized (this) {
             for (V entity : entities) {
-                K key  = descriptor.keyExtractor().apply(entity);
+                K key = descriptor.keyExtractor().apply(entity);
                 V copy = deepCopy(entity);
                 V existing = store.get(key);
                 store.put(key, copy);

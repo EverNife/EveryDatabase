@@ -49,7 +49,7 @@ public final class IndexHint {
      * backing index column and how the value is parsed/compared.
      */
     public enum FieldType {
-        /** Java {@code String} → SQL {@code VARCHAR(255)}. */
+        /** Java {@code String} → SQL {@code TEXT}. */
         STRING,
         /** Java {@code int}/{@code Integer} → SQL {@code INT}. */
         INT,

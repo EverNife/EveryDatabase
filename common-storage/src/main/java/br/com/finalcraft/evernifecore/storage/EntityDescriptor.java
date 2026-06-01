@@ -2,8 +2,11 @@ package br.com.finalcraft.evernifecore.storage;
 
 import br.com.finalcraft.evernifecore.storage.codec.Codec;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
+import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
+import br.com.finalcraft.evernifecore.storage.versioned.Versioned;
 
 import java.util.*;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -59,26 +62,53 @@ public final class EntityDescriptor<K, V> {
     private final Function<V, K> keyExtractor;
     private final Codec<V> codec;
     private final List<IndexHint> indexes;
+    /** Nullable. When non-null (together with {@link #versionSetter}), optimistic locking is active. */
+    private final Function<V, Long> versionGetter;
+    /** Nullable. When non-null (together with {@link #versionGetter}), optimistic locking is active. */
+    private final BiConsumer<V, Long> versionSetter;
 
     private EntityDescriptor(Builder<K, V> b) {
-        this.collection   = b.collection;
-        this.type         = b.type;
-        this.keyType      = b.keyType;
-        this.keyExtractor = b.keyExtractor;
-        this.codec        = b.codec;
-        this.indexes      = Collections.unmodifiableList(new ArrayList<>(b.indexes));
+        this.collection     = b.collection;
+        this.type           = b.type;
+        this.keyType        = b.keyType;
+        this.keyExtractor   = b.keyExtractor;
+        this.codec          = b.codec;
+        this.indexes        = Collections.unmodifiableList(new ArrayList<>(b.indexes));
+        this.versionGetter  = b.versionGetter;
+        this.versionSetter  = b.versionSetter;
     }
 
-    public String collection()          { return collection; }
-    public Class<V> type()              { return type; }
-    public Class<K> keyType()           { return keyType; }
-    public Function<V, K> keyExtractor(){ return keyExtractor; }
-    public Codec<V> codec()             { return codec; }
-    public List<IndexHint> indexes()    { return indexes; }
+    public String collection()                 { return collection; }
+    public Class<V> type()                     { return type; }
+    public Class<K> keyType()                  { return keyType; }
+    public Function<V, K> keyExtractor()       { return keyExtractor; }
+    public Codec<V> codec()                    { return codec; }
+    public List<IndexHint> indexes()           { return indexes; }
+
+    /**
+     * Returns the version-getter function, or {@code null} if this descriptor is not versioned.
+     * Use {@link #isVersioned()} to check before calling.
+     */
+    public Function<V, Long> versionGetter()   { return versionGetter; }
+
+    /**
+     * Returns the version-setter consumer, or {@code null} if this descriptor is not versioned.
+     * Use {@link #isVersioned()} to check before calling.
+     */
+    public BiConsumer<V, Long> versionSetter() { return versionSetter; }
+
+    /**
+     * Returns {@code true} when optimistic locking is active for this descriptor, i.e. both
+     * {@link #versionGetter()} and {@link #versionSetter()} are non-null.
+     * Descriptors without a {@code .version(...)} call on the builder always return {@code false},
+     * and their repositories use plain upsert semantics unchanged from before.
+     */
+    public boolean isVersioned() { return versionGetter != null && versionSetter != null; }
 
     @Override
     public String toString() {
-        return "EntityDescriptor{collection='" + collection + "', type=" + type.getSimpleName() + "}";
+        return "EntityDescriptor{collection='" + collection + "', type=" + type.getSimpleName()
+            + (isVersioned() ? ", versioned=true" : "") + "}";
     }
 
     // ------------------------------------------------------------------
@@ -97,6 +127,8 @@ public final class EntityDescriptor<K, V> {
         private Function<V, K> keyExtractor;
         private Codec<V> codec;
         private final List<IndexHint> indexes = new ArrayList<>();
+        private Function<V, Long>    versionGetter;
+        private BiConsumer<V, Long>  versionSetter;
 
         private Builder(Class<K> keyType, Class<V> type) {
             this.keyType = keyType;
@@ -120,6 +152,55 @@ public final class EntityDescriptor<K, V> {
 
         public Builder<K, V> index(IndexHint hint) {
             this.indexes.add(hint);
+            return this;
+        }
+
+        /**
+         * Activates optimistic locking for this descriptor.
+         *
+         * <p>The {@code getter} is called before every save to read the entity's current
+         * version. The {@code setter} is called after a successful insert or update so that
+         * the in-memory entity reflects the version now held by the backend.
+         *
+         * <p>Backends that see this descriptor will:
+         * <ul>
+         *   <li>Add a {@code lock_version} column / field to storage (SQL: only for new tables,
+         *       existing tables need a migration).</li>
+         *   <li>On INSERT: store version 0 and call {@code setter(entity, 0)}.</li>
+         *   <li>On UPDATE: only update if stored version matches {@code getter(entity)};
+         *       on success call {@code setter(entity, storedVersion + 1)};
+         *       on mismatch throw {@link OptimisticLockException}.</li>
+         * </ul>
+         *
+         * <p>Descriptors without a {@code .version(...)} call keep the current plain upsert
+         * behaviour - this method is entirely opt-in.
+         *
+         * @param getter extracts the current lock version from an entity
+         * @param setter sets the lock version on an entity after a successful save
+         * @return this builder
+         */
+        public Builder<K, V> version(Function<V, Long> getter, BiConsumer<V, Long> setter) {
+            this.versionGetter = getter;
+            this.versionSetter = setter;
+            return this;
+        }
+
+        /**
+         * Convenience overload that wires the {@link Versioned} interface methods as the
+         * version accessors. Equivalent to:
+         * <pre>
+         * .version(v -> ((Versioned) v).getLockVersion(),
+         *          (v, ver) -> ((Versioned) v).setLockVersion(ver))
+         * </pre>
+         *
+         * <p>The descriptor's entity type {@code V} must implement {@link Versioned} at
+         * runtime; a {@link ClassCastException} will be thrown by the lambdas otherwise.
+         *
+         * @return this builder
+         */
+        public Builder<K, V> versioned() {
+            this.versionGetter = v -> ((Versioned) v).getLockVersion();
+            this.versionSetter = (v, ver) -> ((Versioned) v).setLockVersion(ver);
             return this;
         }
 
