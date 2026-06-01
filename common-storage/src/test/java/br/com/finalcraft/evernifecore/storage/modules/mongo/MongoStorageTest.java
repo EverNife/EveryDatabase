@@ -44,13 +44,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * MONGO_USER  - default: root
  * MONGO_PASS  - default: root
  * MONGO_HOST  - default: localhost
- * MONGO_PORT  - default: 27017
+ * MONGO_PORT  - default: 39308
  * MONGO_URL   - overrides all of the above (e.g. mongodb://user:pass@host:port)
  * </pre>
  *
  * <pre>
  * # Start MongoDB locally with auth (matches the defaults above):
- * docker run -d -p 27017:27017 -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=root mongo:7
+ * docker run -d -p 39308:27017 -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=root mongo:7
  *
  * # Then run:
  * ./gradlew :common-tests:test --tests "*MongoStorageTest"
@@ -79,7 +79,7 @@ class MongoStorageTest extends AbstractStorageTest {
     static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "root");
     static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "root");
     static final String MONGO_HOST = DotEnvTestUtil.getOrDefault("MONGO_HOST", "localhost");
-    static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "27017");
+    static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "39308");
     static final String MONGO_URL  = "mongodb://" + MONGO_USER + ":" + MONGO_PASS + "@" + MONGO_HOST + ":" + MONGO_PORT;
 
     /**

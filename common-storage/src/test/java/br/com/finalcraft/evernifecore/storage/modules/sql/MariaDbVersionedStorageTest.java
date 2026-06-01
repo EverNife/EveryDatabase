@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <h3>Configuration</h3>
  * Same env vars as {@link MariaDbStorageTest}:
  * {@code MARIADB_USER}, {@code MARIADB_PASS}, {@code MARIADB_HOST}, {@code MARIADB_PORT},
- * {@code MARIADB_URL}. Defaults: {@code root/root @ localhost:3306}.
+ * {@code MARIADB_URL}. Defaults: {@code root/root @ localhost:39306}.
  *
  * <pre>
  * docker compose up -d mariadb
@@ -40,7 +40,7 @@ class MariaDbVersionedStorageTest extends AbstractVersionedStorageTest {
     static final String MARIADB_USER = DotEnvTestUtil.getOrDefault("MARIADB_USER", "root");
     static final String MARIADB_PASS = DotEnvTestUtil.getOrDefault("MARIADB_PASS", "root");
     static final String MARIADB_HOST = DotEnvTestUtil.getOrDefault("MARIADB_HOST", "localhost");
-    static final String MARIADB_PORT = DotEnvTestUtil.getOrDefault("MARIADB_PORT", "3306");
+    static final String MARIADB_PORT = DotEnvTestUtil.getOrDefault("MARIADB_PORT", "39306");
 
     static final String MARIADB_SERVER_URL = DotEnvTestUtil.getOrDefault(
         "MARIADB_URL",

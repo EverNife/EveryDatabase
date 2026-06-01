@@ -53,7 +53,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * MARIADB_USER  - default: root
  * MARIADB_PASS  - default: root
  * MARIADB_HOST  - default: localhost
- * MARIADB_PORT  - default: 3306
+ * MARIADB_PORT  - default: 39306
  * MARIADB_URL   - overrides host+port construction (e.g. jdbc:mysql://host:port).
  *                 Must NOT include a database name; the suite creates one per test.
  * </pre>
@@ -82,7 +82,7 @@ class MariaDbStorageTest extends AbstractStorageTest {
     static final String MARIADB_USER = DotEnvTestUtil.getOrDefault("MARIADB_USER", "root");
     static final String MARIADB_PASS = DotEnvTestUtil.getOrDefault("MARIADB_PASS", "root");
     static final String MARIADB_HOST = DotEnvTestUtil.getOrDefault("MARIADB_HOST", "localhost");
-    static final String MARIADB_PORT = DotEnvTestUtil.getOrDefault("MARIADB_PORT", "3306");
+    static final String MARIADB_PORT = DotEnvTestUtil.getOrDefault("MARIADB_PORT", "39306");
 
     /**
      * Server URL WITHOUT a database component. Used both as a probe target and as the

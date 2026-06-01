@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <h3>Configuration</h3>
  * Same env vars as {@link MongoStorageTest}:
  * {@code MONGO_USER}, {@code MONGO_PASS}, {@code MONGO_HOST}, {@code MONGO_PORT}.
- * Defaults: {@code root/root @ localhost:27017}.
+ * Defaults: {@code root/root @ localhost:39308}.
  *
  * <pre>
  * docker compose up -d mongo
@@ -43,7 +43,7 @@ class MongoVersionedStorageTest extends AbstractVersionedStorageTest {
     static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "root");
     static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "root");
     static final String MONGO_HOST = DotEnvTestUtil.getOrDefault("MONGO_HOST", "localhost");
-    static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "27017");
+    static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "39308");
     static final String MONGO_URL  = "mongodb://" + MONGO_USER + ":" + MONGO_PASS
                                    + "@" + MONGO_HOST + ":" + MONGO_PORT;
 

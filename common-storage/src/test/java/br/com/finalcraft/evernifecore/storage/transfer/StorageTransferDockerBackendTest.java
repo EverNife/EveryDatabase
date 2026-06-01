@@ -128,21 +128,21 @@ class StorageTransferDockerBackendTest {
     static final String MARIADB_USER   = DotEnvTestUtil.getOrDefault("MARIADB_USER", "root");
     static final String MARIADB_PASS   = DotEnvTestUtil.getOrDefault("MARIADB_PASS", "root");
     static final String MARIADB_HOST   = DotEnvTestUtil.getOrDefault("MARIADB_HOST", "localhost");
-    static final String MARIADB_PORT   = DotEnvTestUtil.getOrDefault("MARIADB_PORT", "3306");
+    static final String MARIADB_PORT   = DotEnvTestUtil.getOrDefault("MARIADB_PORT", "39306");
     static final String MARIADB_SERVER = DotEnvTestUtil.getOrDefault("MARIADB_URL",
         "jdbc:mysql://" + MARIADB_HOST + ":" + MARIADB_PORT);
 
     static final String PG_USER   = DotEnvTestUtil.getOrDefault("POSTGRES_USER", "root");
     static final String PG_PASS   = DotEnvTestUtil.getOrDefault("POSTGRES_PASS", "root");
     static final String PG_HOST   = DotEnvTestUtil.getOrDefault("POSTGRES_HOST", "localhost");
-    static final String PG_PORT   = DotEnvTestUtil.getOrDefault("POSTGRES_PORT", "5432");
+    static final String PG_PORT   = DotEnvTestUtil.getOrDefault("POSTGRES_PORT", "39307");
     static final String PG_SERVER = DotEnvTestUtil.getOrDefault("POSTGRES_URL",
         "jdbc:postgresql://" + PG_HOST + ":" + PG_PORT);
 
     static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "root");
     static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "root");
     static final String MONGO_HOST = DotEnvTestUtil.getOrDefault("MONGO_HOST", "localhost");
-    static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "27017");
+    static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "39308");
     static final String MONGO_URL  = DotEnvTestUtil.getOrDefault("MONGO_URL",
         "mongodb://" + MONGO_USER + ":" + MONGO_PASS + "@" + MONGO_HOST + ":" + MONGO_PORT);
 

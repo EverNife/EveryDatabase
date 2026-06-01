@@ -45,17 +45,17 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <h3>Configuration - via env var or {@code -Dkey=value} (see {@link DotEnvTestUtil})</h3>
  * <pre>
- * POSTGRES_USER  - default: postgres
- * POSTGRES_PASS  - default: postgres
+ * POSTGRES_USER  - default: root
+ * POSTGRES_PASS  - default: root
  * POSTGRES_HOST  - default: localhost
- * POSTGRES_PORT  - default: 5432
+ * POSTGRES_PORT  - default: 39307
  * POSTGRES_URL   - overrides host+port construction (e.g. jdbc:postgresql://host:port).
  *                  Must NOT include a database name; the suite creates one per test.
  * </pre>
  *
  * <pre>
  * # Start PostgreSQL locally with auth (matches the defaults above):
- * docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+ * docker run -d -p 39307:5432 -e POSTGRES_USER=root -e POSTGRES_PASSWORD=root postgres:16
  *
  * # Then run:
  * ./gradlew :common-tests:test --tests "*PostgreSqlStorageTest"
@@ -78,7 +78,7 @@ class PostgreSqlStorageTest extends AbstractStorageTest {
     static final String PG_USER = DotEnvTestUtil.getOrDefault("POSTGRES_USER", "root");
     static final String PG_PASS = DotEnvTestUtil.getOrDefault("POSTGRES_PASS", "root");
     static final String PG_HOST = DotEnvTestUtil.getOrDefault("POSTGRES_HOST", "localhost");
-    static final String PG_PORT = DotEnvTestUtil.getOrDefault("POSTGRES_PORT", "5432");
+    static final String PG_PORT = DotEnvTestUtil.getOrDefault("POSTGRES_PORT", "39307");
 
     /**
      * Server URL WITHOUT a database name. Used as a base for all connections; PostgreSQL

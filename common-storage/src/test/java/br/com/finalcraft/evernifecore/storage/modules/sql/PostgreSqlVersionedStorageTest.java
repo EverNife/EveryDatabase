@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <h3>Configuration</h3>
  * {@code POSTGRES_USER}, {@code POSTGRES_PASS}, {@code POSTGRES_HOST}, {@code POSTGRES_PORT},
- * {@code POSTGRES_URL}. Defaults: {@code root/root @ localhost:5432}.
+ * {@code POSTGRES_URL}. Defaults: {@code root/root @ localhost:39307}.
  *
  * <pre>
  * docker compose up -d postgres
@@ -39,7 +39,7 @@ class PostgreSqlVersionedStorageTest extends AbstractVersionedStorageTest {
     static final String POSTGRES_USER = DotEnvTestUtil.getOrDefault("POSTGRES_USER", "root");
     static final String POSTGRES_PASS = DotEnvTestUtil.getOrDefault("POSTGRES_PASS", "root");
     static final String POSTGRES_HOST = DotEnvTestUtil.getOrDefault("POSTGRES_HOST", "localhost");
-    static final String POSTGRES_PORT = DotEnvTestUtil.getOrDefault("POSTGRES_PORT", "5432");
+    static final String POSTGRES_PORT = DotEnvTestUtil.getOrDefault("POSTGRES_PORT", "39307");
 
     static final String POSTGRES_SERVER_URL = DotEnvTestUtil.getOrDefault(
         "POSTGRES_URL",

@@ -34,9 +34,11 @@
 # ----------------------------------------------------------------------
 #  Ports exposed on the host
 # ----------------------------------------------------------------------
-#   MongoDB     -> 27017
-#   MariaDB     -> 3306     (wire-compatible with MySQL)
-#   PostgreSQL  -> 5432
+#  Arbitrary, sequential, high ports chosen to avoid clashing with other
+#  database containers that may already use the default ports on the host.
+#   MariaDB     -> 39306    (container 3306, wire-compatible with MySQL)
+#   PostgreSQL  -> 39307    (container 5432)
+#   MongoDB     -> 39308    (container 27017)
 #
 # ----------------------------------------------------------------------
 #  Credentials
@@ -62,9 +64,10 @@ services:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: root
     ports:
-      - "27017:27017"
+      - "39308:27017"
     volumes:
       - mongo_data:/data/db
+      - mongo_configdb:/data/configdb
     networks:
       - evernifecore-test
     healthcheck:
@@ -90,7 +93,7 @@ services:
     environment:
       MARIADB_ROOT_PASSWORD: root
     ports:
-      - "3306:3306"
+      - "39306:3306"
     volumes:
       - mariadb_data:/var/lib/mysql
     networks:
@@ -113,7 +116,7 @@ services:
       POSTGRES_USER: root
       POSTGRES_PASSWORD: root
     ports:
-      - "5432:5432"
+      - "39307:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -131,6 +134,8 @@ services:
 volumes:
   mongo_data:
     name: evernifecore-mongo-data
+  mongo_configdb:
+    name: evernifecore-mongo-configdb
   mariadb_data:
     name: evernifecore-mariadb-data
   postgres_data:
