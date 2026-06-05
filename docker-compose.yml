@@ -3,7 +3,7 @@
 # ======================================================================
 #
 # Starts the 3 database servers used by the integration tests in the
-# :common-tests module. Credentials and ports match the defaults in
+# :common-storage module. Credentials and ports match the defaults in
 # DotEnvTestUtil for each *StorageTest - if you don't set any env vars,
 # the tests will connect automatically to these containers.
 #
