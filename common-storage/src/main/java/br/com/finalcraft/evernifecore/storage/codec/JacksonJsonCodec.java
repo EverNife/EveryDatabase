@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 
 /**
- * {@link Codec} implementation that serializes entities to/from JSON using Jackson 3.x.
+ * {@link Codec} implementation that serializes entities to/from JSON using Jackson.
  *
  * <p>Usage:
  * <pre>{@code

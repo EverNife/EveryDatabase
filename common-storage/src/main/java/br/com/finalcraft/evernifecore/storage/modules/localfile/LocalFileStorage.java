@@ -167,9 +167,9 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     /**
      * Applies all pending migrations in version order.
      *
-     * <p>Runs synchronously on the calling thread so that migrations can freely
-     * dispatch I/O to {@link FCScheduler} without risk of thread starvation.
-     * The returned {@link CompletableFuture} is always already completed when returned.
+     * <p>Runs synchronously on the calling thread: each migration executes in order and the
+     * returned {@link CompletableFuture} is always already completed (normally or exceptionally)
+     * when returned.
      */
     @Override
     public CompletableFuture<Void> migrate() {

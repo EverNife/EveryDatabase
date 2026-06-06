@@ -20,8 +20,8 @@ import java.util.UUID;
  *   <li>{@link Badge}    - stored as a {@code List} with no index (tests serialization only)</li>
  * </ul>
  *
- * <p>{@link TestPlayer} remains unchanged with its manually declared {@link IndexHint}s
- * so that the 230+ existing storage tests are completely unaffected.
+ * <p>Separate from {@link TestPlayer} (which declares its {@link IndexHint}s manually):
+ * this entity exists only to exercise annotation-driven index discovery.
  */
 @Data
 @NoArgsConstructor

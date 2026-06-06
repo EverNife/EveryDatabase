@@ -58,7 +58,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * docker run -d -p 39307:5432 -e POSTGRES_USER=root -e POSTGRES_PASSWORD=root postgres:16
  *
  * # Then run:
- * ./gradlew :common-tests:test --tests "*PostgreSqlStorageTest"
+ * ./gradlew :common-storage:test --tests "*PostgreSqlStorageTest"
  * </pre>
  *
  * <h3>Isolation</h3>
@@ -468,7 +468,7 @@ class PostgreSqlStorageTest extends AbstractStorageTest {
             .keyExtractor(TestPlayer::getUuid)
             .codec(new JacksonJsonCodec<>(TestPlayer.class))
             .index(IndexHint.string("name"))
-            .index(IndexHint.integer("score"))   // new!
+            .index(IndexHint.integer("score"))   // added vs. the V1 descriptor above
             .build();
 
         // Open a NEW storage on the SAME database with V2.

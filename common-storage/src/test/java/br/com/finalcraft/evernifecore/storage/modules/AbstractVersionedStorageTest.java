@@ -32,9 +32,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * Running the suite against multiple backends (MariaDB, PostgreSQL, MongoDB) ensures
  * both features work correctly across the full range of supported databases.
  *
- * <p>{@link VersionedTestPlayer} and {@link AnnotatedTestPlayer} are kept separate from
- * {@link br.com.finalcraft.evernifecore.storage.data.TestPlayer} so the 230+ non-versioned
- * tests are completely unaffected.
+ * <p>{@link VersionedTestPlayer} and {@link AnnotatedTestPlayer} are separate fixtures from
+ * {@link br.com.finalcraft.evernifecore.storage.data.TestPlayer}, each exercising one feature
+ * area in isolation.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public abstract class AbstractVersionedStorageTest {

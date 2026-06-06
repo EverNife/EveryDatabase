@@ -16,8 +16,8 @@ import java.util.UUID;
  * {@link br.com.finalcraft.evernifecore.storage.EntityDescriptor.Builder#versioned()} can wire
  * the accessors automatically.
  *
- * <p>Kept separate from {@link TestPlayer} so that the 230+ existing tests that use
- * {@code TestPlayer} are completely unaffected.
+ * <p>Kept separate from {@link TestPlayer} so the optimistic-locking fixtures do not
+ * interfere with the plain (non-versioned) CRUD tests that use {@code TestPlayer}.
  */
 @Data
 @NoArgsConstructor

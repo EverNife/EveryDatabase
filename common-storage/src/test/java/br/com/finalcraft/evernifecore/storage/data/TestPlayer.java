@@ -10,7 +10,7 @@ import java.util.UUID;
 /**
  * Simple test entity used across all storage tests.
  *
- * <p>Must have a no-arg constructor and getters/setters so Jackson 3.x
+ * <p>Must have a no-arg constructor and getters/setters so Jackson
  * can serialise and deserialise it without annotations.
  *
  * <p>{@code randomUuid} is intentionally excluded from {@code equals}/{@code hashCode}

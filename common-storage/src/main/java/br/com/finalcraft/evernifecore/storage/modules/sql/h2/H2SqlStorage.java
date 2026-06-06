@@ -16,7 +16,7 @@ import java.util.List;
  *
  * <ul>
  *   <li><b>In-memory</b> - {@code jdbc:h2:mem:mydb;DATABASE_TO_UPPER=FALSE}</li>
- *   <li><b>Embedded file</b> - {@code jdbc:h2:file:./plugins/EverNifeCore/data/storage}</li>
+ *   <li><b>Embedded file</b> - {@code jdbc:h2:file:./data/storage}</li>
  *   <li><b>Server / TCP</b> - {@code jdbc:h2:tcp://localhost:9092/./data/storage}</li>
  * </ul>
  *

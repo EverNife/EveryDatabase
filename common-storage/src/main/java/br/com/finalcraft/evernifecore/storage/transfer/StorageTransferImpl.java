@@ -191,7 +191,7 @@ final class StorageTransferImpl implements StorageTransfer {
             return errorPolicy == ErrorPolicy.FAIL_FAST;
         }
 
-        // Read all entities from source (materialised - see storage-migration.md §16 decision)
+        // Read all entities from source into memory (materialised, not streamed, so batching is simple)
         List<V> all = sourceRepo.all().join().collect(Collectors.toList());
 
         boolean aborted = false;

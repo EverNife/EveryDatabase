@@ -51,7 +51,7 @@ import java.util.stream.Stream;
  * repository operation executes <em>synchronously on the calling thread</em> using the shared
  * transaction connection, so the ThreadLocal is visible throughout the entire work chain
  * and proper COMMIT / ROLLBACK is guaranteed. Outside a transaction, operations are
- * dispatched asynchronously to {@link FCScheduler}.
+ * dispatched asynchronously via {@link StorageExecutors}.
  *
  * @param <K> the key type
  * @param <V> the entity type

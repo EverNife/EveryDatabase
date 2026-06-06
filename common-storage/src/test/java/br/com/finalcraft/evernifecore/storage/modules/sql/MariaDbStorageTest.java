@@ -63,7 +63,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * docker compose up -d mariadb
  *
  * # Then run:
- * ./gradlew :common-tests:test --tests "*MariaDbStorageTest"
+ * ./gradlew :common-storage:test --tests "*MariaDbStorageTest"
  * </pre>
  *
  * <h3>Isolation</h3>
@@ -472,7 +472,7 @@ class MariaDbStorageTest extends AbstractStorageTest {
             .keyExtractor(TestPlayer::getUuid)
             .codec(new JacksonJsonCodec<>(TestPlayer.class))
             .index(IndexHint.string("name"))
-            .index(IndexHint.integer("score"))   // new!
+            .index(IndexHint.integer("score"))   // added vs. the V1 descriptor above
             .build();
 
         // Open a NEW storage on the SAME database with V2.

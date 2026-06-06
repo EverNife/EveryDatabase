@@ -16,7 +16,7 @@ import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
  * the backend throws {@link OptimisticLockException}.
  *
  * <p>Entities that do not implement this interface (or whose descriptor does not declare version
- * accessors) continue to use plain upsert semantics - existing behaviour is completely unchanged.
+ * accessors) use plain upsert semantics; optimistic locking is entirely opt-in.
  */
 public interface Versioned {
 

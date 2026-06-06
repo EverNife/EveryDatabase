@@ -47,7 +47,6 @@ public class OptimisticLockException extends RuntimeException {
         return entityType;
     }
 
-    /** The entity's key value. */
     public Object getKey() {
         return key;
     }

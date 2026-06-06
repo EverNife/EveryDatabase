@@ -101,7 +101,7 @@ public final class EntityDescriptor<K, V> {
      * Returns {@code true} when optimistic locking is active for this descriptor, i.e. both
      * {@link #versionGetter()} and {@link #versionSetter()} are non-null.
      * Descriptors without a {@code .version(...)} call on the builder always return {@code false},
-     * and their repositories use plain upsert semantics unchanged from before.
+     * and their repositories use plain upsert semantics (optimistic locking is opt-in).
      */
     public boolean isVersioned() { return versionGetter != null && versionSetter != null; }
 

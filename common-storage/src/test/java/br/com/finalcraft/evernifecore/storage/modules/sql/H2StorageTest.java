@@ -48,7 +48,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <h3>Running these tests</h3>
  * <pre>
- * ./gradlew :common-tests:test --tests "*H2StorageTest"
+ * ./gradlew :common-storage:test --tests "*H2StorageTest"
  * </pre>
  *
  * <h3>Isolation</h3>
@@ -345,7 +345,7 @@ class H2StorageTest extends AbstractStorageTest {
             .keyExtractor(TestPlayer::getUuid)
             .codec(new JacksonJsonCodec<>(TestPlayer.class))
             .index(IndexHint.string("name"))
-            .index(IndexHint.integer("score"))   // new!
+            .index(IndexHint.integer("score"))   // added vs. the V1 descriptor above
             .build();
 
         // Open a NEW storage on the SAME database with V2.

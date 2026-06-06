@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 
 /**
- * {@link Codec} implementation that serialises entities to/from YAML using Jackson 3.x
+ * {@link Codec} implementation that serialises entities to/from YAML using Jackson
  * ({@code jackson-dataformat-yaml}).
  *
  * <p>Files written by this codec use the {@code .yml} extension when stored by

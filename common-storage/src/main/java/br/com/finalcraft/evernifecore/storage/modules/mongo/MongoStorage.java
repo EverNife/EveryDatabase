@@ -37,8 +37,10 @@ import java.util.function.Function;
  *
  * <p>Each entity collection stores documents as:
  * <pre>
- * { "_sk": "key-as-string", "_data": "{\"field\":\"value\",...}" }
+ * { "storage_key": "key-as-string", "storage_data": { "field": "value", ... } }
  * </pre>
+ * where {@code storage_data} is a native BSON sub-document. See {@link MongoRepository}
+ * for the full document shape (including {@code _idx_*} and {@code lock_version} fields).
  */
 public final class MongoStorage implements Storage, TransactionalStorage, SchemaAwareStorage {
 

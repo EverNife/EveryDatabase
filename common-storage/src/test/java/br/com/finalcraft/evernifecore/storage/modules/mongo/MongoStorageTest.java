@@ -53,7 +53,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * docker run -d -p 39308:27017 -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=root mongo:7
  *
  * # Then run:
- * ./gradlew :common-tests:test --tests "*MongoStorageTest"
+ * ./gradlew :common-storage:test --tests "*MongoStorageTest"
  * </pre>
  *
  * <h3>Isolation</h3>
