@@ -1,9 +1,11 @@
 package br.com.finalcraft.evernifecore.storage.modules.localfile;
 
+import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
+import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
+import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.modules.localfile.migrations.V000_PopulateTestPlayers;
 import br.com.finalcraft.evernifecore.storage.schema.Migration;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
@@ -237,5 +239,52 @@ class LocalFileStorageTest extends AbstractStorageTest {
 
         SchemaVersion v = sas.currentVersion().join();
         assertEquals(SchemaVersion.none().version(), v.version());
+    }
+
+    // ------------------------------------------------------------------
+    //  LocalFile-specific: file-name sanitisation and atomic writes
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(1030)
+    @DisplayName("keys that sanitise to the same file name do not collide")
+    void sanitizedKeys_doNotCollide() {
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("string_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        TestPlayer slash      = new TestPlayer(UUID.randomUUID(), "a/b", 1);
+        TestPlayer underscore = new TestPlayer(UUID.randomUUID(), "a_b", 2);
+        stringRepo.save(slash).join();
+        stringRepo.save(underscore).join();
+
+        assertEquals(2L, stringRepo.count().join(),
+            "'a/b' and 'a_b' must map to two distinct files");
+        assertEquals(slash,      stringRepo.find("a/b").join().orElseThrow(AssertionError::new));
+        assertEquals(underscore, stringRepo.find("a_b").join().orElseThrow(AssertionError::new));
+
+        // delete must only remove its own file
+        assertTrue(stringRepo.delete("a/b").join());
+        assertTrue(stringRepo.find("a/b").join().isEmpty());
+        assertEquals(underscore, stringRepo.find("a_b").join().orElseThrow(AssertionError::new));
+    }
+
+    @Test
+    @Order(1031)
+    @DisplayName("save leaves no .tmp residue behind (atomic write)")
+    void save_leavesNoTmpFiles() throws IOException {
+        for (int i = 0; i < 25; i++) {
+            repo.save(new TestPlayer(UUID.randomUUID(), "player_" + i, i)).join();
+        }
+        try (java.util.stream.Stream<Path> paths = Files.walk(tempDir)) {
+            List<Path> leftovers = paths
+                .filter(p -> p.toString().endsWith(".tmp"))
+                .collect(Collectors.toList());
+            assertTrue(leftovers.isEmpty(), "no .tmp files may remain after save: " + leftovers);
+        }
     }
 }

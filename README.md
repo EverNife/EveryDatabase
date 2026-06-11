@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-2.1.1-informational)
+![Version](https://img.shields.io/badge/version-1.0.1-informational)
 
 </div>
 
@@ -29,10 +29,10 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 - [Transactions](#transactions)
 - [Schema migrations](#schema-migrations)
 - [Moving data between backends](#moving-data-between-backends)
+- [Logging & diagnostics](#logging--diagnostics)
 - [Building & running the tests](#building--running-the-tests)
 - [Project layout](#project-layout)
 - [Compatibility notes](#compatibility-notes)
-- [License](#license)
 
 ---
 
@@ -51,14 +51,14 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 
 ## Supported backends
 
-| Backend | Factory | Transactions | Schema migrations | Secondary indexes | Persistence |
-|---|---|:---:|:---:|:---:|---|
-| **MySQL / MariaDB** | `Storages.createSQL` | ✅ | ✅ | ✅ native column + B-tree | Durable |
-| **PostgreSQL** | `Storages.createPostgreSQL` | ✅ | ✅ | ✅ native column + B-tree | Durable |
-| **H2** (mem / file / tcp) | `Storages.createH2` | ✅ | ✅ | ✅ native column + B-tree | Durable / ephemeral |
-| **MongoDB** | `Storages.createMongo` | ✅ *(replica set)* | ✅ | ✅ native index | Durable |
-| **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full-scan fallback | Durable (one file per entity) |
-| **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ❌ | ✅ in-memory map | Ephemeral |
+| Backend | Factory | Transactions | Schema migrations | Secondary indexes | Optimistic locking | Persistence |
+|---|---|:---:|:---:|:---:|:---:|---|
+| **MySQL / MariaDB** | `Storages.createSQL` | ✅ | ✅ | ✅ native column + B-tree | ✅ | Durable |
+| **PostgreSQL** | `Storages.createPostgreSQL` | ✅ | ✅ | ✅ native column + B-tree | ✅ | Durable |
+| **H2** (mem / file / tcp) | `Storages.createH2` | ✅ | ✅ | ✅ native column + B-tree | ❌ *(by design)* | Durable / ephemeral |
+| **MongoDB** | `Storages.createMongo` | ✅ *(replica set)* | ✅ | ✅ native index | ✅ | Durable |
+| **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Durable (one file per entity) |
+| **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ❌ | ✅ in-memory map | ❌ | Ephemeral |
 
 > SQL backends store the entity as a **native JSON column**; MongoDB stores it as a **native BSON sub-document** — not an escaped string — so the data is queryable and readable in standard DB tools.
 
@@ -77,7 +77,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'br.com.finalcraft:common-storage:2.1.1'
+    implementation 'br.com.finalcraft:common-storage:1.0.1'
 
     // Bundled transitively: HikariCP, mongodb-driver-sync, H2, Jackson (databind + yaml).
     // You must add the JDBC driver for your SQL engine yourself:
@@ -168,9 +168,10 @@ Storage storage = Storages.createMongo(new MongoConfig("mongodb://localhost:2701
 
 - `TransactionalStorage` — atomic `inTransaction(...)`
 - `SchemaAwareStorage` — `register(...).migrate()`
-- `QueryableStorage` — richer query repositories
 
 You discover them with `instanceof`, so the compiler stops you from using transactions on a backend that doesn't support them.
+
+> **Codec tip:** `new JacksonJsonCodec<>(Type.class)` emits **compact** JSON (smallest payload — what you want in a database). Use `JacksonJsonCodec.pretty(Type.class)` for indented, human-readable output — pairs nicely with `LocalFileStorage` when you want to read the files by eye.
 
 > **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every supported backend (no quoting or escaping ever needed).
 
@@ -187,12 +188,12 @@ import br.com.finalcraft.evernifecore.storage.modules.sql.*;
 SqlStorage sql = Storages.createSQL(
         new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
 
-// Full control over the HikariCP pool:
+// Full control over the HikariCP pool (min/max, connection timeout, idle timeout;
+// a 5-arg PoolTuning constructor also exposes maxLifetime):
 SqlStorage tuned = Storages.createSQL(new SqlConfig(
         "jdbc:mysql://db.internal:3306/app",
         "user", "pass",
-        new PoolTuning(2, 10, Duration.ofSeconds(30), Duration.ofMinutes(10)),
-        Optional.empty()));
+        new PoolTuning(2, 10, Duration.ofSeconds(30), Duration.ofMinutes(10))));
 
 sql.init().join();
 ```
@@ -356,7 +357,7 @@ repo.query(Query.eq("location.world", "world")
 
 **Index type factories:** `IndexHint.string` · `integer` · `bigInt` · `decimal` · `bool` · `timestamp`.
 
-> Querying a field that was **not** declared as an index throws `IllegalArgumentException` on SQL, Mongo and in-memory backends. Local files are the exception — they always full-scan, so they never throw but are `O(n)`. Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
+> Querying a field that was **not** declared as an index throws `IllegalArgumentException` on **every** backend — including local files, which validate the declaration even though they answer queries with a full scan (`O(n)`, no real index). Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
 
 ---
 
@@ -383,6 +384,8 @@ EntityDescriptor<UUID, Account> ACCOUNTS = EntityDescriptor.builder(UUID.class, 
 ```
 
 The version starts at `0` on insert and is incremented on every successful update. Descriptors **without** `.versioned()` (or `.version(getter, setter)`) keep plain upsert semantics — locking is entirely opt-in.
+
+> **Backend support:** MySQL/MariaDB, PostgreSQL and MongoDB enforce the version check. **H2 does not** (by design — it's an embedded/dev engine): a versioned descriptor on H2 silently degrades to plain upsert, never throwing `OptimisticLockException`. Local files and in-memory don't enforce it either. Use a server-grade backend when concurrent writers matter.
 
 ---
 
@@ -463,11 +466,51 @@ Use `descriptor(sourceDesc, targetDesc)` to rename a collection or change codec 
 
 ---
 
+## Logging & diagnostics
+
+The library is **silent by default**: routine operations emit nothing, while failures always do (an `ERROR` floor that no configuration can switch off). Everything in between is opt-in, per **topic** (`INDEX`, `WRITE`, `DELETE`, `QUERY`, `MIGRATION`, `TRANSACTION`, `TRANSFER`, ...), with live runtime editing.
+
+```java
+import br.com.finalcraft.evernifecore.storage.log.*;
+
+// Create a storage already watching index work and migrations, with writes muted:
+StorageLogConfig logCfg = StorageLogConfig.defaults()        // WARN: routine silent, failures visible
+        .level(StorageLogTopic.INDEX,     StorageLogLevel.INFO)
+        .level(StorageLogTopic.MIGRATION, StorageLogLevel.INFO)
+        .mute(StorageLogTopic.WRITE);
+SqlStorage sql = Storages.createSQL(sqlConfig, logCfg);
+
+// The config is LIVE - edit it at runtime and every repository reacts immediately:
+sql.getStorageLogConfig()
+   .level(StorageLogTopic.WRITE, StorageLogLevel.DEBUG)      // temporarily debug saves
+   .includeKeys(true);                                       // opt-in: show entity keys
+```
+
+Other presets: `StorageLogConfig.silent()` (only the ERROR floor), `verbose()` (DEBUG), `trace()`.
+
+**Where the lines go.** By default events route to **SLF4J** when it is on the runtime classpath (loggers named `evernifecore.storage.<topic>`), and become a silent no-op otherwise — the library never requires a logging framework. A host application can install its own bridge once, globally:
+
+```java
+// e.g. a Bukkit plugin routing storage logs to its own logger:
+StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()));
+```
+
+**Privacy by default.** Log lines carry counts, durations, collection names and index/migration metadata — never entity content. `includeKeys(true)`, `includeValues(true)` (truncated `toString()`, single-entity saves only) and `includeQueryValues(true)` are explicit opt-ins for local debugging.
+
+**Quick verbosity for tests/CI** — no code changes needed:
+
+```bash
+-Devernifecore.storage.log.level=info     # lifecycle, index, migration, batch summaries
+-Devernifecore.storage.log.level=debug    # + saves, deletes, queries, progress ticks
+```
+
+---
+
 ## Building & running the tests
 
 ### Prerequisites
 
-- **JDK 25** for the build toolchain (the artifact still targets Java 8 — see [Compatibility notes](#compatibility-notes)).
+- **JDK 21** to launch Gradle. The launcher JDK is *not* what compiles the code: the Gradle toolchain auto-provisions **JDK 25** for compiling and running tests, and the artifact still targets **Java 8** — see [Compatibility notes](#compatibility-notes). Don't point `JAVA_HOME` at JDK 25: Gradle 8.14 itself cannot run on it (`Unsupported class file major version 69`).
 - **Docker** (optional) — only needed to run the SQL/Mongo integration suites against real servers.
 
 ### Clone & build
@@ -476,8 +519,8 @@ Use `descriptor(sourceDesc, targetDesc)` to rename a collection or change codec 
 git clone <repo-url> EveryDatabase
 cd EveryDatabase
 
-# Point Gradle at JDK 25
-export JAVA_HOME=/path/to/jdk-25      # PowerShell: $env:JAVA_HOME = "C:\path\to\jdk-25"
+# Launch Gradle with JDK 21 (the build toolchain provisions JDK 25 by itself)
+export JAVA_HOME=/path/to/jdk-21      # PowerShell: $env:JAVA_HOME = "C:\path\to\jdk-21"
 
 ./gradlew :common-storage:build       # compile + run all tests
 ```
@@ -506,11 +549,34 @@ Running `./gradlew :common-storage:test` brings the containers up automatically 
 
 ```bash
 ./gradlew :common-storage:test                                   # everything
+./gradlew :common-storage:test -PskipStress                      # skip the 10k-record stress suites
 ./gradlew :common-storage:test --tests "*MariaDbStorageTest"     # one class
 ./gradlew :common-storage:test --tests "*MariaDbStorageTest.inTransaction_commit_savesAreVisible"
 ```
 
-Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HOST`, `MONGO_USER`, `POSTGRES_URL`). Each SQL/Mongo test method runs against its own throwaway database (`enc_NNN_<backend>_<method>`), dropped automatically afterwards.
+Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HOST`, `MONGO_USER`, `POSTGRES_URL`). Each SQL/Mongo test method runs against its own throwaway database (`enc_NNN_<backend>_<method>`), dropped automatically afterwards — set `TEST_KEEP_DATABASES=true` to keep them for inspection.
+
+---
+
+## Project layout
+
+```
+EveryDatabase/
+├── common-storage/                      # the published library (br.com.finalcraft:common-storage)
+│   ├── src/main/java/br/com/finalcraft/evernifecore/storage/
+│   │   ├── (root)                       # Storage, Repository, EntityDescriptor, Storages, StorageExecutors
+│   │   ├── codec/                       # JacksonJsonCodec (compact / pretty), JacksonYamlCodec
+│   │   ├── query/                       # IndexHint, @Indexed, Query
+│   │   ├── versioned/                   # Versioned, OptimisticLockException
+│   │   ├── tx/                          # TransactionalStorage, TransactionScope
+│   │   ├── schema/                      # SchemaAwareStorage, Migration, MigrationContext
+│   │   ├── log/                         # StorageLogConfig, topics/levels/sinks (see Logging & diagnostics)
+│   │   ├── transfer/                    # StorageTransfer, TransferReport, ErrorPolicy
+│   │   └── modules/                     # sql (+ postgresql, h2), mongo, localfile, memory
+│   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
+├── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
+└── specs/                               # design specs (storage logging)
+```
 
 ---
 
@@ -520,6 +586,7 @@ Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HO
 - **Build:** authored in modern Java syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25**.
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
 - **Drivers:** H2 and the MongoDB driver are bundled. For MySQL/MariaDB or PostgreSQL, add the JDBC driver to your own runtime classpath.
+- **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it (e.g. when the library is shaded into a plugin jar) logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework.
 - **Serialisation:** entities must be Jackson-serialisable (a no-arg constructor plus accessors, or appropriate Jackson annotations).
 
 <div align="center">

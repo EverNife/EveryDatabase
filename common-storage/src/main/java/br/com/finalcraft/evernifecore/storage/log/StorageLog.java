@@ -292,12 +292,25 @@ public final class StorageLog {
             if (c.includeKeys()) {
                 List<String> keys = new ArrayList<>(1);
                 keys.add(String.valueOf(key));
-                b.keys(keys);
+                b.keys(capKeys(keys, c.maxKeysListed()));
             }
             if (c.includeValues()) {
                 b.value(truncate(String.valueOf(entity), c.maxValueLength()));
             }
         });
+    }
+
+    /**
+     * Caps a key list at {@code max} entries, replacing the overflow with a single
+     * {@code "(+N more)"} marker - the {@link StorageLogConfig#maxKeysListed()} contract.
+     * Today's emitters only ever list one key, so the cap is effectively future-proofing
+     * for multi-key events; the helper keeps the contract testable either way.
+     */
+    static List<String> capKeys(List<String> keys, int max) {
+        if (keys == null || max <= 0 || keys.size() <= max) return keys;
+        List<String> capped = new ArrayList<>(keys.subList(0, max));
+        capped.add("(+" + (keys.size() - max) + " more)");
+        return capped;
     }
 
     /**
@@ -361,7 +374,7 @@ public final class StorageLog {
             if (c.includeKeys()) {
                 List<String> keys = new ArrayList<>(1);
                 keys.add(String.valueOf(key));
-                b.keys(keys);
+                b.keys(capKeys(keys, c.maxKeysListed()));
             }
         });
     }
@@ -425,7 +438,8 @@ public final class StorageLog {
     }
 
     /**
-     * Logs storage close at {@link StorageLogLevel#INFO}.
+     * Logs storage close at {@link StorageLogLevel#DEBUG} (symmetric with {@link #initialized}:
+     * lifecycle chatter stays silent under the WARN default and the INFO test preset).
      */
     public void closed() {
         emit(StorageOp.CLOSE, StorageLogLevel.DEBUG, b -> {});

@@ -4,13 +4,19 @@ import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogEvent;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogTopic;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.modules.memory.InMemoryStorage;
-
+import br.com.finalcraft.evernifecore.testutil.CapturingSink;
 import org.junit.jupiter.api.*;
 
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -346,5 +352,40 @@ class StorageTransferBasicTest {
         assertTrue(second.success(), "Second run must not fail with failIfTargetNotEmpty=false");
         assertEquals(2L, target.repository(DESCRIPTOR).count().join(),
             "Upsert must not duplicate entities");
+    }
+
+    // ------------------------------------------------------------------
+    //  TRANSFER log mirror (specs/SPEC_storage_logging.md, secao 8.7)
+    // ------------------------------------------------------------------
+
+    @Test @Order(80)
+    @DisplayName("Transfer mirrors BEGIN/COLLECTION/COMPLETE on the target storage's log config")
+    void logMirror_emitsTransferEventsOnTargetConfig() {
+        source.repository(DESCRIPTOR).saveAll(Arrays.asList(alice(), bob(), carol())).join();
+
+        // The mirror is bound to the TARGET storage's live config (the transfer writes there).
+        CapturingSink capture = new CapturingSink();
+        target.getStorageLogConfig()
+            .level(StorageLogTopic.TRANSFER, StorageLogLevel.INFO)
+            .sink(capture);
+
+        TransferReport report = transfer(500);
+        assertTrue(report.success(), "Report must be successful: " + report.errors());
+
+        assertEquals(1, capture.byOp(StorageOp.TRANSFER_BEGIN).size(),
+            "One TRANSFER_BEGIN per execute()");
+
+        List<StorageLogEvent> collections = capture.byOp(StorageOp.TRANSFER_COLLECTION);
+        assertEquals(1, collections.size(), "One TRANSFER_COLLECTION per transferred collection");
+        assertEquals(DESCRIPTOR.collection(), collections.get(0).collection());
+        assertEquals(3L, collections.get(0).affected(), "Collection event must report written entities");
+
+        List<StorageLogEvent> completes = capture.byOp(StorageOp.TRANSFER_COMPLETE);
+        assertEquals(1, completes.size(), "One TRANSFER_COMPLETE per execute()");
+        assertEquals(StorageLogLevel.INFO, completes.get(0).level(), "Successful transfer completes at INFO");
+        assertEquals(3L, completes.get(0).affected(), "Complete event must report report.totalEntities()");
+
+        // The report contract is untouched by the mirror.
+        assertEquals(3L, report.totalEntities());
     }
 }

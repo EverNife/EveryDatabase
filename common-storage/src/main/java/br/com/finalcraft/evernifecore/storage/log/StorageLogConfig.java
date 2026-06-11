@@ -283,14 +283,14 @@ public final class StorageLogConfig {
      * Configures progress reporting for long-running operations.
      *
      * @param enabled    whether to emit progress ticks at all
-     * @param stepPct    minimum percentage change between ticks (1..100)
+     * @param stepPct    minimum percentage change between ticks; clipped to [1, 100]
      * @param throttleMs minimum wall-clock ms between ticks
      * @param minTotal   minimum total count for progress to be emitted
      * @return {@code this}
      */
     public StorageLogConfig progress(boolean enabled, int stepPct, long throttleMs, long minTotal) {
         this.progressEnabled     = enabled;
-        this.progressStepPercent = stepPct;
+        this.progressStepPercent = Math.max(1, Math.min(100, stepPct));
         this.progressThrottleMs  = throttleMs;
         this.progressMinTotal    = minTotal;
         return this;

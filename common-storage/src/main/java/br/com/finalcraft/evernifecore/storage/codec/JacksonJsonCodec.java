@@ -7,14 +7,23 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 /**
  * {@link Codec} implementation that serializes entities to/from JSON using Jackson.
  *
+ * <p>The default output is <b>compact</b> (no indentation): the database backends
+ * (SQL, Mongo, InMemory) persist or re-parse the payload verbatim, so pretty-print
+ * whitespace would only inflate storage and I/O. For human-readable per-entity files
+ * in {@code LocalFileStorage}, use the {@link #pretty(Class)} factory instead.
+ *
  * <p>Usage:
  * <pre>{@code
- * Codec<PlayerData> codec = new JacksonJsonCodec<>(PlayerData.class);
+ * Codec<PlayerData> codec = new JacksonJsonCodec<>(PlayerData.class);   // compact
+ * Codec<PlayerData> nice  = JacksonJsonCodec.pretty(PlayerData.class);  // indented
  * }</pre>
  *
  * @param <V> the entity type
  */
 public final class JacksonJsonCodec<V> implements Codec<V> {
+
+    private static final ObjectMapper COMPACT_MAPPER = JsonMapper.builder()
+        .build();
 
     private static final ObjectMapper PRETTY_MAPPER = JsonMapper.builder()
         .enable(SerializationFeature.INDENT_OUTPUT)
@@ -24,10 +33,11 @@ public final class JacksonJsonCodec<V> implements Codec<V> {
     private final Class<V> type;
 
     /**
-     * Creates a codec for {@code type} using a default Jackson {@link ObjectMapper}.
+     * Creates a codec for {@code type} using a default (compact-output) Jackson
+     * {@link ObjectMapper}.
      */
     public JacksonJsonCodec(Class<V> type) {
-        this(type, PRETTY_MAPPER);
+        this(type, COMPACT_MAPPER);
     }
 
     /**
@@ -37,6 +47,17 @@ public final class JacksonJsonCodec<V> implements Codec<V> {
     public JacksonJsonCodec(Class<V> type, ObjectMapper mapper) {
         this.type   = type;
         this.mapper = mapper;
+    }
+
+    /**
+     * Creates a codec whose output is pretty-printed (indented).
+     *
+     * <p>Intended for {@code LocalFileStorage}, where a human may open the per-entity
+     * files. Database backends should keep the compact default - they persist the
+     * payload as-is, whitespace included.
+     */
+    public static <V> JacksonJsonCodec<V> pretty(Class<V> type) {
+        return new JacksonJsonCodec<>(type, PRETTY_MAPPER);
     }
 
     @Override

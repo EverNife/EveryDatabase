@@ -1,31 +1,28 @@
 package br.com.finalcraft.evernifecore.storage.modules.mongo;
 
 import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
+import br.com.finalcraft.evernifecore.storage.data.VersionedTestPlayer;
 import br.com.finalcraft.evernifecore.storage.modules.AbstractVersionedStorageTest;
+import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
 import br.com.finalcraft.evernifecore.testutil.DotEnvTestUtil;
-import com.mongodb.ConnectionString;
-import com.mongodb.MongoClientSettings;
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
-import org.bson.Document;
+import br.com.finalcraft.evernifecore.testutil.ThrowawayDatabaseSupport;
 import org.junit.jupiter.api.*;
 
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CyclicBarrier;
 
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Optimistic-locking (versioned) tests for the MongoDB backend.
  *
- * <p>Inherits all contract tests from {@link AbstractVersionedStorageTest}. MongoDB is one
- * of only two backends where versioning is supported (the other being MariaDB/MySQL); it
- * may be accessed by multiple JVM processes and therefore benefits from optimistic locking.
+ * <p>Inherits all contract tests from {@link AbstractVersionedStorageTest} and adds a
+ * Mongo-specific first-insert race test (duplicate-key on the unique {@code storage_key}
+ * index must surface as {@link OptimisticLockException}, never as a raw driver exception).
  *
- * <p>Requires a running MongoDB 4.2+ server. If none is available the entire class is
- * <em>skipped</em> automatically.
+ * <p>Requires a running MongoDB 4.2+ server; skipped automatically otherwise.
  *
  * <h3>Configuration</h3>
  * Same env vars as {@link MongoStorageTest}:
@@ -47,50 +44,84 @@ class MongoVersionedStorageTest extends AbstractVersionedStorageTest {
     static final String MONGO_URL  = "mongodb://" + MONGO_USER + ":" + MONGO_PASS
                                    + "@" + MONGO_HOST + ":" + MONGO_PORT;
 
-    static final boolean CLEAN_TEST_RESIDUALS = false;
-
-    private static int runNumber = 1;
-    private static final Set<String> createdDbs = ConcurrentHashMap.newKeySet();
+    private static final ThrowawayDatabaseSupport DBS = ThrowawayDatabaseSupport.mongo(MONGO_URL, "mgv");
 
     @BeforeAll
     static void assumeMongoAvailable() {
-        MongoClientSettings probe = MongoClientSettings.builder()
-            .applyConnectionString(new ConnectionString(MONGO_URL))
-            .applyToClusterSettings(b -> b.serverSelectionTimeout(3, TimeUnit.SECONDS))
-            .applyToSocketSettings(b -> b.connectTimeout(3, TimeUnit.SECONDS))
-            .build();
-
-        try (MongoClient client = MongoClients.create(probe)) {
-            client.getDatabase("admin").runCommand(new Document("ping", 1));
-        } catch (Exception e) {
-            assumeTrue(false,
-                "MongoDB not available at " + MONGO_URL + " - skipping MongoVersionedStorageTest. "
-                + "Cause: " + e.getMessage());
-        }
-
-        try (MongoClient client = MongoClients.create(probe)) {
-            List<String> existing = new ArrayList<>();
-            for (String name : client.listDatabaseNames()) {
-                if (name.startsWith("enc_")) existing.add(name);
-            }
-            runNumber = AbstractStorageTest.computeRunNumber(existing);
-        } catch (Exception ignored) {
-            runNumber = 1;
-        }
+        DBS.assumeAvailable("MongoVersionedStorageTest");
     }
 
     @AfterAll
     static void cleanupDatabases() {
-        if (!CLEAN_TEST_RESIDUALS || createdDbs.isEmpty()) return;
-        try (MongoClient client = MongoClients.create(MONGO_URL)) {
-            createdDbs.forEach(name -> client.getDatabase(name).drop());
-        } catch (Exception ignored) {}
+        DBS.dropAll("MongoVersionedStorageTest");
     }
 
     @Override
     protected Storage createStorage(String testMethodName) {
-        String dbName = AbstractStorageTest.buildDbName("mgv", runNumber, testMethodName);
-        createdDbs.add(dbName);
-        return new MongoStorage(new MongoConfig(MONGO_URL, dbName));
+        return new MongoStorage(new MongoConfig(MONGO_URL, DBS.newDatabase(testMethodName)));
+    }
+
+    // ------------------------------------------------------------------
+    //  Mongo-specific: first-insert race
+    // ------------------------------------------------------------------
+
+    /**
+     * Two writers insert the same brand-new key (version 0) simultaneously, repeatedly.
+     * Legal outcomes per attempt: both succeed serialized (the second acts as an update of
+     * version 0), or the loser of a true race throws {@link OptimisticLockException}.
+     * What must NEVER escape is the raw driver {@code MongoWriteException} (E11000) that
+     * the insert path used to leak before the duplicate-key conversion.
+     */
+    @Test
+    @Order(900)
+    @DisplayName("concurrent first insert: loser surfaces OptimisticLockException, never a raw driver error")
+    void concurrentFirstInsert_loserGetsOptimisticLockException() throws Exception {
+        final int ATTEMPTS = 25;
+        for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+            UUID key = UUID.randomUUID();
+            VersionedTestPlayer first  = new VersionedTestPlayer(key, "Racer", attempt);
+            VersionedTestPlayer second = new VersionedTestPlayer(key, "Racer", attempt);
+
+            CyclicBarrier start = new CyclicBarrier(2);
+            CompletableFuture<Void> f1 = CompletableFuture.runAsync(() -> {
+                await(start);
+                vRepo.save(first).join();
+            });
+            CompletableFuture<Void> f2 = CompletableFuture.runAsync(() -> {
+                await(start);
+                vRepo.save(second).join();
+            });
+
+            int failures = 0;
+            for (CompletableFuture<Void> f : new CompletableFuture[]{f1, f2}) {
+                try {
+                    f.join();
+                } catch (CompletionException e) {
+                    failures++;
+                    Throwable root = rootCause(e);
+                    assertInstanceOf(OptimisticLockException.class, root,
+                        "racing writer must fail with OptimisticLockException, got: " + root);
+                }
+            }
+            assertTrue(failures <= 1, "at most one of the two writers may fail per attempt");
+
+            // Whatever the interleaving, the document must exist exactly once.
+            assertEquals(1, vRepo.findMany(java.util.Collections.singletonList(key)).join().size(),
+                "exactly one stored document for the raced key");
+        }
+    }
+
+    private static void await(CyclicBarrier barrier) {
+        try {
+            barrier.await();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static Throwable rootCause(Throwable t) {
+        Throwable cur = t;
+        while (cur.getCause() != null && cur.getCause() != cur) cur = cur.getCause();
+        return cur;
     }
 }

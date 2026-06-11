@@ -1,7 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.modules;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
-import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
@@ -9,6 +8,7 @@ import br.com.finalcraft.evernifecore.storage.data.AnnotatedTestPlayer;
 import br.com.finalcraft.evernifecore.storage.data.VersionedTestPlayer;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.Indexed;
+import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
 import org.junit.jupiter.api.*;
 
 import java.util.Arrays;

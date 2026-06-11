@@ -1,10 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.modules.mongo;
 
-import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.StorageExecutors;
-import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
-import br.com.finalcraft.evernifecore.storage.HealthStatus;
-import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.*;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
@@ -52,8 +48,9 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     static final String MIGRATIONS_COLLECTION = "_schema_migrations";
 
     private final MongoConfig config;
-    private MongoClient mongoClient;
-    private MongoDatabase database;
+    /** Written by init()/close() on an executor thread, read everywhere - volatile for visibility. */
+    private volatile MongoClient mongoClient;
+    private volatile MongoDatabase database;
 
     /** Registered migrations, sorted by version. Mutated only before migrate() is called. */
     private final List<Migration> registeredMigrations = new ArrayList<>();

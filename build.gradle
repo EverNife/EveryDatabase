@@ -1,21 +1,13 @@
-plugins {
-
-}
-
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 
 subprojects {
-    apply plugin: 'java'
-    apply plugin: 'idea'
     apply plugin: 'java-library'
+    apply plugin: 'idea'
     apply plugin: 'maven-publish'
 
     group = 'br.com.finalcraft'
     version = '1.0.1'
-
-    sourceCompatibility = 11
-    targetCompatibility = 11
 
     //This might keep function(parameter variable's Names) on the compiled jar
     compileJava.options.compilerArgs.add '-parameters'
@@ -36,43 +28,27 @@ subprojects {
     }
 
     repositories {
-        // Fix issue with lwjgl-freetype not being found on macOS / ForgeGradle issue
-        //
-        // Could not resolve all files for configuration ':_compileJava_1'.
-        // Could not find lwjgl-freetype-3.3.3-natives-macos-patch.jar (org.lwjgl:lwjgl-freetype:3.3.3).
-        maven {
-            url "https://libraries.minecraft.net"
-            content {
-                includeModule("org.lwjgl", "lwjgl-freetype")
-            }
-        }
         mavenCentral()
-        maven { url = "https://jitpack.io" }
-        maven { url 'https://libraries.minecraft.net/' }
-        maven { url 'https://maven.petrus.dev/public' }
-        flatDir { //Change this to where are your local libs
-            dirs 'C:/Meus/workshop/workshop/MyOwnPlugins/Bukkit/FinalCraftCore/libs'
-            dirs 'C:/Meus/workshop/workshop/PublicLibs'
-            dirs 'C:/Meus/workshop/workshop/PublicLibs/Bukkit'
-        }
+        maven { url = 'https://maven.petrus.dev/public' }
     }
 
     dependencies {
-        compileOnly "jakarta.annotation:jakarta.annotation-api:2.1.1"
-
         //Lombok
-        compileOnly 'org.projectlombok:lombok:1.18.42'
-        annotationProcessor 'org.projectlombok:lombok:1.18.42'
-        testCompileOnly 'org.projectlombok:lombok:1.18.42'
-        testAnnotationProcessor 'org.projectlombok:lombok:1.18.42'
+        compileOnly libs.lombok
+        annotationProcessor libs.lombok
+        testCompileOnly libs.lombok
+        testAnnotationProcessor libs.lombok
     }
 
-    configurations.all {
-        attributes {
-            attribute(
-                    TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE,
-                    25
-            )
+    java {
+        withSourcesJar()
+    }
+
+    publishing {
+        publications {
+            maven(MavenPublication) {
+                from components.java
+            }
         }
     }
 }

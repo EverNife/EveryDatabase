@@ -4,6 +4,9 @@ import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.StorageExecutors;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
 
 import java.util.List;
@@ -47,6 +50,15 @@ final class StorageTransferImpl implements StorageTransfer {
     final boolean verifyCounts;
     final Consumer<TransferProgress> progressListener;
 
+    /**
+     * Mirrors transfer milestones to the log sink (TRANSFER topic, spec 8.7) without touching
+     * {@link TransferReport} or the {@code progressListener}. Bound to the <b>target</b>
+     * storage's live log config - the target is where the writes land, so its operator is the
+     * one who needs the visibility. Enable with e.g.
+     * {@code target.getStorageLogConfig().level(StorageLogTopic.TRANSFER, StorageLogLevel.INFO)}.
+     */
+    private final StorageLog log;
+
     @SuppressWarnings("rawtypes")
     StorageTransferImpl(
             Storage source,
@@ -67,6 +79,7 @@ final class StorageTransferImpl implements StorageTransfer {
         this.failIfTargetCollectionNotEmpty = failIfTargetCollectionNotEmpty;
         this.verifyCounts                   = verifyCounts;
         this.progressListener               = progressListener;
+        this.log                            = new StorageLog("transfer", target::getStorageLogConfig);
     }
 
     // ------------------------------------------------------------------
@@ -76,7 +89,14 @@ final class StorageTransferImpl implements StorageTransfer {
     @Override
     public CompletableFuture<TransferReport> execute() {
         return CompletableFuture.supplyAsync(() -> {
-            TransferReport.Builder report = TransferReport.builder(System.currentTimeMillis());
+            long transferStartMs = System.currentTimeMillis();
+            TransferReport.Builder report = TransferReport.builder(transferStartMs);
+
+            log.emit(StorageOp.TRANSFER_BEGIN, StorageLogLevel.INFO, b -> b
+                .detail("source=" + source.getClass().getSimpleName()
+                    + " target=" + target.getClass().getSimpleName()
+                    + " collections=" + descriptors.size()
+                    + " policy=" + errorPolicy));
 
             try {
                 // 1. Pre-flight: health check both storages
@@ -110,7 +130,15 @@ final class StorageTransferImpl implements StorageTransfer {
                 report.addError(new TransferError("(unexpected)", null, e));
             }
 
-            return report.build();
+            TransferReport built = report.build();
+            log.emit(StorageOp.TRANSFER_COMPLETE,
+                built.success() ? StorageLogLevel.INFO : StorageLogLevel.WARN, b -> b
+                    .affected(built.totalEntities())
+                    .durationMs(System.currentTimeMillis() - transferStartMs)
+                    .detail("success=" + built.success()
+                        + " collections=" + built.collections().size()
+                        + " errors=" + built.errors().size()));
+            return built;
         }, StorageExecutors.async());
     }
 
@@ -227,10 +255,19 @@ final class StorageTransferImpl implements StorageTransfer {
             }
 
             // Notify progress after each batch (even if some entities were skipped)
-            if (!aborted && progressListener != null) {
+            if (!aborted) {
                 long elapsed = System.currentTimeMillis() - startMs;
-                progressListener.accept(
-                    new TransferProgress(srcCollection, entitiesWritten, sourceCount, elapsed));
+                if (progressListener != null) {
+                    progressListener.accept(
+                        new TransferProgress(srcCollection, entitiesWritten, sourceCount, elapsed));
+                }
+                // Mirror the same milestone to the log sink (TRANSFER topic, DEBUG).
+                long writtenSoFar = entitiesWritten;
+                log.emit(StorageOp.TRANSFER_PROGRESS, StorageLogLevel.DEBUG, b -> b
+                    .collection(srcCollection)
+                    .affected(writtenSoFar).total(sourceCount)
+                    .percent(sourceCount == 0 ? 100 : (int) (writtenSoFar * 100L / sourceCount))
+                    .durationMs(elapsed));
             }
         }
 
@@ -242,6 +279,13 @@ final class StorageTransferImpl implements StorageTransfer {
             sourceCount, targetCountBefore, targetCountAfter,
             entitiesWritten, durationMs
         ));
+
+        long written = entitiesWritten;
+        log.emit(StorageOp.TRANSFER_COLLECTION, StorageLogLevel.INFO, b -> b
+            .collection(srcCollection)
+            .affected(written).total(sourceCount)
+            .durationMs(durationMs)
+            .detail("target=" + tgtCollection));
 
         return aborted;
     }

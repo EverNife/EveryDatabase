@@ -1,10 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql;
 
-import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.StorageExecutors;
-import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
-import br.com.finalcraft.evernifecore.storage.HealthStatus;
-import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.*;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
@@ -69,7 +65,8 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     static final String MIGRATIONS_TABLE = "_schema_migrations";
 
     private final SqlConfig config;
-    private HikariDataSource dataSource;
+    /** Written by init()/close() on an executor thread, read everywhere - volatile for visibility. */
+    private volatile HikariDataSource dataSource;
 
     /** Routes the active transactional connection to all repositories on this thread. */
     protected final ThreadLocal<Connection> txConnection = new ThreadLocal<>();
@@ -146,7 +143,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             hc.setMaximumPoolSize(config.pool().maxSize());
             hc.setConnectionTimeout(config.pool().connectTimeout().toMillis());
             hc.setIdleTimeout(config.pool().idleTimeout().toMillis());
-            hc.setMaxLifetime(config.pool().idleTimeout().toMillis() * 3L);
+            hc.setMaxLifetime(config.pool().maxLifetime().toMillis());
             hc.setPoolName("EverNifeCore-SQL");
 
             try {

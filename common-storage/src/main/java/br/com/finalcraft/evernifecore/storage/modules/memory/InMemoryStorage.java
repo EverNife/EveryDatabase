@@ -1,9 +1,9 @@
 package br.com.finalcraft.evernifecore.storage.modules.memory;
 
-import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionScope;

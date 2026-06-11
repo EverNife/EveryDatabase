@@ -1,9 +1,15 @@
 plugins {
-    id 'com.avast.gradle.docker-compose' version '0.17.12'
+    alias(libs.plugins.docker.compose)
 }
 
 test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        // -PskipStress pula as suites de stress (@Tag("stress"), 10k registros por backend).
+        // Default: stress roda junto com o resto, comportamento historico preservado.
+        if (project.hasProperty('skipStress')) {
+            excludeTags 'stress'
+        }
+    }
 
     // ---- Storage log level (controla o StorageLogConfig.defaults()) -----------------
     // Em producao, nao setar essa property: o padrao e WARN (rotina silenciosa).
@@ -49,33 +55,37 @@ configure([tasks.compileJava]) {
 
 dependencies {
     // Jabel: permite sintaxe Java 16 compilando para bytecode Java 8
-    annotationProcessor 'com.github.bsideup.jabel:jabel-javac-plugin:0.4.2'
-    compileOnly 'com.github.bsideup.jabel:jabel-javac-plugin:0.4.2'
+    annotationProcessor libs.jabel
+    compileOnly libs.jabel
 
     // Core storage (versoes compativeis com Java 8 runtime)
-    implementation 'com.zaxxer:HikariCP:5.1.0'
-    implementation 'org.mongodb:mongodb-driver-sync:4.11.2'
-    implementation 'com.h2database:h2:2.3.232'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.4'
-    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.15.4'
+    implementation libs.hikaricp
+    implementation libs.mongodb.driver.sync
+    implementation libs.h2
+    implementation libs.jackson.databind
+    implementation libs.jackson.yaml
 
-    api 'org.slf4j:slf4j-api:1.7.36'
+    // SLF4J e compileOnly por decisao de design (specs/SPEC_storage_logging.md, 1.2/2.1):
+    // o modulo precisa ser embarcavel (shaded) sem arrastar slf4j para o runtime.
+    // A presenca do slf4j e detectada por lazy class-loading em StorageLogSinks.Slf4jHolder;
+    // sem slf4j no classpath o sink auto() cai em no-op, nunca em NoClassDefFoundError.
+    compileOnly libs.slf4j.api
 
     // JUnit 5
-    testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.0")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.0")
+    testImplementation libs.junit.jupiter.api
+    testRuntimeOnly libs.junit.jupiter.engine
 
     // SLF4J simple binding para testes.
     // Sem ele, o HikariCP 5.x puxa slf4j-api 2.0.17 transitivamente mas sem nenhum provider,
     // e o auto() sink do StorageLog cai em NOP - nenhum log aparece durante os testes.
-    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.17'
+    testRuntimeOnly libs.slf4j.simple
 
     // JDBC drivers para testes de integracao
-    testRuntimeOnly 'com.mysql:mysql-connector-j:9.4.0'
-    testRuntimeOnly 'org.postgresql:postgresql:42.7.7'
+    testRuntimeOnly libs.mysql.connector
+    testRuntimeOnly libs.postgresql
 
     // Geracao de dados aleatorios para stress tests
-    testImplementation 'org.instancio:instancio-junit:6.0.0-RC2'
+    testImplementation libs.instancio.junit
 }
 
 // ======================================================================

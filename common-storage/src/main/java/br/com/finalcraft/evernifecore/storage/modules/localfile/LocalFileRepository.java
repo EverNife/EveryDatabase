@@ -1,8 +1,8 @@
 package br.com.finalcraft.evernifecore.storage.modules.localfile;
 
-import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.codec.CodecException;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
@@ -13,9 +13,7 @@ import br.com.finalcraft.evernifecore.storage.query.Query;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -69,7 +67,14 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
 
     private String keyToString(K key) {
         // sanitise: replace path separators to avoid directory traversal
-        return key.toString().replace("/", "_").replace("\\", "_").replace(":", "_");
+        String raw = key.toString();
+        String sanitized = raw.replace("/", "_").replace("\\", "_").replace(":", "_");
+        if (sanitized.equals(raw)) return raw;
+        // Sanitisation changed the name, so distinct keys could now collide on disk
+        // ("a/b" and "a_b" both sanitise to "a_b"). Suffix a short hash of the original
+        // key to keep one file per key. String.hashCode() is specified by the JLS, so
+        // the name is stable across JVM restarts.
+        return sanitized + "_" + String.format("%08x", raw.hashCode());
     }
 
     private String fileExtension() {
@@ -152,16 +157,29 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
      * Encodes and writes one entity to disk under its per-key lock. Shared by {@link #save}
      * (which logs a single {@code SAVE} event) and {@link #saveAll} (which logs one
      * {@code SAVE_BATCH} summary instead - logging here too would emit one event per entity).
+     *
+     * <p>The write is crash-safe: data goes to a sibling {@code .tmp} file first and is then
+     * moved over the target with {@link StandardCopyOption#ATOMIC_MOVE}, so a crash mid-write
+     * never leaves a truncated entity file behind (at worst an orphan {@code .tmp}, which
+     * {@code all()}/{@code count()} ignore because they filter by codec extension).
      */
     private void writeFile(K key, V entity) {
         ReadWriteLock lock = lockFor(key);
         lock.writeLock().lock();
         try {
             byte[] data = descriptor.codec().encode(entity);
-            Files.write(keyToPath(key), data,
+            Path target = keyToPath(key);
+            Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+            Files.write(tmp, data,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE);
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Exotic file system without atomic rename: plain replace is the best we can do.
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
             throw log.errored(StorageOp.SAVE, descriptor.collection(),
                 new RuntimeException("LocalFile: failed to write key=" + key, e));
@@ -185,7 +203,9 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                     return false;
                 }
                 Files.delete(path);
-                locks.remove(keyToString(key));
+                // The lock deliberately stays in the map: removing it here would let another
+                // thread mint a NEW lock for the same key while we still hold the old one,
+                // breaking mutual exclusion. The map is bounded by the number of live keys.
                 log.deleted(descriptor.collection(), key, true);
                 return true;
             } catch (IOException e) {
@@ -272,8 +292,8 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<List<V>> query(Query query) {
-        // Unlike SQL/Mongo we tolerate non-declared fields (we have to scan anyway).
-        // But to keep behaviour predictable across backends we still validate.
+        // The scan could answer undeclared fields, but we reject them so a query that
+        // works here does not start throwing when the storage is swapped for SQL/Mongo.
         for (Query.Condition c : query.conditions()) {
             if (!hintsByPath.containsKey(c.fieldPath())) {
                 throw new IllegalArgumentException(

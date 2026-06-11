@@ -11,7 +11,6 @@ import br.com.finalcraft.evernifecore.storage.modules.memory.InMemoryStorage;
 import br.com.finalcraft.evernifecore.storage.modules.sql.PoolTuning;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.h2.H2SqlStorage;
-
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -19,9 +18,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Cross-backend transfer tests: verifies that the Storage Transfer works correctly
@@ -83,7 +86,7 @@ class StorageTransferCrossBackendTest {
     private H2SqlStorage h2(String dbName) {
         String url = "jdbc:h2:mem:" + dbName + "_xbackend"
             + ";DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1";
-        H2SqlStorage s = new H2SqlStorage(new SqlConfig(url, "sa", "", H2_POOL, Optional.empty()));
+        H2SqlStorage s = new H2SqlStorage(new SqlConfig(url, "sa", "", H2_POOL));
         s.init().join();
         return s;
     }
@@ -426,7 +429,7 @@ class StorageTransferCrossBackendTest {
 
             h2Tgt  = new H2SqlStorage(new SqlConfig(
                 "jdbc:h2:mem:large_mem_h2;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1",
-                "sa", "", H2_POOL, Optional.empty()));
+                "sa", "", H2_POOL));
             h2Tgt.init().join();
 
             memSrc.repository(DESCRIPTOR).saveAll(hundred()).join();
@@ -448,7 +451,7 @@ class StorageTransferCrossBackendTest {
         void large_h2_to_inMemory() {
             h2Src  = new H2SqlStorage(new SqlConfig(
                 "jdbc:h2:mem:large_h2_mem;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1",
-                "sa", "", H2_POOL, Optional.empty()));
+                "sa", "", H2_POOL));
             h2Src.init().join();
             memTgt = new InMemoryStorage(); memTgt.init().join();
 
@@ -475,7 +478,7 @@ class StorageTransferCrossBackendTest {
             fileSrc.init().join();
             h2Tgt  = new H2SqlStorage(new SqlConfig(
                 "jdbc:h2:mem:large_file_h2;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1",
-                "sa", "", H2_POOL, Optional.empty()));
+                "sa", "", H2_POOL));
             h2Tgt.init().join();
 
             fileSrc.repository(DESCRIPTOR).saveAll(hundred()).join();
@@ -497,7 +500,7 @@ class StorageTransferCrossBackendTest {
         void large_h2_to_localFile() {
             h2Src  = new H2SqlStorage(new SqlConfig(
                 "jdbc:h2:mem:large_h2_file;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1",
-                "sa", "", H2_POOL, Optional.empty()));
+                "sa", "", H2_POOL));
             h2Src.init().join();
             Path tgtDir = largeDir.resolve("tgt");
             tgtDir.toFile().mkdirs();

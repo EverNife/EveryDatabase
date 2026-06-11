@@ -4,8 +4,11 @@ import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
+import br.com.finalcraft.evernifecore.storage.codec.JacksonYamlCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
 import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
+import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileConfig;
+import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileStorage;
 import br.com.finalcraft.evernifecore.storage.modules.memory.InMemoryStorage;
 import br.com.finalcraft.evernifecore.storage.modules.mongo.MongoConfig;
 import br.com.finalcraft.evernifecore.storage.modules.mongo.MongoStorage;
@@ -14,6 +17,7 @@ import br.com.finalcraft.evernifecore.storage.modules.sql.SqlConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlStorage;
 import br.com.finalcraft.evernifecore.storage.modules.sql.h2.H2SqlStorage;
 import br.com.finalcraft.evernifecore.storage.modules.sql.postgresql.PostgreSqlStorage;
+import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.Query;
 import br.com.finalcraft.evernifecore.testutil.DotEnvTestUtil;
 import com.mongodb.ConnectionString;
@@ -24,15 +28,13 @@ import org.bson.Document;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
-import br.com.finalcraft.evernifecore.storage.codec.JacksonYamlCodec;
-import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileConfig;
-import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileStorage;
-import br.com.finalcraft.evernifecore.storage.query.IndexHint;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -272,7 +274,7 @@ class StorageTransferDockerBackendTest {
         }
         createdMariaDBs.add(dbName);
         SqlStorage storage = new SqlStorage(new SqlConfig(
-            MARIADB_SERVER + "/" + dbName, MARIADB_USER, MARIADB_PASS, TEST_POOL, Optional.empty()));
+            MARIADB_SERVER + "/" + dbName, MARIADB_USER, MARIADB_PASS, TEST_POOL));
         storage.init().join();
         return storage;
     }
@@ -288,7 +290,7 @@ class StorageTransferDockerBackendTest {
         }
         createdPgDBs.add(dbName);
         PostgreSqlStorage storage = new PostgreSqlStorage(new SqlConfig(
-            PG_SERVER + "/" + dbName, PG_USER, PG_PASS, TEST_POOL, Optional.empty()));
+            PG_SERVER + "/" + dbName, PG_USER, PG_PASS, TEST_POOL));
         storage.init().join();
         return storage;
     }
@@ -306,7 +308,7 @@ class StorageTransferDockerBackendTest {
     H2SqlStorage h2(String label) {
         String url = "jdbc:h2:mem:tx_" + label + "_" + DB_SEQ.incrementAndGet()
             + ";DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1";
-        H2SqlStorage storage = new H2SqlStorage(new SqlConfig(url, "sa", "", TEST_POOL, Optional.empty()));
+        H2SqlStorage storage = new H2SqlStorage(new SqlConfig(url, "sa", "", TEST_POOL));
         storage.init().join();
         return storage;
     }

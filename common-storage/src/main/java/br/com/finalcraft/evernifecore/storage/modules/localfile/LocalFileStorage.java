@@ -1,10 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.modules.localfile;
 
-import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.StorageExecutors;
-import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
-import br.com.finalcraft.evernifecore.storage.HealthStatus;
-import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.*;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;

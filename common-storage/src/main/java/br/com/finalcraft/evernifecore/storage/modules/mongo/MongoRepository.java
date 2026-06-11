@@ -1,15 +1,19 @@
 package br.com.finalcraft.evernifecore.storage.modules.mongo;
 
-import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
-import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.codec.CodecException;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
 import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.IndexValueExtractor;
 import br.com.finalcraft.evernifecore.storage.query.Query;
+import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.mongodb.ErrorCategory;
+import com.mongodb.MongoWriteException;
 import com.mongodb.client.ClientSession;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoCollection;
@@ -19,7 +23,6 @@ import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriterSettings;
-import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -161,8 +164,15 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      * Documents whose data cannot be decoded are skipped.
      */
     private long backfillIndexFields(List<IndexHint> newHints) {
-        long total = collection.countDocuments();
-        StorageLog.ProgressTracker tracker = log.newProgressTracker(StorageOp.INDEX_BACKFILL, descriptor.collection());
+        // Count total documents for progress tracking only when progress would be visible
+        // (mirrors the gating in SqlRepository.backfillIndexColumns - no extra round-trip
+        // when DEBUG progress is disabled).
+        long total = 0L;
+        StorageLog.ProgressTracker tracker = null;
+        if (log.isEnabled(StorageOp.INDEX_BACKFILL, StorageLogLevel.DEBUG)) {
+            total = collection.countDocuments();
+            tracker = log.newProgressTracker(StorageOp.INDEX_BACKFILL, descriptor.collection());
+        }
         long updated = 0L;
 
         for (Document doc : collection.find()) {
@@ -183,10 +193,10 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             }
             collection.updateOne(Filters.eq(COL_KEY, key), new Document("$set", set));
             updated++;
-            tracker.tick(updated, total);
+            if (tracker != null) tracker.tick(updated, total);
         }
 
-        tracker.finish(updated);
+        if (tracker != null) tracker.finish(updated);
         return updated;
     }
 
@@ -240,28 +250,36 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     }
 
     /**
+     * Builds the full Mongo document for {@code entity}: the key, the {@code storage_data}
+     * sub-document and the {@code _idx_*} sibling fields for every declared {@link IndexHint}.
+     * Shared by the single {@code replaceOne} path and {@link #saveAll}'s {@code bulkWrite} path.
+     */
+    private Document buildDocument(K key, V entity) throws CodecException {
+        byte[] data = descriptor.codec().encode(entity);
+        Document doc = new Document()
+            .append(COL_KEY,  key.toString())
+            .append(COL_DATA, toDataDoc(data));
+
+        // Populate _idx_* sibling fields for every declared IndexHint.
+        if (!hintsByPath.isEmpty()) {
+            JsonNode tree = IndexValueExtractor.toTree(entity);
+            for (IndexHint hint : hintsByPath.values()) {
+                Object value = IndexValueExtractor.extract(tree, hint);
+                // Store TIMESTAMP as BSON Date so Compass shows human-readable values.
+                doc.append(hint.indexColumnName(), toMongoValue(value, hint));
+            }
+        }
+        return doc;
+    }
+
+    /**
      * Encodes {@code entity} and upserts it via {@code replaceOne} (non-versioned path).
-     * Shared by {@link #save} (which logs a single {@code SAVE} event) and {@link #saveAll}'s
-     * non-versioned fan-out (which logs one {@code SAVE_BATCH} summary instead - logging here
-     * too would emit one event per entity).
+     * {@link #saveAll} does not use this - it batches the same documents through
+     * {@code bulkWrite} instead of paying one round-trip per entity.
      */
     private void replaceDocument(K key, V entity) {
         try {
-            byte[] data = descriptor.codec().encode(entity);
-            Document doc = new Document()
-                .append(COL_KEY,  key.toString())
-                .append(COL_DATA, toDataDoc(data));
-
-            // Populate _idx_* sibling fields for every declared IndexHint.
-            if (!hintsByPath.isEmpty()) {
-                JsonNode tree = IndexValueExtractor.toTree(entity);
-                for (IndexHint hint : hintsByPath.values()) {
-                    Object value = IndexValueExtractor.extract(tree, hint);
-                    // Store TIMESTAMP as BSON Date so Compass shows human-readable values.
-                    doc.append(hint.indexColumnName(), toMongoValue(value, hint));
-                }
-            }
-
+            Document doc = buildDocument(key, entity);
             ReplaceOptions opts = new ReplaceOptions().upsert(true);
             if (session != null)
                 collection.replaceOne(session, Filters.eq(COL_KEY, key.toString()), doc, opts);
@@ -352,8 +370,26 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                                 insertDoc.append(hint.indexColumnName(), toMongoValue(value, hint));
                             }
                         }
-                        if (session != null) collection.insertOne(session, insertDoc);
-                        else                  collection.insertOne(insertDoc);
+                        try {
+                            if (session != null) collection.insertOne(session, insertDoc);
+                            else                  collection.insertOne(insertDoc);
+                        } catch (MongoWriteException mwe) {
+                            if (ErrorCategory.fromErrorCode(mwe.getError().getCode()) != ErrorCategory.DUPLICATE_KEY) {
+                                throw mwe;
+                            }
+                            // Lost the first-insert race: another writer created this key between
+                            // our countDocuments check and the insert. Surface it as the same
+                            // OptimisticLockException a version mismatch produces.
+                            Document raced = session != null
+                                ? collection.find(session, Filters.eq(COL_KEY, key.toString())).first()
+                                : collection.find(Filters.eq(COL_KEY, key.toString())).first();
+                            long actualVersion = raced != null && raced.get(COL_VERSION) instanceof Number
+                                ? ((Number) raced.get(COL_VERSION)).longValue()
+                                : 0L;
+                            log.optimisticLockConflict(descriptor.collection(), key, incomingVersion, actualVersion);
+                            throw new OptimisticLockException(
+                                descriptor.type(), key, incomingVersion, actualVersion);
+                        }
                         // entity version is already 0 (set above)
                     } else {
                         // Document exists but version did not match - conflict.
@@ -380,23 +416,57 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         }, StorageExecutors.async());
     }
 
+    /**
+     * Max models per {@code bulkWrite} call. Chunking keeps each wire message comfortably
+     * under MongoDB's 16MB/message limit even for large entities.
+     */
+    private static final int BULK_WRITE_CHUNK = 1000;
+
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
         long startMs = System.currentTimeMillis();
         long count = entities.size();
-        boolean versioned = descriptor.isVersioned();
-        List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
-        for (V entity : entities) {
-            if (versioned) {
-                // Optimistic-lock check-then-act per entity - reuse save() as-is.
-                futures.add(save(entity));
-            } else {
-                K key = descriptor.keyExtractor().apply(entity);
-                futures.add(CompletableFuture.runAsync(() -> replaceDocument(key, entity), StorageExecutors.async()));
-            }
+
+        if (descriptor.isVersioned()) {
+            // Optimistic-lock check-then-act per entity is inherent to versioning - reuse save().
+            List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
+            for (V entity : entities) futures.add(save(entity));
+            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
         }
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-            .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
+
+        // Non-versioned path: upsert everything through chunked unordered bulkWrite calls
+        // (one round-trip per chunk instead of one replaceOne round-trip per entity).
+        return CompletableFuture.supplyAsync(() -> {
+            ReplaceOptions upsert = new ReplaceOptions().upsert(true);
+            BulkWriteOptions unordered = new BulkWriteOptions().ordered(false);
+            List<ReplaceOneModel<Document>> models = new ArrayList<>(Math.min((int) count, BULK_WRITE_CHUNK));
+
+            for (V entity : entities) {
+                K key = descriptor.keyExtractor().apply(entity);
+                try {
+                    models.add(new ReplaceOneModel<>(
+                        Filters.eq(COL_KEY, key.toString()), buildDocument(key, entity), upsert));
+                } catch (CodecException e) {
+                    throw log.errored(StorageOp.SAVE_BATCH, descriptor.collection(),
+                        new RuntimeException("Mongo codec error saving key=" + key, e));
+                }
+                if (models.size() >= BULK_WRITE_CHUNK) {
+                    bulkWriteChunk(models, unordered);
+                    models.clear();
+                }
+            }
+            if (!models.isEmpty()) bulkWriteChunk(models, unordered);
+
+            log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs);
+            return null;
+        }, StorageExecutors.async());
+    }
+
+    private void bulkWriteChunk(List<ReplaceOneModel<Document>> models, BulkWriteOptions opts) {
+        if (session != null) collection.bulkWrite(session, models, opts);
+        else                 collection.bulkWrite(models, opts);
     }
 
     @Override

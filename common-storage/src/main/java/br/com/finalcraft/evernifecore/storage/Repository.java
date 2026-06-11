@@ -72,14 +72,16 @@ public interface Repository<K, V> {
      *
      * <p>{@code fieldPath} must have been declared on the {@link EntityDescriptor} via
      * {@code .index(IndexHint.string("..."))} (or another typed factory). Backends that
-     * support real indexes (SQL, Mongo, InMemory) use them; LocalFile falls back to a
-     * full scan.
+     * support real indexes (SQL, Mongo, InMemory) use them; LocalFile answers with a
+     * full scan - correct, but O(N) per call.
      *
      * <p>Equivalent to {@link #query(Query)} with {@code Query.eq(fieldPath, value)} but
      * shorter for the common case.
      *
      * @throws IllegalArgumentException at execution time if {@code fieldPath} is not declared
-     *         as an {@code IndexHint} (LocalFile excepted - it scans anyway)
+     *         as an {@code IndexHint} - every backend validates this, including LocalFile
+     *         (which could scan undeclared fields, but rejects them to keep behavior
+     *         consistent across backends)
      */
     CompletableFuture<List<V>> findBy(String fieldPath, Object value);
 

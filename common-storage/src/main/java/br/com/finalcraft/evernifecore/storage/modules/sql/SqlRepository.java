@@ -1,9 +1,8 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql;
 
-import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
-import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.codec.CodecException;
 import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
@@ -11,6 +10,7 @@ import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.IndexValueExtractor;
 import br.com.finalcraft.evernifecore.storage.query.Query;
+import br.com.finalcraft.evernifecore.storage.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.sql.DataSource;
@@ -205,8 +205,8 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         sql.append(q(COL_KEY)).append(" VARCHAR(255) NOT NULL, ");
         sql.append(q(COL_DATA)).append(' ').append(dataColumnType()).append(" NOT NULL, ");
 
-        if (descriptor.isVersioned()) {
-            // Extra column for versioned descriptors only
+        if (versioningActive()) {
+            // Extra column only when this dialect actually enforces optimistic locking
             sql.append(q(COL_VERSION)).append(" BIGINT NOT NULL DEFAULT 0, ");
         }
 
@@ -492,6 +492,27 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     /**
+     * Single gate for "optimistic locking is in effect": the descriptor opted in AND this
+     * dialect enforces it. Everything versioning touches (the {@code lock_version} table
+     * column, the save/saveAll dispatch) must use this same gate - that alignment is what
+     * lets a versioned descriptor on a non-versioning dialect (H2) degrade cleanly to
+     * plain upsert instead of producing a column/parameter mismatch.
+     */
+    protected final boolean versioningActive() {
+        return descriptor.isVersioned() && supportsVersioning();
+    }
+
+    /** Cached result of {@link #buildUpsertSql()} - the column list is fixed after construction. */
+    private volatile String upsertSqlCache;
+
+    /** Returns the (lazily cached) upsert SQL. */
+    private String upsertSql() {
+        String sql = upsertSqlCache;
+        if (sql == null) upsertSqlCache = sql = buildUpsertSql();
+        return sql;
+    }
+
+    /**
      * Builds the upsert SQL for this dialect.
      * Default: MySQL/MariaDB {@code ON DUPLICATE KEY UPDATE}.
      * The column list includes all declared {@code _idx_*} sibling columns.
@@ -521,14 +542,15 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     /**
      * Ordered column list used in {@code INSERT (col1, col2, ...)} and {@code setX(i, ...)}.
-     * For versioned descriptors the list includes {@code lock_version} after {@code storage_data}.
-     * Non-versioned descriptors keep the existing 2-column (+ index columns) schema.
+     * Must stay aligned with {@link #bindUpsertParameters}: key, data, then index columns.
+     * {@code lock_version} is deliberately absent - the plain upsert never runs when
+     * {@link #versioningActive()} (the versioned path has its own INSERT/UPDATE SQL), and
+     * on non-versioning dialects the column does not exist.
      */
     protected List<String> allColumnsForWrite() {
-        List<String> cols = new ArrayList<>(3 + indexes.size());
+        List<String> cols = new ArrayList<>(2 + indexes.size());
         cols.add(COL_KEY);
         cols.add(COL_DATA);
-        if (descriptor.isVersioned()) cols.add(COL_VERSION);
         for (IndexHint hint : indexes) cols.add(hint.indexColumnName());
         return cols;
     }
@@ -588,7 +610,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyList());
         List<K> keyList = new ArrayList<>(keys);
         String placeholders = repeat("?", keyList.size(), ",");
-        String sql = "SELECT " + q(COL_DATA) + " FROM " + q(tableName())
+        String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName())
             + " WHERE " + q(COL_KEY) + " IN (" + placeholders + ")";
         return withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -600,13 +622,13 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
-        if (descriptor.isVersioned() && supportsVersioning()) {
+        if (versioningActive()) {
             return saveVersioned(entity);
         }
         K key = descriptor.keyExtractor().apply(entity);
         return withConnection(conn -> {
             byte[] data = descriptor.codec().encode(entity);
-            try (PreparedStatement ps = conn.prepareStatement(buildUpsertSql())) {
+            try (PreparedStatement ps = conn.prepareStatement(upsertSql())) {
                 bindUpsertParameters(ps, key, entity, data);
                 ps.executeUpdate();
             }
@@ -763,7 +785,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
 
-        if (descriptor.isVersioned() && supportsVersioning()) {
+        if (versioningActive()) {
             // For versioned descriptors: loop save() per entity within a single connection
             // to ensure each entity's optimistic lock check is atomic.
             return withConnection(conn -> {
@@ -787,7 +809,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         long startMs = System.currentTimeMillis();
         long count = entities.size();
         return withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(buildUpsertSql())) {
+            try (PreparedStatement ps = conn.prepareStatement(upsertSql())) {
                 for (V entity : entities) {
                     K key = descriptor.keyExtractor().apply(entity);
                     byte[] data = descriptor.codec().encode(entity);
@@ -888,7 +910,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Stream<V>> all() {
-        String sql = "SELECT " + q(COL_DATA) + " FROM " + q(tableName());
+        String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName());
         return withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 return readEntities(ps).stream();
@@ -923,7 +945,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             appendCondition(where, params, c, hint);
         }
 
-        String sql = "SELECT " + q(COL_DATA) + " FROM " + q(tableName()) + " WHERE " + where;
+        String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName()) + " WHERE " + where;
         long startMs = System.currentTimeMillis();
 
         return withConnection(conn -> {
@@ -975,6 +997,9 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     /**
      * Reads all entities from the given prepared statement's result set.
+     * The statement must project {@code (storage_key, storage_data)} in that order -
+     * every caller ({@code findMany}, {@code all}, {@code query}) includes the key column
+     * so corrupted-row WARN entries can name the offending key.
      * Rows whose JSON cannot be decoded emit a WARN log entry and are silently skipped
      * (consistent with the codec-tolerant "skip corrupted" contract).
      */
@@ -982,10 +1007,8 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         List<V> result = new ArrayList<>();
         try (ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
-                String json = rs.getString(1);
-                String key  = null;
-                // Try to read the key column if available (best-effort for logging context)
-                try { key = rs.getString(COL_KEY); } catch (SQLException ignored) {}
+                String key  = rs.getString(1);
+                String json = rs.getString(2);
                 byte[] data = json.getBytes(StandardCharsets.UTF_8);
                 try {
                     result.add(descriptor.codec().decode(data));

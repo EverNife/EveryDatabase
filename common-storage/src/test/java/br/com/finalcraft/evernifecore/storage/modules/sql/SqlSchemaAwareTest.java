@@ -1,21 +1,22 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql;
 
 import br.com.finalcraft.evernifecore.storage.Repository;
-import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
+import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.modules.sql.h2.H2SqlStorage;
 import br.com.finalcraft.evernifecore.storage.schema.Migration;
 import br.com.finalcraft.evernifecore.storage.schema.MigrationContext;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaVersion;
-
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.*;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -67,7 +68,7 @@ class SqlSchemaAwareTest {
     void setUp(TestInfo info) {
         String dbName = info.getTestMethod().map(m -> m.getName()).orElse("default");
         String url = "jdbc:h2:mem:" + dbName + ";DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1";
-        storage = new H2SqlStorage(new SqlConfig(url, "sa", "", TEST_POOL, Optional.empty()));
+        storage = new H2SqlStorage(new SqlConfig(url, "sa", "", TEST_POOL));
         storage.init().join();
     }
 

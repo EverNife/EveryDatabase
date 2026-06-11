@@ -1,13 +1,12 @@
-package br.com.finalcraft.evernifecore.storage.modules.in_memory;
+package br.com.finalcraft.evernifecore.storage.modules.memory;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
-import br.com.finalcraft.evernifecore.storage.modules.memory.InMemoryStorage;
+import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Order;

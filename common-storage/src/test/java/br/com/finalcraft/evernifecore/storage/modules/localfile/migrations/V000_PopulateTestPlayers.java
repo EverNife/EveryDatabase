@@ -1,8 +1,8 @@
 package br.com.finalcraft.evernifecore.storage.modules.localfile.migrations;
 
 import br.com.finalcraft.evernifecore.storage.Repository;
-import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
+import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileMigration;
 import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileStorage;
 

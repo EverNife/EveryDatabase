@@ -28,9 +28,10 @@ public enum ErrorPolicy {
     CONTINUE,
 
     /**
-     * When a batch write fails due to a key conflict on the target, the batch is
-     * retried entity-by-entity, skipping any key that already exists
-     * ({@link br.com.finalcraft.evernifecore.storage.Repository#exists(Object)} check).
+     * Writes entity-by-entity (never as a batch upsert), checking
+     * {@link br.com.finalcraft.evernifecore.storage.Repository#exists(Object)} for each key
+     * first and skipping any key already present on the target. Slower than the batch path
+     * of the other policies (two round-trips per entity), but never overwrites target data.
      *
      * <p>Useful when {@code failIfTargetCollectionNotEmpty=false} and you want a
      * non-destructive merge: existing target data is preserved, only new entries are

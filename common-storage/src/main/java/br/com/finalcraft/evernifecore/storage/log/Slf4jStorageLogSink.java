@@ -7,9 +7,11 @@ import org.slf4j.LoggerFactory;
  * {@link StorageLogSink} that routes events to SLF4J loggers.
  *
  * <p><b>This is the only class in {@code common-storage} that directly imports
- * {@code org.slf4j.*}.</b> It is never referenced by name from other classes;
- * instead it is instantiated reflectively via {@link StorageLogSinks.Slf4jHolder}
- * only when SLF4J has been confirmed present on the runtime classpath.
+ * {@code org.slf4j.*}.</b> It is referenced solely from {@link StorageLogSinks.Slf4jHolder},
+ * whose lazy class-loading isolates the reference: the holder probes for
+ * {@code org.slf4j.LoggerFactory} reflectively and only instantiates this sink when SLF4J
+ * is confirmed present on the runtime classpath - so the JVM never tries to link this
+ * class (and throw {@code NoClassDefFoundError}) when SLF4J is absent.
  *
  * <p>Each {@link StorageLogTopic} maps to its own named SLF4J logger:
  * {@code evernifecore.storage.<topic>} (all lower-case).

@@ -7,21 +7,13 @@ import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaVersion;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage;
 import br.com.finalcraft.evernifecore.testutil.DotEnvTestUtil;
-import com.mongodb.ConnectionString;
-import com.mongodb.MongoClientSettings;
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
+import br.com.finalcraft.evernifecore.testutil.ThrowawayDatabaseSupport;
 import com.mongodb.client.MongoDatabase;
-import org.bson.Document;
 import org.junit.jupiter.api.*;
 
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Concrete test suite for {@link MongoStorage}.
@@ -82,80 +74,16 @@ class MongoStorageTest extends AbstractStorageTest {
     static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "39308");
     static final String MONGO_URL  = "mongodb://" + MONGO_USER + ":" + MONGO_PASS + "@" + MONGO_HOST + ":" + MONGO_PORT;
 
-    /**
-     * When {@code false}, {@link #cleanupDatabases()} skips the drop so you can inspect the
-     * test databases in MongoDB after the run (e.g. with Compass or mongosh).
-     * Set back to {@code true} once you are done inspecting.
-     */
-    static final boolean CLEAN_TEST_RESIDUALS = false;
-
-    /**
-     * Run number shared by all tests in this execution.
-     * Computed once in {@link #assumeMongoAvailable()} by scanning existing {@code enc_*}
-     * databases; every test in this run uses {@code enc_NNN_mg_<methodName>}.
-     */
-    private static int runNumber = 1;
-
-    /** Database names created during this test run - all dropped in {@link #cleanupDatabases()}. */
-    private static final Set<String> createdDbs = ConcurrentHashMap.newKeySet();
-
-    // ------------------------------------------------------------------
-    //  Availability guard - skip the whole class if MongoDB is not up
-    // ------------------------------------------------------------------
+    private static final ThrowawayDatabaseSupport DBS = ThrowawayDatabaseSupport.mongo(MONGO_URL, "mg");
 
     @BeforeAll
     static void assumeMongoAvailable() {
-        MongoClientSettings probe = MongoClientSettings.builder()
-            .applyConnectionString(new ConnectionString(MONGO_URL))
-            // Short timeout so the check fails fast when MongoDB is not running
-            .applyToClusterSettings(b -> b.serverSelectionTimeout(3, TimeUnit.SECONDS))
-            .applyToSocketSettings(b -> b.connectTimeout(3, TimeUnit.SECONDS))
-            .build();
-
-        try (MongoClient client = MongoClients.create(probe)) {
-            client.getDatabase("admin").runCommand(new Document("ping", 1));
-        } catch (Exception e) {
-            assumeTrue(false,
-                "MongoDB not available at " + MONGO_URL + " - skipping all MongoStorageTest. "
-                + "Start a MongoDB 4.2+ server on that address to run these tests. "
-                + "Cause: " + e.getMessage());
-        }
-
-        // Determine run number: scan existing enc_* databases, use max+1.
-        try (MongoClient client = MongoClients.create(probe)) {
-            List<String> existing = new java.util.ArrayList<>();
-            for (String name : client.listDatabaseNames()) {
-                if (name.startsWith("enc_")) existing.add(name);
-            }
-            runNumber = computeRunNumber(existing);
-        } catch (Exception ignored) {
-            runNumber = 1; // safe fallback
-        }
-        System.out.println("[MongoStorageTest] Run number: " + runNumber
-            + "  (databases will be prefixed enc_" + String.format("%03d", runNumber) + "_mg_*)");
+        DBS.assumeAvailable("MongoStorageTest");
     }
 
-    /**
-     * Drop all test databases created during this run.
-     * Skipped when {@link #CLEAN_TEST_RESIDUALS} is {@code false} - set it to {@code false}
-     * to keep the databases alive for post-run inspection in Compass / mongosh.
-     * Best-effort; never fails the build.
-     */
     @AfterAll
     static void cleanupDatabases() {
-        if (!CLEAN_TEST_RESIDUALS) {
-            System.out.println("[MongoStorageTest] CLEAN_TEST_RESIDUALS=false - keeping databases for inspection:");
-            createdDbs.forEach(name -> System.out.println("  -> " + name));
-            return;
-        }
-        if (createdDbs.isEmpty()) return;
-        try (MongoClient client = MongoClients.create(MONGO_URL)) {
-            createdDbs.forEach(name ->
-                client.getDatabase(name).drop()
-            );
-        } catch (Exception ignored) {
-            // best-effort: cleanup failure must not break the build
-        }
+        DBS.dropAll("MongoStorageTest");
     }
 
     // ------------------------------------------------------------------
@@ -164,9 +92,7 @@ class MongoStorageTest extends AbstractStorageTest {
 
     @Override
     protected Storage createStorage(String testMethodName) {
-        String dbName = buildDbName("mg", runNumber, testMethodName);
-        createdDbs.add(dbName);
-        return new MongoStorage(new MongoConfig(MONGO_URL, dbName));
+        return new MongoStorage(new MongoConfig(MONGO_URL, DBS.newDatabase(testMethodName)));
     }
 
     // ------------------------------------------------------------------

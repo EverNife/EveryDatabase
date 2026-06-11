@@ -1,28 +1,20 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql;
 
 import br.com.finalcraft.evernifecore.storage.Storage;
-import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.modules.AbstractVersionedStorageTest;
 import br.com.finalcraft.evernifecore.testutil.DotEnvTestUtil;
-import org.junit.jupiter.api.*;
+import br.com.finalcraft.evernifecore.testutil.ThrowawayDatabaseSupport;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.DisplayName;
 
-import java.sql.*;
 import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Optimistic-locking (versioned) tests for the MariaDB/MySQL backend.
  *
- * <p>Inherits all contract tests from {@link AbstractVersionedStorageTest}. MariaDB is
- * one of only two backends where versioning is supported (the other being MongoDB); it runs
- * multi-process writes against a real networked server and therefore benefits from
- * optimistic locking.
- *
- * <p>Requires a running MariaDB 10.x+ (or MySQL 8.x) server. If none is available the
- * entire class is <em>skipped</em> automatically.
+ * <p>Inherits all contract tests from {@link AbstractVersionedStorageTest}.
+ * Requires a running MariaDB 10.x+ (or MySQL 8.x) server; skipped automatically otherwise.
  *
  * <h3>Configuration</h3>
  * Same env vars as {@link MariaDbStorageTest}:
@@ -48,73 +40,25 @@ class MariaDbVersionedStorageTest extends AbstractVersionedStorageTest {
     );
 
     private static final PoolTuning TEST_POOL = new PoolTuning(
-        1,
-        5,
-        Duration.ofSeconds(5),
-        Duration.ofSeconds(30)
-    );
+        1, 5, Duration.ofSeconds(5), Duration.ofSeconds(30));
 
-    static final boolean CLEAN_TEST_RESIDUALS = true;
-
-    private static int runNumber = 1;
-    private static final Set<String> createdDbs = ConcurrentHashMap.newKeySet();
+    private static final ThrowawayDatabaseSupport DBS =
+        ThrowawayDatabaseSupport.mysql(MARIADB_SERVER_URL, MARIADB_USER, MARIADB_PASS, "mv");
 
     @BeforeAll
     static void assumeMariaDbAvailable() {
-        Properties props = new Properties();
-        props.setProperty("user",           MARIADB_USER);
-        props.setProperty("password",       MARIADB_PASS);
-        props.setProperty("connectTimeout", "3000");
-        props.setProperty("socketTimeout",  "3000");
-
-        try (Connection conn = DriverManager.getConnection(MARIADB_SERVER_URL + "/", props);
-             Statement stmt = conn.createStatement()) {
-            stmt.execute("SELECT 1");
-        } catch (Exception e) {
-            assumeTrue(false,
-                "MariaDB not available at " + MARIADB_SERVER_URL + " - skipping MariaDbVersionedStorageTest. "
-                + "Cause: " + e.getMessage());
-        }
-
-        try (Connection conn = DriverManager.getConnection(MARIADB_SERVER_URL + "/", MARIADB_USER, MARIADB_PASS);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SHOW DATABASES")) {
-            List<String> existing = new ArrayList<>();
-            while (rs.next()) {
-                String name = rs.getString(1);
-                if (name.startsWith("enc_")) existing.add(name);
-            }
-            runNumber = AbstractStorageTest.computeRunNumber(existing);
-        } catch (SQLException ignored) {
-            runNumber = 1;
-        }
+        DBS.assumeAvailable("MariaDbVersionedStorageTest");
     }
 
     @AfterAll
     static void cleanupDatabases() {
-        if (!CLEAN_TEST_RESIDUALS || createdDbs.isEmpty()) return;
-        try (Connection conn = DriverManager.getConnection(MARIADB_SERVER_URL + "/", MARIADB_USER, MARIADB_PASS);
-             Statement stmt = conn.createStatement()) {
-            for (String name : createdDbs) {
-                try { stmt.execute("DROP DATABASE IF EXISTS `" + name + "`"); }
-                catch (SQLException ignored) {}
-            }
-        } catch (SQLException ignored) {}
+        DBS.dropAll("MariaDbVersionedStorageTest");
     }
 
     @Override
     protected Storage createStorage(String testMethodName) {
-        String dbName = AbstractStorageTest.buildDbName("mv", runNumber, testMethodName);
-
-        try (Connection conn = DriverManager.getConnection(MARIADB_SERVER_URL + "/", MARIADB_USER, MARIADB_PASS);
-             Statement stmt = conn.createStatement()) {
-            stmt.execute("CREATE DATABASE `" + dbName + "`");
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to CREATE DATABASE for test: " + dbName, e);
-        }
-        createdDbs.add(dbName);
-
+        String dbName = DBS.newDatabase(testMethodName);
         return new SqlStorage(new SqlConfig(
-            MARIADB_SERVER_URL + "/" + dbName, MARIADB_USER, MARIADB_PASS, TEST_POOL, Optional.empty()));
+            MARIADB_SERVER_URL + "/" + dbName, MARIADB_USER, MARIADB_PASS, TEST_POOL));
     }
 }

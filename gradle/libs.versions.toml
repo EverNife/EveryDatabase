@@ -1,5 +1,33 @@
 [versions]
-shadow = "8.3.8"
+jabel = "0.4.2"
+hikaricp = "5.1.0"
+mongodb = "4.11.2"
+h2 = "2.3.232"
+jackson = "2.15.4"
+slf4j = "1.7.36"
+slf4j-simple = "2.0.17"
+lombok = "1.18.42"
+junit = "5.10.0"
+mysql = "9.4.0"
+postgresql = "42.7.7"
+instancio = "6.0.0-RC2"
+docker-compose = "0.17.12"
+
+[libraries]
+jabel = { module = "com.github.bsideup.jabel:jabel-javac-plugin", version.ref = "jabel" }
+hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
+mongodb-driver-sync = { module = "org.mongodb:mongodb-driver-sync", version.ref = "mongodb" }
+h2 = { module = "com.h2database:h2", version.ref = "h2" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j-simple" }
+lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
+junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junit" }
+junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junit" }
+mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+instancio-junit = { module = "org.instancio:instancio-junit", version.ref = "instancio" }
 
 [plugins]
-shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
+docker-compose = { id = "com.avast.gradle.docker-compose", version.ref = "docker-compose" }

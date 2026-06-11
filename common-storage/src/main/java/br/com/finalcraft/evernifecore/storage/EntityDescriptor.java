@@ -31,7 +31,7 @@ import java.util.regex.Pattern;
  *   <li>No spaces, hyphens, dots, backticks, quotes, or any other special character</li>
  * </ul>
  * These rules produce identifiers that are safe across all supported backends without
- * any additional quoting or escaping: MySQL/MariaDB, PostgreSQL, H2, SQLite, MongoDB,
+ * any additional quoting or escaping: MySQL/MariaDB, PostgreSQL, H2, MongoDB,
  * and the local file-system.
  *
  * Example:
@@ -67,13 +67,13 @@ public final class EntityDescriptor<K, V> {
     /** Nullable. When non-null (together with {@link #versionGetter}), optimistic locking is active. */
     private final BiConsumer<V, Long> versionSetter;
 
-    private EntityDescriptor(Builder<K, V> b) {
+    private EntityDescriptor(Builder<K, V> b, List<IndexHint> allIndexes) {
         this.collection     = b.collection;
         this.type           = b.type;
         this.keyType        = b.keyType;
         this.keyExtractor   = b.keyExtractor;
         this.codec          = b.codec;
-        this.indexes        = Collections.unmodifiableList(new ArrayList<>(b.indexes));
+        this.indexes        = Collections.unmodifiableList(new ArrayList<>(allIndexes));
         this.versionGetter  = b.versionGetter;
         this.versionSetter  = b.versionSetter;
     }
@@ -232,12 +232,15 @@ public final class EntityDescriptor<K, V> {
                 throw new IllegalStateException("EntityDescriptor.codec must be set");
 
             // Scan entity class for @Indexed annotations and merge with manually declared hints.
-            indexes.addAll(IndexHint.fromAnnotations(type));
+            // Merged into a local list (not the builder field) so build() stays idempotent:
+            // calling it twice on the same builder must not duplicate the annotation hints.
+            List<IndexHint> allIndexes = new ArrayList<>(indexes);
+            allIndexes.addAll(IndexHint.fromAnnotations(type));
 
             // Reject duplicate index hints on the same field path - keeping two indexes
             // on the same field has no benefit and confuses some backends.
             Set<String> seenPaths = new HashSet<>();
-            for (IndexHint hint : indexes) {
+            for (IndexHint hint : allIndexes) {
                 if (!seenPaths.add(hint.fieldPath())) {
                     throw new IllegalStateException(
                         "EntityDescriptor: duplicate index hint on field '" + hint.fieldPath()
@@ -247,7 +250,7 @@ public final class EntityDescriptor<K, V> {
                 }
             }
 
-            return new EntityDescriptor<>(this);
+            return new EntityDescriptor<>(this, allIndexes);
         }
     }
 }

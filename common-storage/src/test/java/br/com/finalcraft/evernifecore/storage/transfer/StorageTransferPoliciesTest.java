@@ -1,6 +1,9 @@
 package br.com.finalcraft.evernifecore.storage.transfer;
 
-import br.com.finalcraft.evernifecore.storage.*;
+import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
+import br.com.finalcraft.evernifecore.storage.HealthStatus;
+import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
 import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
@@ -10,19 +13,14 @@ import br.com.finalcraft.evernifecore.storage.modules.sql.PoolTuning;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlMigration;
 import br.com.finalcraft.evernifecore.storage.modules.sql.h2.H2SqlStorage;
-import br.com.finalcraft.evernifecore.storage.schema.SchemaVersion;
 import br.com.finalcraft.evernifecore.storage.query.Query;
-import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
-
+import br.com.finalcraft.evernifecore.storage.schema.SchemaVersion;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -251,7 +249,7 @@ class StorageTransferPoliciesTest {
 
         // H2SqlStorage is SchemaAwareStorage after our implementation
         String url = "jdbc:h2:mem:applyMigrationsTest;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1";
-        H2SqlStorage h2Target = new H2SqlStorage(new SqlConfig(url, "sa", "", H2_POOL, Optional.empty()));
+        H2SqlStorage h2Target = new H2SqlStorage(new SqlConfig(url, "sa", "", H2_POOL));
         h2Target.init().join();
 
         // Register a migration on the target
@@ -296,7 +294,7 @@ class StorageTransferPoliciesTest {
         source.repository(DESCRIPTOR).save(alice()).join();
 
         String url = "jdbc:h2:mem:noMigrationsTest;DATABASE_TO_UPPER=FALSE;DB_CLOSE_DELAY=-1";
-        H2SqlStorage h2Target = new H2SqlStorage(new SqlConfig(url, "sa", "", H2_POOL, Optional.empty()));
+        H2SqlStorage h2Target = new H2SqlStorage(new SqlConfig(url, "sa", "", H2_POOL));
         h2Target.init().join();
 
         SqlMigration neverRunMigration = new SqlMigration() {

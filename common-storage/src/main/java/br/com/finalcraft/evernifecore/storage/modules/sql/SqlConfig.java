@@ -2,9 +2,6 @@ package br.com.finalcraft.evernifecore.storage.modules.sql;
 
 import br.com.finalcraft.evernifecore.storage.StorageConfig;
 
-import java.nio.file.Path;
-import java.util.Optional;
-
 /**
  * Configuration for the SQL (JDBC + HikariCP) storage backend.
  *
@@ -12,7 +9,6 @@ import java.util.Optional;
  * <ul>
  *   <li>{@code jdbc:mariadb://host/db} - MariaDB / MySQL</li>
  *   <li>{@code jdbc:postgresql://host/db} - PostgreSQL</li>
- *   <li>{@code jdbc:sqlite:data.db} - SQLite (override {@code buildUpsertSql} in {@link SqlRepository})</li>
  *   <li>{@code jdbc:h2:mem:test} - H2 in-memory (for integration tests)</li>
  * </ul>
  *
@@ -25,8 +21,7 @@ import java.util.Optional;
  * Storage storage = Storages.create(new SqlConfig(
  *     "jdbc:mariadb://localhost/mc",
  *     "root", "pass",
- *     PoolTuning.defaults(),
- *     Optional.of(Path.of("migrations"))));
+ *     PoolTuning.defaults()));
  * }</pre>
  */
 public final class SqlConfig implements StorageConfig {
@@ -35,36 +30,31 @@ public final class SqlConfig implements StorageConfig {
     private final String username;
     private final String password;
     private final PoolTuning pool;
-    private final Optional<Path> migrationsDir;
 
     /**
      * Full constructor.
      *
-     * @param jdbcUrl       full JDBC connection URL
-     * @param username      database username
-     * @param password      database password
-     * @param pool          HikariCP pool tuning parameters
-     * @param migrationsDir optional path to a directory containing {@link br.com.finalcraft.evernifecore.storage.schema.Migration} scripts
+     * @param jdbcUrl  full JDBC connection URL
+     * @param username database username
+     * @param password database password
+     * @param pool     HikariCP pool tuning parameters
      */
-    public SqlConfig(String jdbcUrl, String username, String password,
-                     PoolTuning pool, Optional<Path> migrationsDir) {
-        this.jdbcUrl       = jdbcUrl;
-        this.username      = username;
-        this.password      = password;
-        this.pool          = pool;
-        this.migrationsDir = migrationsDir;
+    public SqlConfig(String jdbcUrl, String username, String password, PoolTuning pool) {
+        this.jdbcUrl  = jdbcUrl;
+        this.username = username;
+        this.password = password;
+        this.pool     = pool;
     }
 
     /**
-     * Convenience constructor - uses {@link PoolTuning#defaults()} and no migrations directory.
+     * Convenience constructor - uses {@link PoolTuning#defaults()}.
      */
     public SqlConfig(String jdbcUrl, String username, String password) {
-        this(jdbcUrl, username, password, PoolTuning.defaults(), Optional.empty());
+        this(jdbcUrl, username, password, PoolTuning.defaults());
     }
 
-    public String            jdbcUrl()       { return jdbcUrl; }
-    public String            username()      { return username; }
-    public String            password()      { return password; }
-    public PoolTuning        pool()          { return pool; }
-    public Optional<Path>    migrationsDir() { return migrationsDir; }
+    public String     jdbcUrl()  { return jdbcUrl; }
+    public String     username() { return username; }
+    public String     password() { return password; }
+    public PoolTuning pool()     { return pool; }
 }
