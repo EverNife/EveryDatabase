@@ -61,7 +61,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 | **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Durable (one file per entity) |
 | **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ❌ | ✅ in-memory map | ❌ | Ephemeral |
 
-> SQL backends store the entity as a **native JSON column**; MongoDB stores it as a **native BSON sub-document** — not an escaped string — so the data is queryable and readable in standard DB tools.
+> MySQL/MariaDB and PostgreSQL store the entity in a **native `JSON` column**, and MongoDB as a **native BSON sub-document** — not an escaped string — so the data stays queryable and readable in standard DB tools. (H2 stores it as plain `TEXT`.)
 
 ---
 
@@ -199,71 +199,50 @@ After `loadAll(...)` returns, use `Storages` normally. Note: `everydatabase-libb
 ## Quick start
 
 ```java
-
+import br.com.finalcraft.everydatabase.*;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 
-// 1. A plain entity (no-arg ctor + getters/setters so Jackson can (de)serialise it).
-
+// 1. A plain entity — no-arg constructor + getters/setters so Jackson can (de)serialise it.
 public class PlayerData {
-  private UUID uuid;
-  private String name;
-  private int score;
+    private UUID uuid;
+    private String name;
+    private int score;
 
-  public PlayerData() {
-  }
+    public PlayerData() {}
 
-  public PlayerData(UUID uuid, String name, int score) {
-    this.uuid = uuid;
-    this.name = name;
-    this.score = score;
-  }
+    public PlayerData(UUID uuid, String name, int score) {
+        this.uuid = uuid;
+        this.name = name;
+        this.score = score;
+    }
 
-  public UUID getUuid() {
-    return uuid;
-  }
-
-  public String getName() {
-    return name;
-  }
-
-  public int getScore() {
-    return score;
-  }
-  // setters omitted for brevity
+    public UUID getUuid()   { return uuid; }
+    public String getName() { return name; }
+    public int getScore()   { return score; }
+    // setters omitted for brevity
 }
 
-  // 2. Describe it once.
-  EntityDescriptor<UUID, PlayerData> PLAYERS = EntityDescriptor.builder(UUID.class, PlayerData.class)
-    .collection("players")
-    .keyExtractor(PlayerData::getUuid)
-    .codec(new JacksonJsonCodec<>(PlayerData.class))
-    .build();
+// 2. Describe it once.
+EntityDescriptor<UUID, PlayerData> PLAYERS = EntityDescriptor.builder(UUID.class, PlayerData.class)
+        .collection("players")
+        .keyExtractor(PlayerData::getUuid)
+        .codec(new JacksonJsonCodec<>(PlayerData.class))
+        .build();
 
-  // 3. Pick a backend and go.
-  Storage storage = Storages.createSQL(new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
-storage.
+// 3. Pick a backend and go.
+Storage storage = Storages.createSQL(new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
+storage.init().join();
 
-  init().
+Repository<UUID, PlayerData> repo = storage.repository(PLAYERS);
 
-  join();
+UUID aliceId = UUID.randomUUID();
+repo.save(new PlayerData(aliceId, "Alice", 100)).join();
 
-  Repository<UUID, PlayerData> repo = storage.repository(PLAYERS);
+Optional<PlayerData> alice = repo.find(aliceId).join();
+long total = repo.count().join();
 
-repo.
-
-  save(new PlayerData(UUID.randomUUID(), "Alice",100)).
-
-  join();
-
-  Optional<PlayerData> alice = repo.find(aliceId).join();
-  long total = repo.count().join();
-
-storage.
-
-  close().
-
-  join();
+storage.close().join();
 ```
 
 Switching to MongoDB is a one-line change — everything below `storage.repository(...)` stays identical:
@@ -303,23 +282,16 @@ You discover them with `instanceof`, so the compiler stops you from using transa
 <summary><b>MySQL / MariaDB</b></summary>
 
 ```java
-
-
 SqlStorage sql = Storages.createSQL(
-  new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
+        new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
+sql.init().join();
 
 // Full control over the HikariCP pool (min/max, connection timeout, idle timeout;
 // a 5-arg PoolTuning constructor also exposes maxLifetime):
 SqlStorage tuned = Storages.createSQL(new SqlConfig(
-  "jdbc:mysql://db.internal:3306/app",
-  "user", "pass",
-  new PoolTuning(2, 10, Duration.ofSeconds(30), Duration.ofMinutes(10))));
-
-sql.
-
-init().
-
-join();
+        "jdbc:mysql://db.internal:3306/app",
+        "user", "pass",
+        new PoolTuning(2, 10, Duration.ofSeconds(30), Duration.ofMinutes(10))));
 ```
 </details>
 
@@ -354,11 +326,11 @@ H2SqlStorage tcp  = Storages.createH2(new SqlConfig("jdbc:h2:tcp://localhost:909
 import br.com.finalcraft.everydatabase.modules.mongo.MongoConfig;
 
 MongoStorage mongo = Storages.createMongo(new MongoConfig("mongodb://localhost:27017", "mydb"));
+mongo.init().join();
 
 // With auth and an explicit connect timeout:
 MongoStorage authed = Storages.createMongo(new MongoConfig(
         "mongodb://user:pass@host:27017", "mydb", Optional.of(Duration.ofSeconds(10))));
-mongo.init().join();
 ```
 > Transactions require a MongoDB **replica set** (4.0+). On a standalone server, `inTransaction(...)` throws at runtime.
 </details>
@@ -369,7 +341,7 @@ mongo.init().join();
 ```java
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 
-LocalFileStorage file = Storages.createLocalFile(new LocalFileConfig(Path.of("data")));
+LocalFileStorage file = Storages.createLocalFile(new LocalFileConfig(Paths.get("data")));
 file.init().join();
 ```
 This is the **only** backend that accepts a non-JSON codec — pair it with `JacksonYamlCodec` to get human-friendly `.yml` files.
@@ -405,11 +377,11 @@ Repository<UUID, PlayerData> repo = storage.repository(PLAYERS);
 
 // Create / update (upsert — same key replaces)
 repo.save(new PlayerData(id, "Alice", 100)).join();
-repo.saveAll(List.of(alice, bob, carol)).join();          // batched (JDBC batch / Mongo bulk)
+repo.saveAll(Arrays.asList(alice, bob, carol)).join();    // batched (JDBC batch / Mongo bulk)
 
 // Read
 Optional<PlayerData> one = repo.find(id).join();
-List<PlayerData>     some = repo.findMany(List.of(id1, id2)).join();   // missing keys omitted
+List<PlayerData>     some = repo.findMany(Arrays.asList(id1, id2)).join();  // missing keys omitted
 Stream<PlayerData>   all  = repo.all().join();
 boolean exists            = repo.exists(id).join();
 long count                = repo.count().join();
@@ -487,7 +459,7 @@ repo.query(Query.eq("location.world", "world")
 
 ## Optimistic locking
 
-Opt in per descriptor to guard against concurrent writers (e.g. two app instances editing the same entity). On a version mismatch, `save()` throws `OptimisticLockException`.
+Opt in per descriptor to guard against concurrent writers (e.g. two app instances editing the same entity). On a version mismatch the save fails with `OptimisticLockException` (when you `.join()` the future, it surfaces as the cause of a `CompletionException`).
 
 **The easy way — annotate a `long`/`Long` field with `@OptimisticLock`** and you're done: `build()` finds it and wires the getter/setter via reflection. No interface, no builder call:
 
@@ -545,7 +517,7 @@ The version starts at `0` on insert and is incremented on every successful updat
 
 ## Transactions
 
-Backends that implement `TransactionalStorage` run a unit of work atomically. Repositories obtained from the scope share the transaction; it commits on success, rolls back on exception or an explicit `scope.rollback()`.
+Backends that implement `TransactionalStorage` run a unit of work atomically: every SQL dialect (including H2), MongoDB (replica set required) and in-memory (atomic, but no isolation) — local files don't. Repositories obtained from the scope share the transaction; it commits on success, rolls back on exception or an explicit `scope.rollback()`.
 
 ```java
 if (storage instanceof TransactionalStorage) {
@@ -554,7 +526,7 @@ if (storage instanceof TransactionalStorage) {
     tx.inTransaction(scope -> {
         Repository<UUID, Account> accounts = scope.repository(ACCOUNTS);
         return accounts.find(fromId).thenCompose(fromOpt -> {
-            Account from = fromOpt.orElseThrow();
+            Account from = fromOpt.orElseThrow(IllegalStateException::new);
             from.setBalance(from.getBalance() - 100);
             return accounts.save(from);
         });
@@ -567,7 +539,7 @@ if (storage instanceof TransactionalStorage) {
 
 ## Schema migrations
 
-Backends implementing `SchemaAwareStorage` track applied migrations (a `_schema_migrations` table/collection/file) and apply pending ones in version order, exactly once. Migrations are **forward-only**.
+Backends implementing `SchemaAwareStorage` — SQL (all dialects), MongoDB and local files — track applied migrations (a `_schema_migrations` table/collection/file) and apply pending ones in version order, exactly once. Migrations are **forward-only**.
 
 ```java
 public final class V001_CreateAuditLog extends SqlMigration {
@@ -625,25 +597,18 @@ Use `descriptor(sourceDesc, targetDesc)` to rename a collection or change codec 
 The library is **silent by default**: routine operations emit nothing, while failures always do (an `ERROR` floor that no configuration can switch off). Everything in between is opt-in, per **topic** (`INDEX`, `WRITE`, `DELETE`, `QUERY`, `MIGRATION`, `TRANSACTION`, `TRANSFER`, ...), with live runtime editing.
 
 ```java
-
-
-// Create a storage already watching index work and migrations, with writes muted:
+// Create a storage that already watches index work and migrations, with writes muted.
+// Every backend has a (config, logConfig) constructor for this:
 StorageLogConfig logCfg = StorageLogConfig.defaults()        // WARN: routine silent, failures visible
-  .level(StorageLogTopic.INDEX, StorageLogLevel.INFO)
-  .level(StorageLogTopic.MIGRATION, StorageLogLevel.INFO)
-  .mute(StorageLogTopic.WRITE);
-  SqlStorage sql = Storages.createSQL(sqlConfig, logCfg);
+        .level(StorageLogTopic.INDEX, StorageLogLevel.INFO)
+        .level(StorageLogTopic.MIGRATION, StorageLogLevel.INFO)
+        .mute(StorageLogTopic.WRITE);
+SqlStorage sql = new SqlStorage(sqlConfig, logCfg);
 
-// The config is LIVE - edit it at runtime and every repository reacts immediately:
-sql.
-
-  getStorageLogConfig()
-   .
-
-  level(StorageLogTopic.WRITE, StorageLogLevel.DEBUG)      // temporarily debug saves
-   .
-
-  includeKeys(true);                                       // opt-in: show entity keys
+// The config is LIVE — edit it at runtime and every repository reacts immediately:
+sql.getStorageLogConfig()
+   .level(StorageLogTopic.WRITE, StorageLogLevel.DEBUG)      // temporarily debug saves
+   .includeKeys(true);                                       // opt-in: show entity keys
 ```
 
 Other presets: `StorageLogConfig.silent()` (only the ERROR floor), `verbose()` (DEBUG), `trace()`.
@@ -670,8 +635,9 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 
 ### Prerequisites
 
-- **JDK 25** — that's it. The wrapper is Gradle 9.5.1, which runs on JDK 25 directly; tests compile and run on the Java 25 toolchain. The published artifacts still target **Java 8**: production sources compile on an auto-detected **JDK 17** (required by [Jabel](https://github.com/bsideup/jabel), which lets Java 17 *syntax* emit Java 8 *bytecode* with `--release 8` keeping the API floor honest). If no JDK 17 is installed, Gradle's toolchain auto-detection finds one in the usual locations (e.g. `~/.jdks`) or auto-provisions it.
-- **Docker** (optional) — only needed to run the SQL/Mongo integration suites against real servers.
+- **JDK 25** — the only JDK you need to set up. The wrapper is Gradle 9.5.1, which launches on JDK 25 directly, and all test code compiles and runs on the Java 25 toolchain.
+  - The published artifacts still target **Java 8**: production sources are compiled by an auto-detected **JDK 17** ([Jabel](https://github.com/bsideup/jabel) lets Java 17 *syntax* emit Java 8 *bytecode*, with `--release 8` keeping the API floor honest). Gradle finds a JDK 17 in the usual locations (e.g. `~/.jdks`) or provisions one — no manual setup.
+- **Docker** (optional) — only for the SQL/Mongo integration suites against real servers; without it, run with `-PnoDocker`.
 
 ### Clone & build
 
@@ -703,7 +669,7 @@ docker compose down             # stop (keeps data)
 docker compose down -v          # stop + wipe volumes
 ```
 
-Running `./gradlew :core:test` brings the containers up automatically (the Gradle docker-compose plugin is wired to the `test` task). **Suites self-skip when their server is unreachable**, so the build never fails just because a database is down.
+Running `./gradlew :core:test` brings the containers up automatically (the Gradle docker-compose plugin is wired to the `test` task). No Docker on the machine? Add `-PnoDocker` to skip the compose wiring entirely — the SQL/Mongo suites **self-skip when their server is unreachable**, and the embedded suites (H2, local files, in-memory) still run.
 
 ### Running specific tests
 
@@ -737,8 +703,7 @@ EveryDatabase/
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
 ├── standalone/                          # fat-jar flavor (everydatabase-standalone) — shadow/relocation packaging, no sources
 ├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
-├── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
-└── specs/                               # design specs (SPEC_storage_logging.md, SPEC_distribution_modules.md)
+└── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
 ```
 
 ---
