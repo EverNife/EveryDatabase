@@ -5,6 +5,7 @@ import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.AnnotatedTestPlayer;
+import br.com.finalcraft.everydatabase.data.AnnotatedVersionedTestPlayer;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.data.VersionedTestPlayer;
 import br.com.finalcraft.everydatabase.query.IndexHint;
@@ -73,6 +74,18 @@ public abstract class AbstractVersionedStorageTest {
             .build();
 
     // ------------------------------------------------------------------
+    //  Annotation-driven versioned descriptor - @OptimisticLock wires the
+    //  accessors automatically; no .versioned() / .version(...) call needed
+    // ------------------------------------------------------------------
+
+    public static final EntityDescriptor<UUID, AnnotatedVersionedTestPlayer> ANNOTATED_VERSIONED_DESCRIPTOR =
+        EntityDescriptor.builder(UUID.class, AnnotatedVersionedTestPlayer.class)
+            .collection("annotated_versioned_players")
+            .keyExtractor(AnnotatedVersionedTestPlayer::getUuid)
+            .codec(new JacksonJsonCodec<>(AnnotatedVersionedTestPlayer.class))
+            .build();
+
+    // ------------------------------------------------------------------
     //  Annotated descriptor - @Indexed auto-detection tests
     //  Picks up: name (STRING), score (INT), rank.title (STRING), location.world (STRING)
     // ------------------------------------------------------------------
@@ -92,6 +105,7 @@ public abstract class AbstractVersionedStorageTest {
     protected Repository<UUID, VersionedTestPlayer> vRepo;
     protected Repository<UUID, VersionedTestPlayer> plainRepo;
     protected Repository<UUID, AnnotatedTestPlayer> aRepo;
+    protected Repository<UUID, AnnotatedVersionedTestPlayer> avRepo;
 
     protected abstract Storage createStorage(String testMethodName);
 
@@ -104,6 +118,7 @@ public abstract class AbstractVersionedStorageTest {
         vRepo     = storage.repository(VERSIONED_DESCRIPTOR);
         plainRepo = storage.repository(PLAIN_DESCRIPTOR);
         aRepo     = storage.repository(ANNOTATED_DESCRIPTOR);
+        avRepo    = storage.repository(ANNOTATED_VERSIONED_DESCRIPTOR);
     }
 
     @AfterEach
@@ -311,6 +326,83 @@ public abstract class AbstractVersionedStorageTest {
 
         assertEquals(11, vRepo.find(UUID_ALPHA).join().orElseThrow(AssertionError::new).getScore());
         assertEquals(22, vRepo.find(UUID_BETA).join().orElseThrow(AssertionError::new).getScore());
+    }
+
+    // ==================================================================
+    //  SECTION 1b: @OptimisticLock annotation - same locking semantics,
+    //  accessors wired via reflection by build() (Orders 70-73)
+    // ==================================================================
+
+    @Test
+    @Order(70)
+    @DisplayName("[@OptimisticLock] descriptor built from the annotation reports isVersioned()")
+    void annotatedDescriptor_isVersioned() {
+        assertTrue(ANNOTATED_VERSIONED_DESCRIPTOR.isVersioned(),
+            "@OptimisticLock alone must activate optimistic locking - no builder call needed");
+    }
+
+    @Test
+    @Order(71)
+    @DisplayName("[@OptimisticLock] first save() -> null Long field lands at version 0")
+    void annotated_firstSave_landsAtVersionZero() {
+        AnnotatedVersionedTestPlayer p =
+            new AnnotatedVersionedTestPlayer(UUID_ALPHA, "Alpha", 10);
+        assertNull(p.getLockVersion(), "fixture: the wrapper field starts null");
+
+        avRepo.save(p).join();
+
+        assertEquals(0L, p.getLockVersion(),
+            "the reflection-wired setter must store version 0 on first insert");
+
+        AnnotatedVersionedTestPlayer loaded =
+            avRepo.find(UUID_ALPHA).join().orElseThrow(AssertionError::new);
+        assertEquals(0L, loaded.getLockVersion(),
+            "persisted entity must carry lock_version=0 after first insert");
+    }
+
+    @Test
+    @Order(72)
+    @DisplayName("[@OptimisticLock] consecutive saves increment the version")
+    void annotated_consecutiveSaves_incrementVersion() {
+        AnnotatedVersionedTestPlayer p =
+            new AnnotatedVersionedTestPlayer(UUID_ALPHA, "Alpha", 10);
+        avRepo.save(p).join();
+        assertEquals(0L, p.getLockVersion());
+
+        p.setScore(99);
+        avRepo.save(p).join();
+        assertEquals(1L, p.getLockVersion(),
+            "the reflection-wired setter must reflect the incremented version");
+
+        AnnotatedVersionedTestPlayer loaded =
+            avRepo.find(UUID_ALPHA).join().orElseThrow(AssertionError::new);
+        assertEquals(1L, loaded.getLockVersion());
+        assertEquals(99, loaded.getScore());
+    }
+
+    @Test
+    @Order(73)
+    @DisplayName("[@OptimisticLock] stale save (wrong version) -> OptimisticLockException")
+    void annotated_staleSave_throwsOptimisticLockException() {
+        AnnotatedVersionedTestPlayer p =
+            new AnnotatedVersionedTestPlayer(UUID_ALPHA, "Alpha", 10);
+        avRepo.save(p).join();
+
+        AnnotatedVersionedTestPlayer concurrent =
+            new AnnotatedVersionedTestPlayer(UUID_ALPHA, "Alpha", 10);
+        concurrent.setLockVersion(0L);
+        avRepo.save(concurrent).join();
+        assertEquals(1L, concurrent.getLockVersion());
+
+        try {
+            avRepo.save(p).join();   // p still believes it is at version 0
+            fail("Expected OptimisticLockException for stale save");
+        } catch (CompletionException ce) {
+            assertInstanceOf(OptimisticLockException.class, ce.getCause(),
+                "Cause must be OptimisticLockException");
+        } catch (OptimisticLockException expected) {
+            // synchronous path (transactional backends) - equally valid
+        }
     }
 
     // ==================================================================

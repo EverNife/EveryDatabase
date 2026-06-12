@@ -3,9 +3,12 @@ package br.com.finalcraft.everydatabase;
 import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Indexed;
+import br.com.finalcraft.everydatabase.versioned.OptimisticLock;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
+import br.com.finalcraft.everydatabase.versioned.OptimisticLockScanner;
 import br.com.finalcraft.everydatabase.versioned.Versioned;
 
+import java.lang.reflect.Field;
 import java.util.*;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -68,15 +71,16 @@ public final class EntityDescriptor<K, V> {
     /** Nullable. When non-null (together with {@link #versionGetter}), optimistic locking is active. */
     private final BiConsumer<V, Long> versionSetter;
 
-    private EntityDescriptor(Builder<K, V> b, List<IndexHint> allIndexes) {
+    private EntityDescriptor(Builder<K, V> b, List<IndexHint> allIndexes,
+                             Function<V, Long> versionGetter, BiConsumer<V, Long> versionSetter) {
         this.collection     = b.collection;
         this.type           = b.type;
         this.keyType        = b.keyType;
         this.keyExtractor   = b.keyExtractor;
         this.codec          = b.codec;
         this.indexes        = Collections.unmodifiableList(new ArrayList<>(allIndexes));
-        this.versionGetter  = b.versionGetter;
-        this.versionSetter  = b.versionSetter;
+        this.versionGetter  = versionGetter;
+        this.versionSetter  = versionSetter;
     }
 
     public String collection()                 { return collection; }
@@ -176,6 +180,11 @@ public final class EntityDescriptor<K, V> {
          * <p>Descriptors without a {@code .version(...)} call keep the current plain upsert
          * behaviour - this method is entirely opt-in.
          *
+         * <p>Prefer annotating a {@code long}/{@code Long} field with
+         * {@link OptimisticLock @OptimisticLock} instead: {@link #build()} then wires the
+         * accessors automatically via reflection. The annotation and this manual wiring are
+         * mutually exclusive (combining them throws at {@code build()} time).
+         *
          * @param getter extracts the current lock version from an entity
          * @param setter sets the lock version on an entity after a successful save
          * @return this builder
@@ -215,8 +224,19 @@ public final class EntityDescriptor<K, V> {
          * (duplicate index). This allows mixing annotation-driven and manual declarations
          * when needed, but prevents accidental double-indexing.
          *
-         * @throws IllegalStateException    if required fields are missing or duplicate index paths exist
-         * @throws IllegalArgumentException if an {@code @Indexed} field has an unsupported Java type
+         * <p>The entity type is also scanned for the {@link OptimisticLock}
+         * annotation. When a (single, {@code long}/{@code Long}, non-static, non-final)
+         * annotated field is found, the version accessors are wired automatically via
+         * reflection - equivalent to calling {@code .version(getter, setter)} by hand.
+         * Combining the annotation with a manual {@code .version(...)}/{@code .versioned()}
+         * call throws {@link IllegalStateException}.
+         *
+         * @throws IllegalStateException    if required fields are missing, duplicate index paths exist,
+         *                                  more than one {@code @OptimisticLock} field is declared,
+         *                                  or the annotation is combined with manual version accessors
+         * @throws IllegalArgumentException if an {@code @Indexed} field has an unsupported Java type,
+         *                                  or an {@code @OptimisticLock} field is not {@code long}/{@code Long}
+         *                                  (or is {@code static}/{@code final})
          */
         public EntityDescriptor<K, V> build() {
             if (collection == null || collection.isEmpty())
@@ -251,7 +271,40 @@ public final class EntityDescriptor<K, V> {
                 }
             }
 
-            return new EntityDescriptor<>(this, allIndexes);
+            // Resolve the version accessors: manual .version(...)/.versioned() wiring, or the
+            // @OptimisticLock annotation scanned from the entity class - never both. Resolved
+            // into locals (not the builder fields) so build() stays idempotent.
+            Function<V, Long>   resolvedGetter = versionGetter;
+            BiConsumer<V, Long> resolvedSetter = versionSetter;
+            Field lockField = OptimisticLockScanner.findLockField(type);
+            if (lockField != null) {
+                if (resolvedGetter != null || resolvedSetter != null) {
+                    throw new IllegalStateException(
+                        "EntityDescriptor: '" + type.getSimpleName() + "." + lockField.getName()
+                        + "' is annotated with @OptimisticLock, but version accessors were also "
+                        + "wired manually with .version(...)/.versioned(). Use one mechanism, not both.");
+                }
+                resolvedGetter = entity -> {
+                    try {
+                        // A Long field of a never-persisted entity may still be null: treat as version 0.
+                        Long value = (Long) lockField.get(entity);
+                        return value != null ? value : 0L;
+                    } catch (IllegalAccessException e) {
+                        throw new IllegalStateException(
+                            "@OptimisticLock: cannot read '" + lockField + "'", e);
+                    }
+                };
+                resolvedSetter = (entity, version) -> {
+                    try {
+                        lockField.set(entity, version);
+                    } catch (IllegalAccessException e) {
+                        throw new IllegalStateException(
+                            "@OptimisticLock: cannot write '" + lockField + "'", e);
+                    }
+                };
+            }
+
+            return new EntityDescriptor<>(this, allIndexes, resolvedGetter, resolvedSetter);
         }
     }
 }
