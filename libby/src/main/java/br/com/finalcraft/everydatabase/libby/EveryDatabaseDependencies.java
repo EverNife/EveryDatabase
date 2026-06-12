@@ -26,11 +26,11 @@ import java.util.List;
  * for its named feature (re-listing a jar across bundles is harmless: already
  * downloaded files are reused and already added classpath URLs are ignored).</p>
  *
- * <p>JDBC drivers are intentionally <strong>not</strong> part of
- * {@link #loadAll(DependencyManager)}: they stay bring-your-own in every
- * distribution flavor. {@link #loadMySqlDriver(DependencyManager)} and
- * {@link #loadPostgresDriver(DependencyManager)} are optional helpers for
- * consumers that want them downloaded the same way.</p>
+ * <p>JDBC drivers (MySQL/MariaDB and PostgreSQL) are part of
+ * {@link #loadAll(DependencyManager)} - they ship by default in every
+ * distribution flavor. Slim setups that compose granular bundles instead can
+ * still pull them individually via {@link #loadMySqlDriver(DependencyManager)}
+ * and {@link #loadPostgresDriver(DependencyManager)}.</p>
  *
  * <p>Libby 1.2.0 does not resolve transitive dependencies, so the lists below
  * enumerate the full flat dependency tree of {@code everydatabase-core}.</p>
@@ -75,12 +75,12 @@ public final class EveryDatabaseDependencies {
             "org.mongodb:bson-record-codec:4.11.2",
     };
 
-    /** Optional MySQL/MariaDB JDBC driver - bring-your-own, NOT part of {@link #loadAll(DependencyManager)}. */
+    /** MySQL/MariaDB JDBC driver - included in {@link #loadAll(DependencyManager)} by default. */
     private static final String[] MYSQL_DRIVER = {
             "com.mysql:mysql-connector-j:9.4.0",
     };
 
-    /** Optional PostgreSQL JDBC driver - bring-your-own, NOT part of {@link #loadAll(DependencyManager)}. */
+    /** PostgreSQL JDBC driver - included in {@link #loadAll(DependencyManager)} by default. */
     private static final String[] POSTGRES_DRIVER = {
             "org.postgresql:postgresql:42.7.7",
     };
@@ -92,11 +92,12 @@ public final class EveryDatabaseDependencies {
     /**
      * Loads everything {@code everydatabase-core} may need at runtime: the
      * Jackson JSON and YAML codec stacks, the SQL pool stack (HikariCP + slf4j-api),
-     * the embedded H2 engine and the MongoDB driver.
+     * the embedded H2 engine, the MongoDB driver, and the JDBC drivers for
+     * MySQL/MariaDB and PostgreSQL.
      *
-     * <p>JDBC drivers for external SQL servers are excluded on purpose - see
-     * {@link #loadMySqlDriver(DependencyManager)} and
-     * {@link #loadPostgresDriver(DependencyManager)}.</p>
+     * <p>Setups that want a narrower footprint can skip this method and compose
+     * the granular bundles instead ({@link #loadJacksonJson(DependencyManager)},
+     * {@link #loadSql(DependencyManager)}, {@link #loadMongo(DependencyManager)}, ...).</p>
      *
      * @param dependencyManager the manager that downloads and injects the jars
      */
@@ -106,7 +107,9 @@ public final class EveryDatabaseDependencies {
                 JACKSON_YAML_EXTRAS,
                 SQL_POOL_STACK,
                 H2_ENGINE,
-                MONGO_STACK
+                MONGO_STACK,
+                MYSQL_DRIVER,
+                POSTGRES_DRIVER
         ));
     }
 
@@ -169,10 +172,9 @@ public final class EveryDatabaseDependencies {
     }
 
     /**
-     * Optional helper: loads the MySQL/MariaDB JDBC driver
-     * ({@code com.mysql:mysql-connector-j}). Not part of
-     * {@link #loadAll(DependencyManager)} - JDBC drivers are bring-your-own by
-     * default in every distribution flavor.
+     * Loads the MySQL/MariaDB JDBC driver ({@code com.mysql:mysql-connector-j}).
+     * Already included in {@link #loadAll(DependencyManager)}; use this granular
+     * helper when composing a narrower bundle set (e.g. {@code loadSql} + this).
      *
      * @param dependencyManager the manager that downloads and injects the jars
      */
@@ -181,10 +183,9 @@ public final class EveryDatabaseDependencies {
     }
 
     /**
-     * Optional helper: loads the PostgreSQL JDBC driver
-     * ({@code org.postgresql:postgresql}). Not part of
-     * {@link #loadAll(DependencyManager)} - JDBC drivers are bring-your-own by
-     * default in every distribution flavor.
+     * Loads the PostgreSQL JDBC driver ({@code org.postgresql:postgresql}).
+     * Already included in {@link #loadAll(DependencyManager)}; use this granular
+     * helper when composing a narrower bundle set (e.g. {@code loadSql} + this).
      *
      * @param dependencyManager the manager that downloads and injects the jars
      */

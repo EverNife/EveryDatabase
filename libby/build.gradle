@@ -11,35 +11,24 @@ repositories {
     }
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
-    }
-}
-
-// Same dual-target setup as :common - consumers may run Java 8:
-// Java 16 compiler + Jabel emit Java 8 bytecode from Java 16 source syntax.
-// Source syntax up to Java 16 is fine; Java 9+ library APIs are NOT.
-configure([tasks.compileJava]) {
-    sourceCompatibility = 16
-    options.release = 8
-    javaCompiler = javaToolchains.compilerFor {
-        languageVersion = JavaLanguageVersion.of(16)
-    }
-}
+// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Java 8 bytecode via Jabel) are configured centrally in the root build.gradle.
 
 dependencies {
-    // Jabel: lets Java 16 source syntax compile down to Java 8 bytecode
-    annotationProcessor libs.jabel
-    compileOnly libs.jabel
-
     // api, not implementation: consumers construct net.byteflux.libby.Library
     // objects and call LibraryManager methods inherited by DependencyManager,
     // and they program against the :core Storage API directly.
-    api project(':core')
+    //
+    // transitive = false (published as a wildcard exclusion in the POM): the whole
+    // point of this flavor is downloading the backend libraries at RUNTIME via
+    // EveryDatabaseDependencies, so :core's POM dependencies (Jackson, HikariCP,
+    // Mongo driver, H2, JDBC drivers) must NOT leak into the consumer's build.
+    api(project(':core')) {
+        transitive = false
+    }
     api libs.libby.core
 
-    // Smoke tests (compile/run on the module's Java 25 toolchain, like :core's tests)
+    // Smoke tests (compile/run on the Java 25 toolchain, like :core's tests)
     testImplementation libs.junit.jupiter.api
     testRuntimeOnly libs.junit.jupiter.engine
 }

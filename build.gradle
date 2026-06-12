@@ -9,6 +9,17 @@ subprojects {
     group = 'br.com.finalcraft.everydatabase'
     version = '1.0.1'
 
+    java {
+        withSourcesJar()
+        // One toolchain for the whole build: launch Gradle with any modern JDK
+        // (Java 25 recommended - Gradle 9.5 runs on it directly) and this toolchain
+        // compiles and runs everything, EXCEPT the dual-target compileJava override
+        // below. Test code always compiles and runs on Java 25 (full modern API).
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+    }
+
     //This might keep function(parameter variable's Names) on the compiled jar
     compileJava.options.compilerArgs.add '-parameters'
     compileTestJava.options.compilerArgs.add '-parameters'
@@ -38,12 +49,42 @@ subprojects {
         annotationProcessor libs.lombok
         testCompileOnly libs.lombok
         testAnnotationProcessor libs.lombok
-    }
 
-    java {
-        withSourcesJar()
+        // Gradle 9 no longer provides the JUnit Platform launcher from its own
+        // distribution - every test JVM needs it on the runtime classpath.
+        // (:standalone replaces its test classpath and adds this to 'smokeTest' itself.)
+        testRuntimeOnly libs.junit.platform.launcher
     }
 
     // Publications are defined per module (each sets its own everydatabase-* artifactId):
-    // common and libby publish 'components.java'; standalone publishes the shadow jar.
+    // core and libby publish 'components.java'; standalone publishes the shadow jar.
+}
+
+// ======================================================================
+//  Dual-target: Java 17 source syntax -> Java 8 bytecode (:core, :libby)
+//
+//  Production code in these modules is written in Java 17 syntax but the
+//  published artifacts must run on a Java 8 JVM. Jabel (an annotation
+//  processor) lifts javac's source-level check so a Java 17 compiler can
+//  emit Java 8 bytecode, while `options.release = 8` keeps the *API* floor
+//  honest (no Java 9+ library APIs in production code).
+//
+//  Only compileJava is pinned to a Java 17 compiler: Jabel rides javac
+//  internals that changed after JDK 17, so the production compiler cannot
+//  follow the main toolchain to 25. Everything else (Gradle itself, test
+//  compilation, test execution) runs on Java 25.
+// ======================================================================
+configure([project(':core'), project(':libby')]) {
+    dependencies {
+        annotationProcessor libs.jabel
+        compileOnly libs.jabel
+    }
+
+    compileJava {
+        sourceCompatibility = 17  // Java 17 *syntax* (IDE hint; Jabel lifts javac's check)
+        options.release = 8       // Java 8 *bytecode* and *API* floor
+        javaCompiler = javaToolchains.compilerFor {
+            languageVersion = JavaLanguageVersion.of(17)
+        }
+    }
 }

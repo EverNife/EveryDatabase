@@ -6,7 +6,7 @@
 
 A backend-agnostic persistence layer for the JVM. Write your data-access code **once** against a small, typed, `CompletableFuture`-based API — then run it on **MySQL/MariaDB, PostgreSQL, H2, MongoDB, local files, or in-memory** without changing a line. Migrate data between any two of them with a single builder.
 
-![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
+![Runtime](https://img.shields.io/badge/runtime-Java%208%2B%20(SQL%3A%2011%2B)-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
 ![Version](https://img.shields.io/badge/version-1.0.1-informational)
@@ -46,7 +46,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 - **🧩 Capabilities are interfaces, not flags.** Transactions, schema migrations and rich queries are *optional* interfaces a backend may implement — checked with `instanceof`, enforced by the compiler. No backend pretends to support something it can't.
 - **🗂️ Declarative indexes.** Annotate a field with `@Indexed` (or declare an `IndexHint`) and the backend creates a real secondary index — a SQL column + B-tree, a Mongo index, or an in-memory map.
 - **🔁 Built-in data transfer.** `StorageTransfer.builder()` copies entities between *any* two backends, read-only on the source, with batching, progress and verification.
-- **☕ Java 8 runtime.** Bytecode targets Java 8 while being authored in modern Java.
+- **☕ Java 8 runtime.** Bytecode targets Java 8 while being authored in modern Java — see [Java version requirements](#java-version-requirements) for the per-backend floor (SQL backends need 11+).
 
 ---
 
@@ -78,19 +78,31 @@ repositories {
 }
 
 dependencies {
-    // RECOMMENDED — everything bundled & relocated, zero transitive deps, works anywhere:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
+    // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
+    // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
 
-    // OR lean — you provide HikariCP/Jackson/Mongo-driver/H2 yourself:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
+    // OR fat jar — the same set bundled & relocated, zero transitive deps, works anywhere:
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
 
-    // OR runtime download — downloads the libraries at runtime via Libby:
+    // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
     //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.1'
+}
+```
 
-    // In EVERY flavor, the JDBC driver for MySQL/MariaDB or PostgreSQL is bring-your-own:
-    runtimeOnly 'com.mysql:mysql-connector-j:9.4.0'      // MySQL / MariaDB
-    runtimeOnly 'org.postgresql:postgresql:42.7.7'       // PostgreSQL
-    // (H2 and the MongoDB driver are covered by standalone/libby; with core, add them yourself)
+Nothing else to add — every backend works out of the box. To **change a version**, just declare your own (Gradle picks the highest by default; append `!!` to force a downgrade — in Maven your nearest declaration always wins). To **drop what you don't use**, exclude it:
+
+```groovy
+dependencies {
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
+
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
+    runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
+
+    // Only target SQL? Drop the Mongo driver entirely:
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.0.1') {
+    //     exclude group: 'org.mongodb'
+    // }
 }
 ```
 
@@ -106,8 +118,8 @@ dependencies {
 
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
-  <!-- or everydatabase-core / everydatabase-libby -->
-  <artifactId>everydatabase-standalone</artifactId>
+  <!-- or everydatabase-standalone / everydatabase-libby -->
+  <artifactId>everydatabase-core</artifactId>
   <version>1.0.1</version>
 </dependency>
 ```
@@ -116,11 +128,25 @@ dependencies {
 
 ## Distribution flavors
 
-All three flavors expose the exact same API — they only differ in **how the heavy runtime libraries** (HikariCP, MongoDB driver, H2, Jackson) reach your classpath. JDBC drivers for MySQL/MariaDB and PostgreSQL are bring-your-own in *every* flavor.
+All three flavors expose the exact same API and carry the **same dependency set by default** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They only differ in **how that set reaches your classpath**.
 
-### `everydatabase-standalone` — fat jar (recommended)
+### `everydatabase-core` — recommended
 
-One self-contained jar: the library plus all heavy dependencies, **shaded and relocated** under `br.com.finalcraft.everydatabase.libs.*` so they can never clash with other versions on your classpath. Its POM declares **zero dependencies** — drop it into any plugin or app and go.
+The library with everything declared as a **normal POM dependency**: it works out of the box, and you keep full control through standard dependency management — upgrade or downgrade any of the libraries by declaring your own version, or exclude what you don't use (see [Install](#install)). Scopes are meaningful: `jackson-databind` and `mongodb-driver-sync` are `compile` (their types appear in the public API), everything else is `runtime`.
+
+| Included by default | Version | POM scope |
+|---|---|---|
+| `com.fasterxml.jackson.core:jackson-databind` | 2.15.4 | compile |
+| `org.mongodb:mongodb-driver-sync` | 4.11.2 | compile |
+| `com.fasterxml.jackson.dataformat:jackson-dataformat-yaml` | 2.15.4 | runtime |
+| `com.zaxxer:HikariCP` | 5.1.0 | runtime |
+| `com.h2database:h2` | 2.3.232 | runtime |
+| `com.mysql:mysql-connector-j` (protobuf excluded — only the removed X DevAPI needs it) | 9.4.0 | runtime |
+| `org.postgresql:postgresql` | 42.7.7 | runtime |
+
+### `everydatabase-standalone` — fat jar
+
+One self-contained jar: the library plus the whole default set, **shaded and relocated** under `br.com.finalcraft.everydatabase.libs.*` so it can never clash with other versions on your classpath. Its POM declares **zero dependencies** — drop it into any plugin or app and go. The trade-off: bundled versions can't be overridden (pick `core` if you need that).
 
 | Original package | Relocated to |
 |---|---|
@@ -131,17 +157,16 @@ One self-contained jar: the library plus all heavy dependencies, **shaded and re
 | `com.fasterxml.jackson.annotation` | **not relocated** — kept at its original coordinates (see below) |
 | `org.yaml.snakeyaml` | `br.com.finalcraft.everydatabase.libs.snakeyaml` |
 | `org.h2` | `br.com.finalcraft.everydatabase.libs.h2` |
+| `com.mysql` | `br.com.finalcraft.everydatabase.libs.mysql` |
+| `org.postgresql` | `br.com.finalcraft.everydatabase.libs.postgresql` |
 
+- **JDBC drivers are bundled and discoverable.** The merged `META-INF/services/java.sql.Driver` lists all three relocated drivers (H2, MySQL, PostgreSQL), so `DriverManager` finds them normally. Because they are relocated, a host that ships its own driver version never class-clashes with the bundled ones.
 - **`org.slf4j` is bundled but *not* relocated.** HikariCP hard-requires `org.slf4j.Logger` at class-init; on parent-first plugin classloaders (Bukkit/Paper) the host's SLF4J still wins whenever it ships one, so log auto-detection keeps routing to the host's logging. The bundled copy only provides linkage on hosts without SLF4J (logging falls back to a no-op).
 - **Jackson annotations just work.** `com.fasterxml.jackson.annotation` (`@JsonProperty`, `@JsonIgnore`, `@JsonCreator`, `@JsonFormat`, ...) is bundled **at its original coordinates**: annotations are matched by class identity, so the bundled mapper honors the real annotations on your entities — no relocated imports needed. Only the *advanced* annotations that live inside databind itself (`@JsonSerialize`, `@JsonDeserialize`) remain relocated, as do public overloads that accept Jackson types (e.g. `JacksonJsonCodec(Class, ObjectMapper)` expects the *relocated* `ObjectMapper` in this flavor).
 
-### `everydatabase-core` — lean, bring-your-own
-
-Just the library. The heavy dependencies are `compileOnly`, so the published POM carries **no runtime dependencies** — you add HikariCP, the MongoDB driver, H2 and Jackson (`jackson-databind` + `jackson-dataformat-yaml`) yourself, with full control over the versions. Add only what you use (e.g. skip the Mongo driver if you only target SQL backends).
-
 ### `everydatabase-libby` — runtime download
 
-`everydatabase-core` plus a small coordinator (package `br.com.finalcraft.everydatabase.libby`) that downloads the canonical, **non-relocated** libraries at runtime via [Libby](https://github.com/AlessioDP/libby) — your jar stays tiny. Bootstrap it in your plugin's `onLoad` (or earliest bootstrap), **before touching any storage class**:
+`everydatabase-core` plus a small coordinator (package `br.com.finalcraft.everydatabase.libby`) that downloads the canonical, **non-relocated** libraries at runtime via [Libby](https://github.com/AlessioDP/libby) — your jar stays tiny, and the POM excludes `core`'s transitive set so nothing heavy enters your build-time graph either. Bootstrap it in your plugin's `onLoad` (or earliest bootstrap), **before touching any storage class**:
 
 ```java
 import br.com.finalcraft.everydatabase.libby.DependencyManager;
@@ -150,11 +175,12 @@ import br.com.finalcraft.everydatabase.libby.EveryDatabaseDependencies;
 @Override
 public void onLoad() {
     DependencyManager manager = new DependencyManager("MyPlugin", getDataFolder(), "libs");
-    EveryDatabaseDependencies.loadAll(manager);   // downloads + injects HikariCP, Mongo driver, H2, Jackson
+    EveryDatabaseDependencies.loadAll(manager);   // HikariCP, Jackson, Mongo driver, H2 + MySQL/PostgreSQL drivers
 
-    // Optional — JDBC drivers stay opt-in even here:
-    // EveryDatabaseDependencies.loadMySqlDriver(manager);
-    // EveryDatabaseDependencies.loadPostgresDriver(manager);
+    // Slimmer setups can compose granular bundles instead of loadAll:
+    // EveryDatabaseDependencies.loadSql(manager);            // HikariCP + slf4j-api
+    // EveryDatabaseDependencies.loadMySqlDriver(manager);    // just the MySQL driver
+    // EveryDatabaseDependencies.loadMongo(manager);          // just the Mongo stack
 }
 ```
 
@@ -455,11 +481,37 @@ repo.query(Query.eq("location.world", "world")
 
 Opt in per descriptor to guard against concurrent writers (e.g. two app instances editing the same entity). On a version mismatch, `save()` throws `OptimisticLockException`.
 
+**The easy way — annotate a `long`/`Long` field with `@OptimisticLock`** and you're done: `build()` finds it and wires the getter/setter via reflection. No interface, no builder call:
+
+```java
+import br.com.finalcraft.everydatabase.versioned.OptimisticLock;
+
+public class Account {
+    private UUID id;
+    private long balance;
+
+    @OptimisticLock
+    private Long lockVersion;          // managed by the backend — never touch it manually
+    // ...
+}
+
+EntityDescriptor<UUID, Account> ACCOUNTS = EntityDescriptor.builder(UUID.class, Account.class)
+        .collection("accounts")
+        .keyExtractor(Account::getId)
+        .codec(new JacksonJsonCodec<>(Account.class))
+        .build();                      // @OptimisticLock detected automatically
+```
+
+The field may be `long` or `Long` (a still-`null` `Long` reads as version `0`), and must not be `static` or `final`. The rules are **validated at `build()` time** so mistakes fail fast: a wrong type throws `IllegalArgumentException`, two annotated fields throw `IllegalStateException`, and combining the annotation with the manual wiring below also throws — pick one mechanism.
+
+<details>
+<summary><b>Alternative: manual wiring (when you can't annotate the class)</b></summary>
+
 ```java
 public class Account implements Versioned {
     private UUID id;
     private long balance;
-    private long lockVersion;          // managed by the backend
+    private long lockVersion;
     public long getLockVersion()            { return lockVersion; }
     public void setLockVersion(long v)      { this.lockVersion = v; }
     // ...
@@ -471,11 +523,15 @@ EntityDescriptor<UUID, Account> ACCOUNTS = EntityDescriptor.builder(UUID.class, 
         .codec(new JacksonJsonCodec<>(Account.class))
         .versioned()                   // wires getLockVersion / setLockVersion
         .build();
+
+// ...or fully explicit, for any pair of accessors:
+//      .version(Account::getLockVersion, Account::setLockVersion)
 ```
+</details>
 
-The version starts at `0` on insert and is incremented on every successful update. Descriptors **without** `.versioned()` (or `.version(getter, setter)`) keep plain upsert semantics — locking is entirely opt-in.
+The version starts at `0` on insert and is incremented on every successful update. Descriptors **without** versioning (no annotation, no `.versioned()` / `.version(getter, setter)`) keep plain upsert semantics — locking is entirely opt-in.
 
-> **Backend support:** MySQL/MariaDB, PostgreSQL and MongoDB enforce the version check. **H2 does not** (by design — it's an embedded/dev engine): a versioned descriptor on H2 silently degrades to plain upsert, never throwing `OptimisticLockException`. Local files and in-memory don't enforce it either. Use a server-grade backend when concurrent writers matter.
+> **Backend support:** MySQL/MariaDB, PostgreSQL and MongoDB enforce the version check. **H2 does not** (by design — it's an embedded/dev engine): a versioned descriptor on H2 silently degrades to plain upsert, never throwing `OptimisticLockException` — creating the storage never fails because of versioning. Local files and in-memory don't enforce it either. Use a server-grade backend when concurrent writers matter.
 
 ---
 
@@ -606,7 +662,7 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 
 ### Prerequisites
 
-- **JDK 21** to launch Gradle. The launcher JDK is *not* what compiles the code: the Gradle toolchain auto-provisions **JDK 25** for compiling and running tests, and the artifact still targets **Java 8** — see [Compatibility notes](#compatibility-notes). Don't point `JAVA_HOME` at JDK 25: Gradle 8.14 itself cannot run on it (`Unsupported class file major version 69`).
+- **JDK 25** — that's it. The wrapper is Gradle 9.5.1, which runs on JDK 25 directly; tests compile and run on the Java 25 toolchain. The published artifacts still target **Java 8**: production sources compile on an auto-detected **JDK 17** (required by [Jabel](https://github.com/bsideup/jabel), which lets Java 17 *syntax* emit Java 8 *bytecode* with `--release 8` keeping the API floor honest). If no JDK 17 is installed, Gradle's toolchain auto-detection finds one in the usual locations (e.g. `~/.jdks`) or auto-provisions it.
 - **Docker** (optional) — only needed to run the SQL/Mongo integration suites against real servers.
 
 ### Clone & build
@@ -615,8 +671,8 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 git clone <repo-url> EveryDatabase
 cd EveryDatabase
 
-# Launch Gradle with JDK 21 (the build toolchain provisions JDK 25 by itself)
-export JAVA_HOME=/path/to/jdk-21      # PowerShell: $env:JAVA_HOME = "C:\path\to\jdk-21"
+# Launch Gradle with JDK 25 — one JDK for everything
+export JAVA_HOME=/path/to/jdk-25      # PowerShell: $env:JAVA_HOME = "C:\path\to\jdk-25"
 
 ./gradlew :core:build       # compile + run all tests
 ```
@@ -658,12 +714,12 @@ Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HO
 
 ```
 EveryDatabase/
-├── core/                              # the library core (everydatabase-core) — heavy deps are compileOnly
+├── core/                              # the library core (everydatabase-core) — RECOMMENDED flavor, full POM deps
 │   ├── src/main/java/br/com/finalcraft/everydatabase/
 │   │   ├── (root)                       # Storage, Repository, EntityDescriptor, Storages, StorageExecutors
 │   │   ├── codec/                       # JacksonJsonCodec (compact / pretty), JacksonYamlCodec
+│   │   ├── versioned/                   # @OptimisticLock, Versioned, OptimisticLockException
 │   │   ├── query/                       # IndexHint, @Indexed, Query
-│   │   ├── versioned/                   # Versioned, OptimisticLockException
 │   │   ├── tx/                          # TransactionalStorage, TransactionScope
 │   │   ├── schema/                      # SchemaAwareStorage, Migration, MigrationContext
 │   │   ├── log/                         # StorageLogConfig, topics/levels/sinks (see Logging & diagnostics)
@@ -680,10 +736,34 @@ EveryDatabase/
 
 ## Compatibility notes
 
-- **Runtime:** the library compiles to **Java 8 bytecode** (no Java 9+ APIs at runtime).
-- **Build:** authored in modern Java syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25**.
+### Java version requirements
+
+The **library itself is Java 8 bytecode** (no Java 9+ APIs at runtime) — but two of the default backend libraries dropped Java 8 upstream, so the *effective* floor depends on which backend you use. Classes load lazily, so an unused backend never raises the bar: a Java 8 host using only Mongo/file/memory never touches HikariCP or H2 classes, in **any** flavor (including the fat jar).
+
+| What you use | Minimum Java | Why |
+|---|:---:|---|
+| EveryDatabase classes themselves | **8** | compiled with `--release 8` |
+| MongoDB backend | **8** | `mongodb-driver-sync` 4.11 is Java 8 |
+| Local files / In-memory backends | **8** | no external deps |
+| Jackson codecs (JSON/YAML) | **8** | Jackson 2.15 is Java 8 |
+| **Any SQL backend** (MySQL/MariaDB, PostgreSQL, H2) | **11** ⚠️ | HikariCP 5.x is Java 11 bytecode |
+| **H2 backend** specifically | **11** ⚠️ | H2 2.x is Java 11 bytecode (on top of HikariCP) |
+| MySQL/PostgreSQL JDBC drivers (default versions) | 8 | `mysql-connector-j` 9.4 and `postgresql` 42.7 are Java 8 |
+
+**SQL on a Java 8 JVM is currently not supported out of the box** in any flavor (standalone and libby ship/download HikariCP 5.x and H2 2.x with no version control, and core defaults to them). If you are stuck on Java 8 and need SQL, the proposed path is the `core` flavor with a forced downgrade of the pool — the rest of the stack is already Java-8-clean:
+
+```groovy
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
+implementation 'com.zaxxer:HikariCP:4.0.3!!'   // last HikariCP line built for Java 8
+```
+
+> ⚠️ HikariCP 4.0.3 exposes the same API surface the library uses, but this combination is **not covered by the test suite** — treat it as experimental and test your deployment. H2 on Java 8 stays unsupported either way (H2 1.x has a different storage format and SQL dialect); use MySQL/MariaDB/PostgreSQL, or a non-SQL backend, on Java 8 hosts. A dedicated `everydatabase-standalone-java8` flavor (bundling HikariCP 4.x, no H2) is a possible future addition if there's demand.
+
+### Other notes
+
+- **Build:** authored in Java 17 syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25** (Gradle 9.5 launches on JDK 25 directly).
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
-- **Drivers:** JDBC drivers for MySQL/MariaDB and PostgreSQL are bring-your-own in every flavor (`everydatabase-libby` offers opt-in download helpers). H2 and the MongoDB driver come with `standalone` (bundled, relocated) and `libby` (downloaded at runtime); with `everydatabase-core` you supply them yourself — see [Distribution flavors](#distribution-flavors).
+- **Dependencies & drivers:** every flavor ships the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `standalone` bundles everything relocated (drivers included, discoverable through the merged `java.sql.Driver` service file); `libby` downloads the same set at runtime — see [Distribution flavors](#distribution-flavors).
 - **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it on the classpath logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework. (The standalone flavor bundles an unrelocated `slf4j-api` for linkage only — the host's SLF4J still wins when present.)
 - **Serialisation:** entities must be Jackson-serialisable (a no-arg constructor plus accessors, or appropriate Jackson annotations).
 

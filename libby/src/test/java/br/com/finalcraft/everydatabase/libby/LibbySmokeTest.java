@@ -58,27 +58,25 @@ class LibbySmokeTest {
     }
 
     @Test
-    @DisplayName("loadAll requests the full flat dependency set (and no JDBC drivers), without network")
+    @DisplayName("loadAll requests the full flat dependency set (JDBC drivers included), without network")
     void loadAllRequestsEverything(@TempDir File dir) {
         RecordingManager manager = new RecordingManager(dir);
 
         EveryDatabaseDependencies.loadAll(manager);
 
-        // The 12-jar flat tree of everydatabase-core (spec 5.2):
+        // The 14-jar flat tree of everydatabase-core: the 12 backend jars plus the
+        // two JDBC drivers, which ship by default in every distribution flavor.
         List<String> expected = Arrays.asList(
             "jackson-core", "jackson-annotations", "jackson-databind",
             "jackson-dataformat-yaml", "snakeyaml",
             "HikariCP", "slf4j-api",
             "h2",
-            "mongodb-driver-sync", "mongodb-driver-core", "bson", "bson-record-codec");
+            "mongodb-driver-sync", "mongodb-driver-core", "bson", "bson-record-codec",
+            "mysql-connector-j", "postgresql");
         for (String artifact : expected) {
             assertTrue(manager.loaded.contains(artifact), "loadAll must request " + artifact);
         }
         assertEquals(expected.size(), manager.loaded.size(), "no duplicates, nothing extra");
-
-        // JDBC drivers are bring-your-own - never part of loadAll:
-        assertFalse(manager.loaded.contains("mysql-connector-j"));
-        assertFalse(manager.loaded.contains("postgresql"));
     }
 
     @Test
@@ -91,6 +89,6 @@ class LibbySmokeTest {
         assertFalse(manager.loaded.contains("HikariCP"), "the failing artifact is not loaded");
         assertTrue(manager.loaded.contains("h2"), "other artifacts still load");
         assertTrue(manager.loaded.contains("jackson-databind"), "other artifacts still load");
-        assertEquals(11, manager.loaded.size(), "all artifacts except the failing one");
+        assertEquals(13, manager.loaded.size(), "all artifacts except the failing one");
     }
 }

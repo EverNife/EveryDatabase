@@ -88,11 +88,15 @@ class StandaloneSmokeTest {
         assertDoesNotThrow(() -> Class.forName("br.com.finalcraft.everydatabase.libs.hikari.HikariConfig"));
         assertDoesNotThrow(() -> Class.forName("br.com.finalcraft.everydatabase.libs.jackson.databind.ObjectMapper"));
         assertDoesNotThrow(() -> Class.forName("br.com.finalcraft.everydatabase.libs.h2.Driver"));
+        assertDoesNotThrow(() -> Class.forName("br.com.finalcraft.everydatabase.libs.mysql.cj.jdbc.Driver"));
+        assertDoesNotThrow(() -> Class.forName("br.com.finalcraft.everydatabase.libs.postgresql.Driver"));
 
         // ...the original heavy-dep classes must NOT be reachable...
         assertThrows(ClassNotFoundException.class, () -> Class.forName("com.zaxxer.hikari.HikariConfig"));
         assertThrows(ClassNotFoundException.class, () -> Class.forName("com.fasterxml.jackson.databind.ObjectMapper"));
         assertThrows(ClassNotFoundException.class, () -> Class.forName("org.h2.Driver"));
+        assertThrows(ClassNotFoundException.class, () -> Class.forName("com.mysql.cj.jdbc.Driver"));
+        assertThrows(ClassNotFoundException.class, () -> Class.forName("org.postgresql.Driver"));
 
         // ...and the two deliberate exceptions stay at their original coordinates:
         assertDoesNotThrow(() -> Class.forName("org.slf4j.LoggerFactory"));

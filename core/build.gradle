@@ -45,41 +45,35 @@ test {
     }
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
-    }
-}
-
-configure([tasks.compileJava]) {
-    sourceCompatibility = 16
-    options.release = 8
-    javaCompiler = javaToolchains.compilerFor {
-        languageVersion = JavaLanguageVersion.of(16)
-    }
-}
+// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Java 8 bytecode via Jabel) are configured centrally in the root build.gradle.
 
 dependencies {
-    // Jabel: lets Java 16 source syntax compile down to Java 8 bytecode
-    annotationProcessor libs.jabel
-    compileOnly libs.jabel
+    // ---- Published runtime dependencies: the "everything included by default" policy ----
+    // everydatabase-core is the RECOMMENDED flavor: it works out of the box, and every
+    // version below is overridable by the consumer (declare your own version of the same
+    // module, or exclude what you don't use). The other flavors repackage this exact set:
+    // :standalone shades+relocates it, :libby downloads it at runtime.
 
-    // Heavy backend deps are compileOnly on purpose: everydatabase-core publishes NO runtime
-    // dependencies. Consumers pick a distribution flavor (see specs/SPEC_distribution_modules.md):
-    // :standalone (shaded fat jar), :libby (runtime download), or bring-your-own classpath.
-    compileOnly libs.hikaricp
-    compileOnly libs.mongodb.driver.sync
-    compileOnly libs.h2
-    compileOnly libs.jackson.databind
-    compileOnly libs.jackson.yaml
+    // Part of the public API surface: JacksonJsonCodec/JacksonYamlCodec accept an
+    // ObjectMapper, IndexValueExtractor returns JsonNode, MongoMigration exposes
+    // MongoDatabase - consumers compile against these types.
+    api libs.jackson.databind
+    api libs.mongodb.driver.sync
 
-    // The same five again for the tests: compileOnly is invisible to the test classpaths,
-    // and the suites exercise the real backends (HikariCP/H2/Mongo/Jackson) at runtime.
-    testImplementation libs.hikaricp
-    testImplementation libs.mongodb.driver.sync
-    testImplementation libs.h2
-    testImplementation libs.jackson.databind
-    testImplementation libs.jackson.yaml
+    // Internal machinery - consumers never compile against these.
+    implementation libs.jackson.yaml   // YAMLMapper is used only inside JacksonYamlCodec
+    implementation libs.hikaricp       // pooling is an implementation detail of SqlStorage
+
+    // Pure JDBC drivers, discovered via DriverManager - no compile-time references anywhere.
+    runtimeOnly libs.h2
+    runtimeOnly(libs.mysql.connector) {
+        // protobuf is only referenced by the leftover X-protocol classes
+        // (com/mysql/cj/x/protobuf) of the removed X DevAPI; the classic
+        // jdbc:mysql:// protocol never loads them. ~1.8 MB saved everywhere.
+        exclude group: 'com.google.protobuf', module: 'protobuf-java'
+    }
+    runtimeOnly libs.postgresql
 
     // SLF4J is compileOnly by design decision (specs/SPEC_storage_logging.md, 1.2/2.1):
     // the module must be embeddable (shaded) without dragging slf4j into the runtime.
@@ -95,10 +89,6 @@ dependencies {
     // Without it, HikariCP 5.x pulls slf4j-api 2.0.17 transitively but with no provider,
     // and StorageLog's auto() sink falls back to NOP - no logs appear during the tests.
     testRuntimeOnly libs.slf4j.simple
-
-    // JDBC drivers for the integration tests
-    testRuntimeOnly libs.mysql.connector
-    testRuntimeOnly libs.postgresql
 
     // Random data generation for the stress tests
     testImplementation libs.instancio.junit

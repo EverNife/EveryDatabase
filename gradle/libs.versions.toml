@@ -11,8 +11,8 @@ junit = "5.10.0"
 mysql = "9.4.0"
 postgresql = "42.7.7"
 instancio = "6.0.0-RC2"
-docker-compose = "0.17.12"
-shadow = "8.3.5"
+docker-compose = "0.17.21"
+shadow = "9.4.2"
 libby = "1.2.0"
 
 [libraries]
@@ -27,6 +27,9 @@ slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j-simple"
 lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
 junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junit" }
 junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junit" }
+# Gradle 9 no longer ships the JUnit Platform launcher to test JVMs - it must be on the test runtime classpath.
+# Platform 1.x pairs with Jupiter 5.x (1.10 <-> 5.10).
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.10.0" }
 mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 instancio-junit = { module = "org.instancio:instancio-junit", version.ref = "instancio" }

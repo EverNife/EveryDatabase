@@ -5,15 +5,14 @@ plugins {
 base { archivesName = 'everydatabase-standalone' }
 
 dependencies {
+    // The heavy libraries (HikariCP, Mongo driver, H2, Jackson) and the JDBC drivers
+    // (MySQL, PostgreSQL) flow in transitively from :core's published dependency set;
+    // shadowJar bundles the whole runtime classpath with the relocations below.
     api project(':core')
-    implementation libs.hikaricp
-    implementation libs.mongodb.driver.sync
-    implementation libs.h2
-    implementation libs.jackson.databind
-    implementation libs.jackson.yaml
     // Bundled UNRELOCATED on purpose: HikariCP hard-requires org.slf4j at class-init.
     // Parent-first plugin classloaders keep preferring the host's SLF4J when present;
     // this copy only provides linkage on hosts without SLF4J (logging falls back to NOP).
+    // (Explicit because slf4j-api is compileOnly in :core and never flows transitively.)
     implementation libs.slf4j.api
 }
 
@@ -22,7 +21,12 @@ jar { enabled = false }
 
 shadowJar {
     archiveClassifier = ''
-    mergeServiceFiles()                 // keeps the relocated H2 JDBC driver discoverable
+    // Shadow 9: the default duplicatesStrategy drops duplicate entries BEFORE the
+    // ServiceFileTransformer sees them, so META-INF/services/java.sql.Driver would
+    // keep only the first driver (H2) instead of merging all three. INCLUDE lets
+    // every copy reach the transformer (GradleUp/shadow#1348).
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    mergeServiceFiles()                 // keeps the relocated JDBC drivers discoverable
     exclude 'module-info.class'
     exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
 
@@ -40,6 +44,13 @@ shadowJar {
     }
     relocate 'org.yaml.snakeyaml',    'br.com.finalcraft.everydatabase.libs.snakeyaml'
     relocate 'org.h2',                'br.com.finalcraft.everydatabase.libs.h2'
+    // JDBC drivers ship by default in every flavor. Relocated so a host that brings its
+    // own driver version never has a CLASS clash (DriverManager registers both copies;
+    // the service files are rewritten by the relocation, so discovery keeps working).
+    relocate 'com.mysql',             'br.com.finalcraft.everydatabase.libs.mysql'
+    relocate 'org.postgresql',        'br.com.finalcraft.everydatabase.libs.postgresql'
+    // checker-qual rides in as pgjdbc's transitive dep (compile-retention annotations only).
+    relocate 'org.checkerframework',  'br.com.finalcraft.everydatabase.libs.checkerframework'
     // org.slf4j intentionally NOT relocated — see SPEC_distribution_modules.md decision 3.
 }
 
@@ -64,6 +75,8 @@ configurations {
 dependencies {
     smokeTest libs.junit.jupiter.api
     smokeTest libs.junit.jupiter.engine
+    // Gradle 9: the JUnit Platform launcher must be on the (replaced) test classpath.
+    smokeTest libs.junit.platform.launcher
 }
 
 def fatJar = files(tasks.named('shadowJar'))
