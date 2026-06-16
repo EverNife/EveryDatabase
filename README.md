@@ -274,6 +274,8 @@ You discover them with `instanceof`, so the compiler stops you from using transa
 
 > **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every supported backend (no quoting or escaping ever needed).
 
+> **Keys** are persisted by their `toString()` (the SQL primary key, the Mongo unique index, the LocalFile filename) and matched by `equals`/`hashCode` (the in-memory backend and the manager cache). A key type must therefore have a **stable, unique `toString()` of at most 255 characters** and value-based `equals`/`hashCode` — `UUID`, `String`, `Long`, `Integer` and `record`s all qualify (the default identity `Object.toString()` does **not**). `save`/`saveAll` reject an oversized key up front: the returned future completes exceptionally with a clear `IllegalArgumentException`, so a long key can never be **silently truncated** into a collision. (For `Ref` keys in the manager layer, the key must also be JSON-serializable.)
+
 ---
 
 ## Instantiating each backend

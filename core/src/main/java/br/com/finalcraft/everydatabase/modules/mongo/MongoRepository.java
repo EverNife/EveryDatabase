@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.modules.mongo;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
+import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
@@ -237,11 +238,13 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
+        K key = descriptor.keyExtractor().apply(entity);
+        CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
+        if (reject != null) return reject;
         if (descriptor.isVersioned()) {
             return saveVersioned(entity);
         }
 
-        K key = descriptor.keyExtractor().apply(entity);
         return CompletableFuture.supplyAsync(() -> {
             replaceDocument(key, entity);
             log.saved(descriptor.collection(), key, entity);
@@ -425,6 +428,12 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
+
+        for (V entity : entities) {
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), descriptor.collection());
+            if (reject != null) return reject;
+        }
+
         long startMs = System.currentTimeMillis();
         long count = entities.size();
 

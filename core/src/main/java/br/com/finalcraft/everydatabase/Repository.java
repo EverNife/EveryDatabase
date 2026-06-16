@@ -32,8 +32,14 @@ public interface Repository<K, V> {
      */
     CompletableFuture<List<V>> findMany(Collection<K> keys);
 
-    /** Upsert: inserts or replaces.
+    /**
+     * Upsert: inserts or replaces.
      *
+     * <p>The key is persisted by its {@code toString()}; a key whose {@code toString()} exceeds
+     * {@link StorageKeys#MAX_KEY_LENGTH} characters is rejected and the returned future completes
+     * exceptionally with an {@link IllegalArgumentException} (the key never reaches storage, so it
+     * cannot be silently truncated into a collision). See {@link StorageKeys} for the full key
+     * contract.
      */
     CompletableFuture<Void> save(V entity);
 

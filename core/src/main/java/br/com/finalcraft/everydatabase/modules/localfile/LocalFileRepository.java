@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.modules.localfile;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
+import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.codec.CodecException;
@@ -136,6 +137,8 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> save(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
+        CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
+        if (reject != null) return reject;
         return CompletableFuture.supplyAsync(() -> {
             writeFile(key, entity);
             log.saved(descriptor.collection(), key, entity);
@@ -145,6 +148,10 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        for (V entity : entities) {
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), descriptor.collection());
+            if (reject != null) return reject;
+        }
         long startMs = System.currentTimeMillis();
         long count = entities.size();
         List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);

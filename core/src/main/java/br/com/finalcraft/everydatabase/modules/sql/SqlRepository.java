@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.modules.sql;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
+import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
@@ -622,10 +623,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
+        K key = descriptor.keyExtractor().apply(entity);
+        CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, tableName());
+        if (reject != null) return reject;
         if (versioningActive()) {
             return saveVersioned(entity);
         }
-        K key = descriptor.keyExtractor().apply(entity);
         return withConnection(conn -> {
             byte[] data = descriptor.codec().encode(entity);
             try (PreparedStatement ps = conn.prepareStatement(upsertSql())) {
@@ -784,6 +787,11 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
+
+        for (V entity : entities) {
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), tableName());
+            if (reject != null) return reject;
+        }
 
         if (versioningActive()) {
             // For versioned descriptors: loop save() per entity within a single connection

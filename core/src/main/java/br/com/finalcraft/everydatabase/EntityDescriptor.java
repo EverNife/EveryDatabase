@@ -38,6 +38,15 @@ import java.util.regex.Pattern;
  * any additional quoting or escaping: MySQL/MariaDB, PostgreSQL, H2, MongoDB,
  * and the local file-system.
  *
+ * <p><b>Key contract.</b> A key is persisted by its {@link Object#toString()} (SQL primary key,
+ * Mongo unique index, LocalFile filename) and matched by {@code equals}/{@code hashCode}
+ * (the in-memory backend and the manager cache). A key type must therefore have a <b>stable,
+ * unique {@code toString()} of at most {@link StorageKeys#MAX_KEY_LENGTH} characters</b> and
+ * value-based {@code equals}/{@code hashCode} - {@code UUID}, {@code String}, {@code Long},
+ * {@code Integer} and {@code record}s all qualify (the default identity {@code Object.toString()}
+ * does not). {@code save}/{@code saveAll} reject an oversized key up front with a clear error
+ * (no silent truncation); see {@link StorageKeys}.
+ *
  * Example:
  *
  *   EntityDescriptor<UUID, SomeKindOfData> altDescriptor =
@@ -145,6 +154,12 @@ public final class EntityDescriptor<K, V> {
             return this;
         }
 
+        /**
+         * Sets the function that extracts the key from an entity. The key must satisfy the key
+         * contract: a stable, unique {@code toString()} of at most
+         * {@link StorageKeys#MAX_KEY_LENGTH} characters and value-based {@code equals}/{@code hashCode}
+         * (see the class documentation and {@link StorageKeys}).
+         */
         public Builder<K, V> keyExtractor(Function<V, K> keyExtractor) {
             this.keyExtractor = keyExtractor;
             return this;

@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.modules.memory;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
+import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
@@ -79,6 +80,8 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> save(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
+        CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
+        if (reject != null) return reject;
         synchronized (this) {
             V copy = deepCopy(entity);
             V existing = store.get(key);
@@ -92,6 +95,10 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        for (V entity : entities) {
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), descriptor.collection());
+            if (reject != null) return reject;
+        }
         long startMs = System.currentTimeMillis();
         long count = entities.size();
         synchronized (this) {
