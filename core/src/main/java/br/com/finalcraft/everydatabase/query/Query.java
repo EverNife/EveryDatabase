@@ -36,8 +36,11 @@ import java.util.*;
  *
  * <p>All fields referenced by a {@code Query} must be declared as
  * {@link IndexHint} on the {@code EntityDescriptor}, otherwise the backend will
- * throw {@link IllegalArgumentException} at execution time. (LocalFile excepted -
- * it always scans and never throws.)
+ * throw {@link IllegalArgumentException} at execution time. This holds for every
+ * backend including LocalFile: it answers declared-field queries with a full scan
+ * (no real index), but still validates the declaration first and rejects an
+ * undeclared field - so a query that works on LocalFile keeps working when the
+ * backend is swapped for SQL or Mongo.
  */
 public final class Query {
 
