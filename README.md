@@ -651,10 +651,10 @@ public class Player {
 }
 
 // A RefRegistry owns your refs; it vends the ref-aware codec and the manager (each backed by any backend).
-RefRegistry world = new RefRegistry();
-CachingManager<UUID, Guild> guilds = world.manager(GUILDS, storage, CachePolicy.always());
+RefRegistry refRegistry = new RefRegistry();
+CachingManager<UUID, Guild> guilds = refRegistry.manager(GUILDS, storage, CachePolicy.always());
 
-Player p = playerRepo.find(id).join().orElseThrow();   // playerRepo's codec = world.codec(Player.class)
+Player p = playerRepo.find(id).join().orElseThrow();   // playerRepo's codec = refRegistry.codec(Player.class)
 Optional<Guild> g = p.getGuild().peek();          // synchronous, cache-only (the hot path)
 p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-and-cache
 ```
@@ -662,7 +662,7 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 - **Typed refs that serialize as the key** — no embedded objects, no ORM; the target type is recovered from the field on read.
 - **Caching with a policy you own** — `always()` / `ttl(...)` / `noCache()`, a per-field `@RefPolicy` override, and an LRU `maxSize`. `peek()` is a lock-free, cache-only read; `resolve()` loads on a miss; `getAll(...)` batches (the N+1 antidote); `saveAndCache` / `deleteAndEvict` keep cache and backend consistent.
 - **Cross-backend by design** — because a reference resolves through its type's manager, a single root entity can fan out across MySQL, PostgreSQL, Mongo, H2, files and memory **at once**, each reference under its own key type.
-- **Per-context registries, no global state** — each `RefRegistry` is its own world; two of them can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere.
+- **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two of them can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere.
 
 **→ Full guide: [`manager/README.md`](manager/README.md).**
 

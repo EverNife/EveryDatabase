@@ -89,25 +89,25 @@ public class Player {
 }
 
 // 2. A RefRegistry owns your refs. It vends the ref-aware codec and the manager, so a
-//    Ref<?, Guild> read through this world resolves through this world's Guild manager.
-RefRegistry world = new RefRegistry();
+//    Ref<?, Guild> read through this registry resolves through this registry's Guild manager.
+RefRegistry refRegistry = new RefRegistry();
 
 EntityDescriptor<UUID, Guild> GUILDS = EntityDescriptor.builder(UUID.class, Guild.class)
         .collection("guilds")
         .keyExtractor(Guild::getId)
-        .codec(world.codec(Guild.class))            // ref-aware codec bound to 'world'
+        .codec(refRegistry.codec(Guild.class))            // ref-aware codec bound to this registry
         .build();
 
-CachingManager<UUID, Guild> guilds = world.manager(GUILDS, storage, CachePolicy.always());
+CachingManager<UUID, Guild> guilds = refRegistry.manager(GUILDS, storage, CachePolicy.always());
 
 // 3. Resolve a reference — it goes through the Guild manager (its cache, its backend).
-Player p = playerRepo.find(playerId).join().orElseThrow();   // playerRepo built with world.codec(Player.class)
+Player p = playerRepo.find(playerId).join().orElseThrow();   // playerRepo built with refRegistry.codec(Player.class)
 Optional<Guild> g = p.getGuild().peek();          // synchronous, cache-only (the hot path)
 p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-and-cache
 ```
 
 `peek()` never does I/O; `resolve()` loads on a miss. The `Player` neither knows nor cares where its
-`Guild` lives or how it's cached — only that its reference was read through `world`.
+`Guild` lives or how it's cached — only that its reference was read through `refRegistry`.
 
 ---
 
@@ -148,11 +148,12 @@ read it directly — **lock-free, no map lookup** — and, because the cell upda
 always observes the latest value. A long-held `Ref` (e.g. on an online player) behaves like a
 self-refreshing live handle.
 
-Build a bound `Ref` to resolve programmatically with `registry.ref(key, Type.class)`. A bare
-`Ref.of(key, Type.class)` is **unbound** — fine to build and store (only the key is serialized), but
-resolving it fails fast; bind it via the reading codec or `Ref.of(key, Type.class, registry)`. An
-empty reference is `Ref.empty(Type.class)` (a JSON `null` round-trips to an empty `Ref`, never a
-bare `null`).
+Build a bound `Ref` to resolve programmatically with `registry.ref(key, Type.class)`. The registry
+is always an explicit argument to `Ref.of`: pass `null` **deliberately** —
+`Ref.of(key, Type.class, null)` — for an **unbound** ref, fine to build and store (only the key is
+serialized) but resolving it fails fast. There is no two-argument `Ref.of`, so the choice is always
+visible at the call site. An empty reference is `Ref.empty(Type.class)` (a JSON `null` round-trips to
+an empty `Ref`, never a bare `null`).
 
 > **Codec.** Wrap entities that contain `Ref` fields with `registry.codec(Type.class)` — it builds a
 > codec with the `RefModule` bound to that registry, so every `Ref` it reads resolves there.
@@ -265,8 +266,8 @@ Nesting falls out for free: **each entity type has its own manager**, with its o
 `Guild` held in memory does **not** drag its `GuildBattleData` in — it only holds the key.
 
 ```java
-new GuildManager(storage, world).preloadAll().join();             // guilds resident (always())
-world.manager(BATTLE, storage, CachePolicy.ttl(Duration.ofMinutes(3)));  // battle data lazy, 3-min TTL
+new GuildManager(storage, refRegistry).preloadAll().join();       // guilds resident (always())
+refRegistry.manager(BATTLE, storage, CachePolicy.ttl(Duration.ofMinutes(3)));  // battle data lazy, 3-min TTL
 
 Guild g = player.getGuild().peek().orElseThrow();                 // memory
 g.getBattleData().resolve().thenAccept(opt -> render(opt));       // backend on a cold miss, then TTL'd
@@ -296,14 +297,14 @@ public class PlayerProfile {
 }
 
 // One registry for this context; one manager per type, each on its own backend:
-RefRegistry world = new RefRegistry();
-world.manager(PROFILES, mariadb,  CachePolicy.always());
-world.manager(CLANS,    postgres, CachePolicy.always());
-world.manager(WALLETS,  mongo,    CachePolicy.always());
-world.manager(STATS,    h2,       CachePolicy.always());
-world.manager(SETTINGS, localFile,CachePolicy.always());
-world.manager(SESSIONS, inMemory, CachePolicy.always());
-// (each descriptor's codec is world.codec(Type.class), so the root's refs bind to 'world')
+RefRegistry refRegistry = new RefRegistry();
+refRegistry.manager(PROFILES, mariadb,  CachePolicy.always());
+refRegistry.manager(CLANS,    postgres, CachePolicy.always());
+refRegistry.manager(WALLETS,  mongo,    CachePolicy.always());
+refRegistry.manager(STATS,    h2,       CachePolicy.always());
+refRegistry.manager(SETTINGS, localFile,CachePolicy.always());
+refRegistry.manager(SESSIONS, inMemory, CachePolicy.always());
+// (each descriptor's codec is refRegistry.codec(Type.class), so the root's refs bind to this registry)
 
 // Load the root, then resolve each reference — every one hits a different database:
 PlayerProfile p = profiles.resolve(profileId).join().orElseThrow();
@@ -329,10 +330,10 @@ that runs without Docker) lives in
 Because there is **no global registry**, two independent contexts (two plugins, two authors) can each
 register a manager for the **same** entity type, backed by **different** storages, and never collide.
 A `Ref` resolves only against the registry it was bound to (by the codec that read it), so the same
-key resolves to different data in different worlds:
+key resolves to different data in different registries:
 
 ```java
-// Two worlds, each its own registry + its own stores. Both register a Hero manager.
+// Two registries, each with its own stores. Both register a Hero manager.
 RefRegistry survival = new RefRegistry();
 RefRegistry lobby    = new RefRegistry();
 survival.manager(heroDesc(survival), survivalStore, CachePolicy.always());   // Hero -> survivalStore
