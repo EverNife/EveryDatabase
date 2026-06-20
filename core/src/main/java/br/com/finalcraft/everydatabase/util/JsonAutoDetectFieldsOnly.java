@@ -32,7 +32,7 @@ import java.lang.annotation.Target;
  *
  * <h2>Usage</h2>
  * <pre>{@code
- * @JsonFieldsOnly
+ * @JsonAutoDetectFieldsOnly
  * public class UserDTO {
  *     private String name;
  *     private int age;
@@ -57,6 +57,6 @@ import java.lang.annotation.Target;
     isGetterVisibility = Visibility.NONE,
     setterVisibility = Visibility.NONE
 )
-public @interface JsonFieldsOnly {
+public @interface JsonAutoDetectFieldsOnly {
 
 }
