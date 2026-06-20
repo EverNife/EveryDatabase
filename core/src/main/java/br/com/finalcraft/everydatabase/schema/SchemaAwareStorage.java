@@ -23,6 +23,10 @@ import java.util.concurrent.CompletableFuture;
  *       migration authors use {@code MongoMigration}.</li>
  *   <li>{@code LocalFileStorage} - tracks in a metadata file;
  *       migration authors use {@code LocalFileMigration}.</li>
+ *   <li>{@code InMemoryStorage} - tracks in an ephemeral in-memory ledger that dies with
+ *       the instance, so a fresh instance re-applies every migration; migration authors use
+ *       {@code InMemoryMigration}. There is no schema to alter, so data-only migrations
+ *       (seeding / transformation through the repository) are the meaningful use.</li>
  * </ul>
  *
  * <h3>Typical usage (SQL)</h3>

@@ -6,9 +6,20 @@ import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
+import br.com.finalcraft.everydatabase.log.StorageOp;
+import br.com.finalcraft.everydatabase.schema.Migration;
+import br.com.finalcraft.everydatabase.schema.MigrationContext;
+import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
+import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionScope;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -22,10 +33,16 @@ import java.util.function.Function;
  *
  * <p>All operations are synchronous and complete immediately on the calling thread.</p>
  */
-public final class InMemoryStorage implements Storage, TransactionalStorage {
+public final class InMemoryStorage implements Storage, TransactionalStorage, SchemaAwareStorage {
 
     private final ConcurrentHashMap<String, InMemoryRepository<?, ?>> repositories = new ConcurrentHashMap<>();
     private volatile boolean initialized = false;
+
+    /** Registered migrations, kept sorted by version. Mutated only before {@link #migrate()}. */
+    private final List<Migration> registeredMigrations = new ArrayList<>();
+
+    /** Ephemeral ledger of applied migrations - lives only for this instance's lifetime. */
+    private final List<AppliedEntry> appliedLedger = new ArrayList<>();
 
     // ------------------------------------------------------------------
     //  Logging
@@ -123,6 +140,137 @@ public final class InMemoryStorage implements Storage, TransactionalStorage {
             CompletableFuture<R> failed = new CompletableFuture<>();
             failed.completeExceptionally(e);
             return failed;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  SchemaAwareStorage
+    // ------------------------------------------------------------------
+
+    @Override
+    public SchemaAwareStorage register(List<Migration> migrations) {
+        registeredMigrations.addAll(migrations);
+        Collections.sort(registeredMigrations, Comparator.comparing(Migration::version));
+        return this;
+    }
+
+    @Override
+    public CompletableFuture<SchemaVersion> currentVersion() {
+        if (appliedLedger.isEmpty()) {
+            return CompletableFuture.completedFuture(SchemaVersion.none());
+        }
+        AppliedEntry latest = appliedLedger.get(appliedLedger.size() - 1);
+        return CompletableFuture.completedFuture(new SchemaVersion(latest.version, latest.appliedAt));
+    }
+
+    @Override
+    public CompletableFuture<List<Migration>> pending() {
+        Set<String> applied = appliedVersionSet();
+        List<Migration> pending = new ArrayList<>();
+        for (Migration m : registeredMigrations) {
+            if (!applied.contains(m.version())) pending.add(m);
+        }
+        return CompletableFuture.completedFuture(pending);
+    }
+
+    @Override
+    public CompletableFuture<Void> migrate() {
+        try {
+            Set<String> applied = appliedVersionSet();
+            MigrationContext ctx = new InMemoryMigrationContext(this);
+
+            int pendingCount = 0;
+            for (Migration m : registeredMigrations) {
+                if (!applied.contains(m.version())) pendingCount++;
+            }
+            log.migrationPending(pendingCount);
+
+            int appliedCount = 0;
+            int skippedCount = 0;
+            String lastVersion = null;
+
+            for (Migration migration : registeredMigrations) {
+                if (applied.contains(migration.version())) {
+                    log.migrationSkipped(migration.version());
+                    skippedCount++;
+                    continue;
+                }
+
+                long startMs = System.currentTimeMillis();
+                try {
+                    migration.execute(ctx);
+                } catch (Exception e) {
+                    throw log.errored(StorageOp.MIGRATION_APPLY, null,
+                        new RuntimeException(
+                            "InMemory migration " + migration.version()
+                            + " [" + migration.description() + "] failed", e));
+                }
+
+                appliedLedger.add(new AppliedEntry(
+                    migration.version(), migration.description(), System.currentTimeMillis()));
+                applied.add(migration.version());
+                log.migrationApplied(migration.version(), migration.description(),
+                    System.currentTimeMillis() - startMs);
+                appliedCount++;
+                lastVersion = migration.version();
+            }
+
+            String target = lastVersion != null ? lastVersion
+                : (registeredMigrations.isEmpty() ? "none"
+                   : registeredMigrations.get(registeredMigrations.size() - 1).version());
+            log.migrationComplete(appliedCount, skippedCount, target);
+
+            return CompletableFuture.completedFuture(null);
+        } catch (Exception e) {
+            CompletableFuture<Void> f = new CompletableFuture<>();
+            f.completeExceptionally(e);
+            return f;
+        }
+    }
+
+    private Set<String> appliedVersionSet() {
+        Set<String> applied = new HashSet<>();
+        for (AppliedEntry e : appliedLedger) applied.add(e.version);
+        return applied;
+    }
+
+    // ------------------------------------------------------------------
+    //  Private: migration ledger entry (in-memory, never serialized)
+    // ------------------------------------------------------------------
+
+    private static final class AppliedEntry {
+        final String version;
+        final String description;
+        final long   appliedAt;
+
+        AppliedEntry(String version, String description, long appliedAt) {
+            this.version     = version;
+            this.description = description;
+            this.appliedAt   = appliedAt;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Private: MigrationContext
+    // ------------------------------------------------------------------
+
+    private static final class InMemoryMigrationContext implements MigrationContext {
+
+        private final InMemoryStorage storage;
+
+        InMemoryMigrationContext(InMemoryStorage storage) {
+            this.storage = storage;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> T getNativeClient(Class<T> type) {
+            if (type.isInstance(storage))      return (T) storage;
+            if (type == InMemoryStorage.class) return (T) storage;
+            throw new IllegalArgumentException(
+                "InMemoryStorage migration context does not provide: " + type.getName()
+                + " (available: InMemoryStorage)"
+            );
         }
     }
 
