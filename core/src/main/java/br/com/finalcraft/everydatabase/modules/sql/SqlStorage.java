@@ -169,6 +169,9 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     public CompletableFuture<Void> close() {
         return CompletableFuture.supplyAsync(() -> {
             if (dataSource != null && !dataSource.isClosed()) dataSource.close();
+            // Drop cached repositories: each captured the now-closed dataSource at construction, so a
+            // later init() must rebuild them against the fresh pool.
+            repositories.clear();
             log.closed();
             return null;
         }, StorageExecutors.get());

@@ -78,6 +78,17 @@ public abstract class AbstractStorageTest {
      */
     protected abstract Storage createStorage(String testMethodName);
 
+    /**
+     * Whether this backend retains data and supports reuse across a full {@code close()}/{@code init()}
+     * cycle on the same instance. {@code true} for every persistent backend (SQL, Mongo, LocalFile,
+     * GroupedFile, and H2's mem DB which uses {@code DB_CLOSE_DELAY=-1}). Overridden to {@code false}
+     * by the InMemory suite, whose data lives only for the instance's lifetime (a fresh
+     * {@code init()} after {@code close()} starts empty).
+     */
+    protected boolean survivesReopen() {
+        return true;
+    }
+
     @BeforeEach
     void setUp(TestInfo testInfo) {
         String methodName = testInfo.getTestMethod().map(Method::getName).orElse("unknown");
@@ -109,6 +120,41 @@ public abstract class AbstractStorageTest {
     void health_afterInit_isConnected() {
         HealthStatus h = storage.health().join();
         assertTrue(h.isConnected(), "Expected storage to be connected after init()");
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("[base] data + delete survive repeated close()/init() cycles (join at each step)")
+    void data_survivesRepeatedCloseInitCycles() {
+        Assumptions.assumeTrue(survivesReopen(),
+            "backend does not retain data across a full close()/init() cycle (e.g. in-memory)");
+
+        // open (init in setUp) + save
+        repo.save(alice()).join();
+
+        // close -> init -> still present
+        storage.close().join();
+        storage.init().join();
+        assertTrue(storage.repository(DESCRIPTOR).find(UUID_ALICE).join().isPresent(),
+            "entity must survive the first close/init cycle");
+
+        // close -> init -> still present
+        storage.close().join();
+        storage.init().join();
+        assertTrue(storage.repository(DESCRIPTOR).find(UUID_ALICE).join().isPresent(),
+            "entity must survive the second close/init cycle");
+
+        // close -> init -> delete
+        storage.close().join();
+        storage.init().join();
+        assertTrue(storage.repository(DESCRIPTOR).delete(UUID_ALICE).join(),
+            "delete must report the entity existed");
+
+        // close -> init -> gone (the delete persisted too)
+        storage.close().join();
+        storage.init().join();
+        assertFalse(storage.repository(DESCRIPTOR).find(UUID_ALICE).join().isPresent(),
+            "entity must stay deleted across a close/init cycle");
     }
 
     // ------------------------------------------------------------------

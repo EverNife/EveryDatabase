@@ -35,6 +35,12 @@ class InMemoryStorageTest extends AbstractStorageTest {
         return new InMemoryStorage(); // in-memory has no persistent database to name
     }
 
+    /** In-memory data lives only for the instance's lifetime - it cannot survive a close()/init() cycle. */
+    @Override
+    protected boolean survivesReopen() {
+        return false;
+    }
+
     // ------------------------------------------------------------------
     //  InMemory-specific: TransactionalStorage capability
     // ------------------------------------------------------------------
