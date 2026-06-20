@@ -1,13 +1,18 @@
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 
+// Project version: single source of truth is gradle/libs.versions.toml ([versions].everydatabase).
+// Captured here (root project scope, where the `libs` catalog accessor is unambiguous) and
+// applied to every module below.
+def everydatabaseVersion = libs.versions.everydatabase.get()
+
 subprojects {
     apply plugin: 'java-library'
     apply plugin: 'idea'
     apply plugin: 'maven-publish'
 
     group = 'br.com.finalcraft.everydatabase'
-    version = '1.0.3'
+    version = everydatabaseVersion
 
     java {
         withSourcesJar()
@@ -100,5 +105,71 @@ configure([project(':core'), project(':libby'), project(':manager')]) {
         javaCompiler = javaToolchains.compilerFor {
             languageVersion = JavaLanguageVersion.of(17)
         }
+    }
+}
+
+// ======================================================================
+//  Doc version stamping - the README install coordinates are derived from the
+//  project version (single source: gradle/libs.versions.toml), not hand-edited.
+//
+//    ./gradlew stampDocsVersions   - rewrite every everydatabase artifact coordinate
+//                                    in the READMEs to the current project version
+//    ./gradlew verifyDocsVersions  - fail if any is stale (wired into `check`)
+//
+//  Only the everydatabase-{core,libby,manager} version is stamped (the value that
+//  changes every release and is duplicated across both READMEs). Dependency versions
+//  live in the catalog and, for the runtime-download flavor, flow into Libby through
+//  the generated DependencyVersions class - see libby/build.gradle.
+// ======================================================================
+def versionedDocs = [file('README.md'), file('manager/README.md')]
+
+// Returns `text` with every everydatabase artifact coordinate set to `ver`.
+// Two shapes are covered: Gradle/plain quoted coordinates, and Maven <version> tags.
+def stampEveryDatabaseVersion = { String text, String ver ->
+    text
+        .replaceAll(/(["']br\.com\.finalcraft\.everydatabase:everydatabase-[a-z]+:)[^"']+(["'])/) { all, pre, post -> "${pre}${ver}${post}" }
+        .replaceAll(/(<artifactId>everydatabase-[a-z]+<\/artifactId>\s*<version>)[^<]+(<\/version>)/) { all, pre, post -> "${pre}${ver}${post}" }
+}
+
+tasks.register('stampDocsVersions') {
+    description = 'Rewrites README artifact coordinates to the current project version.'
+    group = 'documentation'
+    def ver = everydatabaseVersion
+    def docs = versionedDocs
+    def stamp = stampEveryDatabaseVersion
+    doLast {
+        docs.findAll { it.exists() }.each { f ->
+            def original = f.getText('UTF-8')
+            def stamped = stamp(original, ver)
+            if (stamped != original) {
+                f.write(stamped, 'UTF-8')
+                logger.lifecycle("stampDocsVersions: updated ${rootProject.relativePath(f)} -> ${ver}")
+            }
+        }
+    }
+}
+
+tasks.register('verifyDocsVersions') {
+    description = 'Fails if any README artifact coordinate is out of sync with the project version.'
+    group = 'verification'
+    def ver = everydatabaseVersion
+    def docs = versionedDocs
+    def stamp = stampEveryDatabaseVersion
+    doLast {
+        def stale = docs.findAll { it.exists() }
+                        .findAll { def t = it.getText('UTF-8'); stamp(t, ver) != t }
+                        .collect { rootProject.relativePath(it) }
+        if (!stale.isEmpty()) {
+            throw new GradleException(
+                "README coordinates are out of sync with project version ${ver}: ${stale.join(', ')}. " +
+                "Run './gradlew stampDocsVersions' to fix.")
+        }
+    }
+}
+
+// Make `check` (run per module) also verify the docs are in sync.
+subprojects {
+    tasks.matching { it.name == 'check' }.configureEach {
+        dependsOn rootProject.tasks.named('verifyDocsVersions')
     }
 }

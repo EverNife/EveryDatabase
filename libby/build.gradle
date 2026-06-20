@@ -33,6 +33,55 @@ dependencies {
     testRuntimeOnly libs.junit.jupiter.engine
 }
 
+// ======================================================================
+//  Generated dependency versions - single source: gradle/libs.versions.toml
+//
+//  EveryDatabaseDependencies builds its Libby runtime-download coordinates from
+//  the constants in the generated DependencyVersions class, so a version number
+//  lives in exactly one place (the catalog). Libby resolves no transitives, hence
+//  the flat artifact list lives in Java; only the *versions* are generated here.
+// ======================================================================
+def generatedVersionsDir = layout.buildDirectory.dir('generated/sources/versions/java/main')
+
+def generateDependencyVersions = tasks.register('generateDependencyVersions') {
+    description = 'Generates DependencyVersions.java from the version catalog.'
+    group = 'build'
+    def outDir = generatedVersionsDir
+    // Snapshot the catalog versions at configuration time so the task is cacheable
+    // and re-runs only when a version actually changes.
+    def versions = [
+            JACKSON   : libs.versions.jackson.get(),
+            MONGODB   : libs.versions.mongodb.get(),
+            HIKARICP  : libs.versions.hikaricp.get(),
+            // slf4j is a group accessor here (slf4j + slf4j-simple coexist) - asProvider() = the leaf value.
+            SLF4J     : libs.versions.slf4j.asProvider().get(),
+            H2        : libs.versions.h2.get(),
+            MYSQL     : libs.versions.mysql.get(),
+            POSTGRESQL: libs.versions.postgresql.get(),
+            SNAKEYAML : libs.versions.snakeyaml.get(),
+    ]
+    inputs.property('versions', versions)
+    outputs.dir(outDir)
+    doLast {
+        def pkgDir = outDir.get().dir('br/com/finalcraft/everydatabase/libby').asFile
+        pkgDir.mkdirs()
+        def constants = versions.collect { name, value -> "    static final String ${name} = \"${value}\";" }.join('\n')
+        new File(pkgDir, 'DependencyVersions.java').text = """\
+package br.com.finalcraft.everydatabase.libby;
+
+// GENERATED from gradle/libs.versions.toml by the :libby:generateDependencyVersions task.
+// Do not edit by hand - change the version catalog instead.
+final class DependencyVersions {
+${constants}
+    private DependencyVersions() {}
+}
+"""
+    }
+}
+
+sourceSets.main.java.srcDir(generateDependencyVersions)
+tasks.named('compileJava') { dependsOn(generateDependencyVersions) }
+
 test {
     useJUnitPlatform()
 }

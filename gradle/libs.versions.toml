@@ -1,4 +1,9 @@
 [versions]
+# Project version - single source of truth. Consumed by the root build.gradle
+# (every module's `version`), stamped into the READMEs by `stampDocsVersions`, and
+# checked by `verifyDocsVersions` (wired into `check`).
+everydatabase = "1.0.3"
+
 jabel = "0.4.2"
 # HikariCP 4.x is the last line built for Java 8 (5.x is Java 11 bytecode).
 # Kept at 4.0.3 so every backend runs on a Java 8 JVM; consumers on 11+ may
@@ -10,6 +15,9 @@ mongodb = "4.11.2"
 # major version would break existing embedded-file deployments.
 h2 = "1.4.200"
 jackson = "2.15.4"
+# snakeyaml is a transitive of jackson-dataformat-yaml. Pinned here only because the
+# :libby runtime-download bundle must list it explicitly (Libby resolves no transitives).
+snakeyaml = "2.1"
 slf4j = "1.7.36"
 slf4j-simple = "2.0.17"
 lombok = "1.18.42"

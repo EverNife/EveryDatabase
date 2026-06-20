@@ -38,53 +38,55 @@ import java.util.List;
 public final class EveryDatabaseDependencies {
 
     // =================================================================================
-    //  IMPORTANT: these versions must stay in sync with gradle/libs.versions.toml
-    //  (and therefore with what everydatabase-core compiles against).
-    //  Libby does NOT resolve transitives - every needed jar is listed explicitly.
+    //  Versions come from DependencyVersions, which is GENERATED from
+    //  gradle/libs.versions.toml (the :libby:generateDependencyVersions task), so they
+    //  cannot drift from what everydatabase-core compiles against. Only the flat artifact
+    //  list lives here: Libby does NOT resolve transitives, so every needed jar is
+    //  enumerated explicitly, each stamped with its catalog-sourced version.
     // =================================================================================
 
     /** Jackson JSON stack: required by {@code JacksonJsonCodec} (and by the YAML codec, which builds on it). */
     private static final String[] JACKSON_JSON_STACK = {
-            "com.fasterxml.jackson.core:jackson-core:2.15.4",
-            "com.fasterxml.jackson.core:jackson-annotations:2.15.4",
-            "com.fasterxml.jackson.core:jackson-databind:2.15.4",
+            "com.fasterxml.jackson.core:jackson-core:" + DependencyVersions.JACKSON,
+            "com.fasterxml.jackson.core:jackson-annotations:" + DependencyVersions.JACKSON,
+            "com.fasterxml.jackson.core:jackson-databind:" + DependencyVersions.JACKSON,
     };
 
     /** YAML additions on top of {@link #JACKSON_JSON_STACK}: required by {@code JacksonYamlCodec}. */
     private static final String[] JACKSON_YAML_EXTRAS = {
-            "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.15.4",
-            "org.yaml:snakeyaml:2.1",
+            "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:" + DependencyVersions.JACKSON,
+            "org.yaml:snakeyaml:" + DependencyVersions.SNAKEYAML,
     };
 
     /** SQL pool stack shared by every SQL backend (HikariCP hard-requires slf4j-api at class-init).
      *  HikariCP 4.x = last Java 8 line; 5.x is Java 11 bytecode. */
     private static final String[] SQL_POOL_STACK = {
-            "com.zaxxer:HikariCP:4.0.3",
-            "org.slf4j:slf4j-api:1.7.36",
+            "com.zaxxer:HikariCP:" + DependencyVersions.HIKARICP,
+            "org.slf4j:slf4j-api:" + DependencyVersions.SLF4J,
     };
 
     /** The embedded H2 database engine (its JDBC driver is built in).
      *  1.4.200 = last Java 8 release; 2.x is Java 11 bytecode with an incompatible file format. */
     private static final String[] H2_ENGINE = {
-            "com.h2database:h2:1.4.200",
+            "com.h2database:h2:" + DependencyVersions.H2,
     };
 
     /** MongoDB synchronous driver and its flat transitive set. */
     private static final String[] MONGO_STACK = {
-            "org.mongodb:mongodb-driver-sync:4.11.2",
-            "org.mongodb:mongodb-driver-core:4.11.2",
-            "org.mongodb:bson:4.11.2",
-            "org.mongodb:bson-record-codec:4.11.2",
+            "org.mongodb:mongodb-driver-sync:" + DependencyVersions.MONGODB,
+            "org.mongodb:mongodb-driver-core:" + DependencyVersions.MONGODB,
+            "org.mongodb:bson:" + DependencyVersions.MONGODB,
+            "org.mongodb:bson-record-codec:" + DependencyVersions.MONGODB,
     };
 
     /** MySQL/MariaDB JDBC driver - included in {@link #loadAll(DependencyManager)} by default. */
     private static final String[] MYSQL_DRIVER = {
-            "com.mysql:mysql-connector-j:9.4.0",
+            "com.mysql:mysql-connector-j:" + DependencyVersions.MYSQL,
     };
 
     /** PostgreSQL JDBC driver - included in {@link #loadAll(DependencyManager)} by default. */
     private static final String[] POSTGRES_DRIVER = {
-            "org.postgresql:postgresql:42.7.7",
+            "org.postgresql:postgresql:" + DependencyVersions.POSTGRESQL,
     };
 
     private EveryDatabaseDependencies() {
