@@ -1,4 +1,4 @@
-package com.example.config.jackson;
+package br.com.finalcraft.everydatabase.util;
 
 import com.fasterxml.jackson.annotation.JacksonAnnotationsInside;
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
