@@ -10,13 +10,13 @@ import java.util.Objects;
  * per-reference overridable, but the store's size bound is shared by every entry and cannot
  * be set per reference.
  */
-public final class CacheOptions {
+public class CacheOptions {
 
     /** Sentinel for {@link #maxSize()}: no bound - entries are evicted only by invalidation. */
     public static final int UNBOUNDED = 0;
 
-    private final CachePolicy policy;
-    private final int maxSize;
+    protected final CachePolicy policy;
+    protected final int maxSize;
 
     private CacheOptions(CachePolicy policy, int maxSize) {
         this.policy  = Objects.requireNonNull(policy, "policy");
@@ -47,9 +47,9 @@ public final class CacheOptions {
         return "CacheOptions{" + policy + ", maxSize=" + (maxSize == UNBOUNDED ? "unbounded" : maxSize) + "}";
     }
 
-    public static final class Builder {
-        private CachePolicy policy = CachePolicy.always();
-        private int maxSize = UNBOUNDED;
+    public static class Builder {
+        protected CachePolicy policy = CachePolicy.always();
+        protected int maxSize = UNBOUNDED;
 
         /** Default freshness policy (default {@link CachePolicy#always()}). */
         public Builder policy(CachePolicy policy) {

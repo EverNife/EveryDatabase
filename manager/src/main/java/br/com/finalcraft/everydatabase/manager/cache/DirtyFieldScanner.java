@@ -11,9 +11,9 @@ import java.lang.reflect.Modifier;
  * {@link Object}), mirroring the {@code @OptimisticLock} scanner, so an annotated field on a
  * superclass is also picked up.
  */
-public final class DirtyFieldScanner {
+public class DirtyFieldScanner {
 
-    private DirtyFieldScanner() {}
+    protected DirtyFieldScanner() {}
 
     /**
      * Returns the single field annotated with {@link DirtyFlag} in {@code clazz} or any of its

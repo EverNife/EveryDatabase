@@ -1,7 +1,5 @@
-package br.com.finalcraft.everydatabase.manager;
+package br.com.finalcraft.everydatabase.manager.cache;
 
-import br.com.finalcraft.everydatabase.manager.cache.CacheEntry;
-import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;

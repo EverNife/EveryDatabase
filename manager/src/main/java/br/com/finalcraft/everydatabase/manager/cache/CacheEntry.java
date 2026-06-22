@@ -19,14 +19,14 @@ import java.time.Instant;
  *
  * @param <S> the cached value type
  */
-public final class CacheEntry<S> {
+public class CacheEntry<S> {
 
-    private volatile S value;
-    private volatile Instant loadedAt;
-    private volatile boolean stale = false;
-    private volatile boolean evicted = false;
-    private volatile boolean deleted = false;
-    private volatile long stamp = 0L;
+    protected volatile S value;
+    protected volatile Instant loadedAt;
+    protected volatile boolean stale = false;
+    protected volatile boolean evicted = false;
+    protected volatile boolean deleted = false;
+    protected volatile long stamp = 0L;
 
     public CacheEntry(S value) {
         this(value, Instant.now());

@@ -12,12 +12,12 @@ import java.lang.reflect.Field;
  * treats it as a plain read-through / write-through entity). Declaring <b>both</b> forms on one type
  * is a configuration error and fails fast from {@code forType}.
  */
-public final class DirtyAccessor {
+public class DirtyAccessor {
 
-    private enum Mode { INTERFACE, FIELD }
+    protected enum Mode { INTERFACE, FIELD }
 
-    private final Mode mode;
-    private final Field field;
+    protected final Mode mode;
+    protected final Field field;
 
     private DirtyAccessor(Mode mode, Field field) {
         this.mode  = mode;

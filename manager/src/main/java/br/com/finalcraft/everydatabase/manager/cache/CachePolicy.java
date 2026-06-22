@@ -63,8 +63,8 @@ public interface CachePolicy {
 
     // ---------------------------------------------------------------------
 
-    final class AlwaysPolicy implements CachePolicy {
-        static final AlwaysPolicy INSTANCE = new AlwaysPolicy();
+    class AlwaysPolicy implements CachePolicy {
+        protected static final AlwaysPolicy INSTANCE = new AlwaysPolicy();
 
         @Override
         public boolean isFresh(CacheEntry<?> entry) {
@@ -77,8 +77,8 @@ public interface CachePolicy {
         }
     }
 
-    final class TtlPolicy implements CachePolicy {
-        private final Duration ttl;
+    class TtlPolicy implements CachePolicy {
+        protected final Duration ttl;
 
         TtlPolicy(Duration ttl) {
             this.ttl = ttl;
@@ -100,8 +100,8 @@ public interface CachePolicy {
         }
     }
 
-    final class NoCachePolicy implements CachePolicy {
-        static final NoCachePolicy INSTANCE = new NoCachePolicy();
+    class NoCachePolicy implements CachePolicy {
+        protected static final NoCachePolicy INSTANCE = new NoCachePolicy();
 
         @Override
         public boolean isFresh(CacheEntry<?> entry) {

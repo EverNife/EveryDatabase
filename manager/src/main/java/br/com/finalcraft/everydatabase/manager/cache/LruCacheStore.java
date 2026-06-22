@@ -1,12 +1,10 @@
-package br.com.finalcraft.everydatabase.manager;
-
-import br.com.finalcraft.everydatabase.manager.cache.CacheEntry;
+package br.com.finalcraft.everydatabase.manager.cache;
 
 import java.util.*;
 import java.util.function.Predicate;
 
 /**
- * Thread-safe entry store for a {@link CachingManager}.
+ * Thread-safe entry store for a {@code CachingManager}.
  *
  * <p>When {@code maxSize > 0} it is a bounded LRU (access-order {@link LinkedHashMap} that
  * evicts the least-recently-used entry past the bound); when {@code 0} it is unbounded.
@@ -24,17 +22,18 @@ import java.util.function.Predicate;
  * <p>The compound operations ({@link #installIfAbsent}, {@link #installColdMiss}, {@link #tombstone},
  * {@link #markStale}) exist so the manager keeps the identity map stable under concurrency:
  * publishing a freshly loaded value - or a delete tombstone - is one atomic, stamp-ordered step,
- * not a racy get-then-put.
+ * not a racy get-then-put. The class is non-final and its members are {@code protected} so a
+ * deployment can subclass it (e.g. to add metrics or swap the backing map).
  *
  * @param <K> the key type
  * @param <V> the cached value type
  */
-final class LruCacheStore<K, V> {
+public class LruCacheStore<K, V> {
 
-    private final Object lock = new Object();
-    private final Map<K, CacheEntry<V>> map;
+    protected final Object lock = new Object();
+    protected final Map<K, CacheEntry<V>> map;
 
-    LruCacheStore(int maxSize) {
+    public LruCacheStore(int maxSize) {
         if (maxSize > 0) {
             final int bound = maxSize;
             this.map = new LinkedHashMap<K, CacheEntry<V>>(16, 0.75f, true) {
@@ -52,19 +51,19 @@ final class LruCacheStore<K, V> {
         }
     }
 
-    CacheEntry<V> get(K key) {
+    public CacheEntry<V> get(K key) {
         synchronized (lock) {
             return map.get(key);
         }
     }
 
-    void put(K key, CacheEntry<V> entry) {
+    public void put(K key, CacheEntry<V> entry) {
         synchronized (lock) {
             map.put(key, entry);
         }
     }
 
-    void remove(K key) {
+    public void remove(K key) {
         synchronized (lock) {
             CacheEntry<V> removed = map.remove(key);
             if (removed != null) {
@@ -78,7 +77,7 @@ final class LruCacheStore<K, V> {
      * held (the existing one if present, else {@code candidate}). Lets concurrent cold misses
      * converge on a single canonical instance.
      */
-    CacheEntry<V> installIfAbsent(K key, CacheEntry<V> candidate) {
+    public CacheEntry<V> installIfAbsent(K key, CacheEntry<V> candidate) {
         synchronized (lock) {
             CacheEntry<V> existing = map.get(key);
             if (existing != null) {
@@ -97,7 +96,7 @@ final class LruCacheStore<K, V> {
      * @return the cell now held - a live cell, or the tombstone when a newer delete wins (the caller
      *         treats a returned tombstone as "absent")
      */
-    CacheEntry<V> installColdMiss(K key, V value, long stamp) {
+    public CacheEntry<V> installColdMiss(K key, V value, long stamp) {
         synchronized (lock) {
             CacheEntry<V> cell = map.get(key);
             if (cell == null) {
@@ -120,7 +119,7 @@ final class LruCacheStore<K, V> {
      * monotonic {@code stamp} guard means a slower delete never overrides a newer write, and the
      * tombstone blocks a slower in-flight reload from re-installing the just-deleted entity.
      */
-    void tombstone(K key, long stamp) {
+    public void tombstone(K key, long stamp) {
         synchronized (lock) {
             CacheEntry<V> cell = map.get(key);
             if (cell == null) {
@@ -134,7 +133,7 @@ final class LruCacheStore<K, V> {
     }
 
     /** Atomically marks the current entry (if any) stale, under the lock (no detached-entry race). */
-    void markStale(K key) {
+    public void markStale(K key) {
         synchronized (lock) {
             CacheEntry<V> entry = map.get(key);
             if (entry != null) {
@@ -144,7 +143,7 @@ final class LruCacheStore<K, V> {
     }
 
     /** Removes every entry matching {@code shouldEvict}; returns how many were removed. */
-    int purge(Predicate<CacheEntry<V>> shouldEvict) {
+    public int purge(Predicate<CacheEntry<V>> shouldEvict) {
         synchronized (lock) {
             int removed = 0;
             Iterator<Map.Entry<K, CacheEntry<V>>> it = map.entrySet().iterator();
@@ -160,7 +159,7 @@ final class LruCacheStore<K, V> {
         }
     }
 
-    void clear() {
+    public void clear() {
         synchronized (lock) {
             for (CacheEntry<V> entry : map.values()) {
                 entry.markEvicted();
@@ -169,14 +168,14 @@ final class LruCacheStore<K, V> {
         }
     }
 
-    int size() {
+    public int size() {
         synchronized (lock) {
             return map.size();
         }
     }
 
     /** Number of live (non-tombstone) entries currently cached. */
-    int liveCount() {
+    public int liveCount() {
         synchronized (lock) {
             int n = 0;
             for (CacheEntry<V> entry : map.values()) {
@@ -189,9 +188,20 @@ final class LruCacheStore<K, V> {
     }
 
     /** Snapshot of the current entries (for bulk invalidation). */
-    List<CacheEntry<V>> valuesSnapshot() {
+    public List<CacheEntry<V>> valuesSnapshot() {
         synchronized (lock) {
             return new ArrayList<>(map.values());
+        }
+    }
+
+    /** Snapshot of the keys of live (non-tombstone) entries - used by the version poller. */
+    public Set<K> liveKeysSnapshot() {
+        synchronized (lock) {
+            Set<K> keys = new LinkedHashSet<>();
+            for (Map.Entry<K, CacheEntry<V>> e : map.entrySet()) {
+                if (!e.getValue().isDeleted()) keys.add(e.getKey());
+            }
+            return keys;
         }
     }
 }
