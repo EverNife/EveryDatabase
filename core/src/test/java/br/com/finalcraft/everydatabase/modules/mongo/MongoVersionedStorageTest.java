@@ -37,12 +37,13 @@ import static org.junit.jupiter.api.Assertions.*;
 @DisplayName("MongoStorage - Optimistic Locking (versioned)")
 class MongoVersionedStorageTest extends AbstractVersionedStorageTest {
 
-    static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "root");
-    static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "root");
+    static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "");
+    static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "");
     static final String MONGO_HOST = DotEnvTestUtil.getOrDefault("MONGO_HOST", "localhost");
     static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "39308");
-    static final String MONGO_URL  = "mongodb://" + MONGO_USER + ":" + MONGO_PASS
-                                   + "@" + MONGO_HOST + ":" + MONGO_PORT;
+    static final String MONGO_URL  = "mongodb://"
+            + (MONGO_USER.isEmpty() ? "" : MONGO_USER + ":" + MONGO_PASS + "@")
+            + MONGO_HOST + ":" + MONGO_PORT + "/?directConnection=true";
 
     private static final ThrowawayDatabaseSupport DBS = ThrowawayDatabaseSupport.mongo(MONGO_URL, "mgv");
 

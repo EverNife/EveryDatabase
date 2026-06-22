@@ -93,6 +93,15 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+        Map<K, Long> result = new HashMap<>();
+        for (K key : keys) {
+            if (data.containsKey(key)) result.put(key, 0L);
+        }
+        return CompletableFuture.completedFuture(result);
+    }
+
+    @Override
     public CompletableFuture<Stream<V>> all() {
         return CompletableFuture.completedFuture(new ArrayList<>(data.values()).stream());
     }

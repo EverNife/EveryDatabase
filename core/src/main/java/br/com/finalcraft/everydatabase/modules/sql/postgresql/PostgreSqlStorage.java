@@ -2,10 +2,17 @@ package br.com.finalcraft.everydatabase.modules.sql.postgresql;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
+import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
+import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import br.com.finalcraft.everydatabase.modules.sql.SqlRepository;
 import br.com.finalcraft.everydatabase.modules.sql.SqlStorage;
+
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * PostgreSQL {@link Storage} backend.
@@ -27,7 +34,15 @@ import br.com.finalcraft.everydatabase.modules.sql.SqlStorage;
  *     new SqlConfig("jdbc:h2:mem:testdb;MODE=PostgreSQL", "", ""));
  * }</pre>
  */
-public class PostgreSqlStorage extends SqlStorage {
+public class PostgreSqlStorage extends SqlStorage implements ChangeFeedStorage {
+
+    private final SqlConfig pgConfig;
+    /** Stable per-instance origin id, stamped on NOTIFY payloads. */
+    private final String originId = "pg-" + UUID.randomUUID();
+    /** In-process change-feed dispatcher; fed by the NOTIFY listener thread. */
+    private final ChangeFeedSupport changeFeed = new ChangeFeedSupport();
+    /** Lazily started on first subscribe; the NOTIFY listener thread. */
+    private volatile PostgresChangeFeed changeFeedSource;
 
     public PostgreSqlStorage(SqlConfig config) {
         this(config, StorageLogConfig.defaults());
@@ -35,6 +50,7 @@ public class PostgreSqlStorage extends SqlStorage {
 
     public PostgreSqlStorage(SqlConfig config, StorageLogConfig logConfig) {
         super(config, logConfig, "postgresql");
+        this.pgConfig = config;
     }
 
     /**
@@ -49,6 +65,43 @@ public class PostgreSqlStorage extends SqlStorage {
 
     @Override
     protected <K, V> SqlRepository<K, V> createRepository(EntityDescriptor<K, V> descriptor) {
-        return new PostgreSqlRepository<>(descriptor, getDataSource(), txConnection, storageLog());
+        return new PostgreSqlRepository<>(descriptor, getDataSource(), txConnection, storageLog(), originId);
+    }
+
+    // ------------------------------------------------------------------
+    //  ChangeFeedStorage
+    // ------------------------------------------------------------------
+
+    @Override
+    public String originId() {
+        return originId;
+    }
+
+    @Override
+    public ChangeSubscription subscribe(ChangeListener listener) {
+        ensureChangeFeedStarted();
+        return changeFeed.subscribe(listener);
+    }
+
+    /** Lazily starts the NOTIFY listener on first subscribe (requires {@link #init()} first). */
+    private synchronized void ensureChangeFeedStarted() {
+        if (changeFeedSource != null) {
+            return;
+        }
+        PostgresChangeFeed source = new PostgresChangeFeed(
+            pgConfig.jdbcUrl(), pgConfig.username(), pgConfig.password(), changeFeed, storageLog());
+        source.start();
+        changeFeedSource = source;
+    }
+
+    @Override
+    public CompletableFuture<Void> close() {
+        PostgresChangeFeed source = changeFeedSource;
+        if (source != null) {
+            source.stop();
+            changeFeedSource = null;
+        }
+        changeFeed.closeAll();
+        return super.close();
     }
 }

@@ -3,6 +3,9 @@ package br.com.finalcraft.everydatabase.modules.memory;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
+import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
@@ -13,6 +16,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 /**
@@ -37,6 +41,11 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     private final StorageLog log;
     private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
 
+    /** Change-feed dispatcher of the owning storage; {@code null} when the storage has none. */
+    private final ChangeFeedSupport changeFeed;
+    /** Origin id of the owning storage, stamped on emitted events. */
+    private final String originId;
+
     /** Indexed field paths (declared in the descriptor). */
     private final Map<String, IndexHint> hintsByPath;
 
@@ -47,8 +56,15 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     private final Map<String, Map<Object, Set<K>>> indexes;
 
     InMemoryRepository(EntityDescriptor<K, V> descriptor, StorageLog log) {
+        this(descriptor, log, null, null);
+    }
+
+    InMemoryRepository(EntityDescriptor<K, V> descriptor, StorageLog log,
+                       ChangeFeedSupport changeFeed, String originId) {
         this.descriptor = descriptor;
         this.log        = log;
+        this.changeFeed = changeFeed;
+        this.originId   = originId;
 
         this.hintsByPath = new HashMap<>();
         this.indexes     = new ConcurrentHashMap<>();
@@ -91,6 +107,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
             addToIndexes(key, copy);
         }
         log.saved(descriptor.collection(), key, entity);
+        emitSave(key, entity);
         return CompletableFuture.completedFuture(null);
     }
 
@@ -113,6 +130,9 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
             }
         }
         log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs);
+        for (V entity : entities) {
+            emitSave(descriptor.keyExtractor().apply(entity), entity);
+        }
         return CompletableFuture.completedFuture(null);
     }
 
@@ -122,13 +142,15 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Boolean> delete(K key) {
+        boolean existed;
         synchronized (this) {
             V previous = store.remove(key);
             if (previous != null) removeFromIndexes(key, previous);
-            boolean existed = previous != null;
-            log.deleted(descriptor.collection(), key, existed);
-            return CompletableFuture.completedFuture(existed);
+            existed = previous != null;
         }
+        log.deleted(descriptor.collection(), key, existed);
+        if (existed) emitDelete(key);
+        return CompletableFuture.completedFuture(existed);
     }
 
     @Override
@@ -139,6 +161,23 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Long> count() {
         return CompletableFuture.completedFuture((long) store.size());
+    }
+
+    @Override
+    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+        Map<K, Long> result = new HashMap<>();
+        Function<V, Long> getter = descriptor.versionGetter();
+        for (K key : keys) {
+            V v = store.get(key);
+            if (v == null) continue;
+            long version = 0L;
+            if (getter != null) {
+                Long got = getter.apply(v);
+                version = got != null ? got : 0L;
+            }
+            result.put(key, version);
+        }
+        return CompletableFuture.completedFuture(result);
     }
 
     @Override
@@ -316,5 +355,29 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         Set<K> big   = small == a ? b : a;
         for (K k : small) if (big.contains(k)) out.add(k);
         return out;
+    }
+
+    // ------------------------------------------------------------------
+    //  Change feed
+    // ------------------------------------------------------------------
+
+    private void emitSave(K key, V entity) {
+        if (changeFeed == null) return;
+        changeFeed.emit(new ChangeEvent(
+            descriptor.collection(), key.toString(), ChangeOp.SAVE, versionOf(entity), originId));
+    }
+
+    private void emitDelete(K key) {
+        if (changeFeed == null) return;
+        changeFeed.emit(new ChangeEvent(
+            descriptor.collection(), key.toString(), ChangeOp.DELETE, ChangeEvent.UNKNOWN_VERSION, originId));
+    }
+
+    /** The entity's optimistic-lock version, or {@code -1} when the descriptor is not versioned. */
+    private long versionOf(V entity) {
+        Function<V, Long> getter = descriptor.versionGetter();
+        if (getter == null) return ChangeEvent.UNKNOWN_VERSION;
+        Long v = getter.apply(entity);
+        return v != null ? v : 0L;
     }
 }

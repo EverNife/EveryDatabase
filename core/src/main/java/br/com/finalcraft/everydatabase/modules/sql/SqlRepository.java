@@ -623,6 +623,33 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+        if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyMap());
+        List<K> keyList = new ArrayList<>(keys);
+        // H2 (and non-versioned descriptors) have no lock_version column - SELECT a literal 0 so the
+        // result still reports existence (deletes detectable) even though updates are not.
+        String versionExpr = versioningActive() ? q(COL_VERSION) : "0";
+        String placeholders = repeat("?", keyList.size(), ",");
+        String sql = "SELECT " + q(COL_KEY) + ", " + versionExpr + " FROM " + q(tableName())
+            + " WHERE " + q(COL_KEY) + " IN (" + placeholders + ")";
+        return withConnection(conn -> {
+            Map<String, K> byString = new HashMap<>();
+            for (K k : keyList) byString.put(k.toString(), k);
+            Map<K, Long> result = new HashMap<>();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < keyList.size(); i++) ps.setString(i + 1, keyList.get(i).toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        K key = byString.get(rs.getString(1));
+                        if (key != null) result.put(key, rs.getLong(2));
+                    }
+                }
+            }
+            return result;
+        });
+    }
+
+    @Override
     public CompletableFuture<Void> save(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
         CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, tableName());

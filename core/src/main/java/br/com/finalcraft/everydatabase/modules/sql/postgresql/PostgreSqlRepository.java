@@ -1,16 +1,23 @@
 package br.com.finalcraft.everydatabase.modules.sql.postgresql;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
+import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
+import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.log.StorageLog;
+import br.com.finalcraft.everydatabase.log.StorageLogLevel;
+import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.modules.sql.SqlRepository;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * PostgreSQL dialect of {@link SqlRepository}.
@@ -32,9 +39,84 @@ import java.util.List;
  */
 public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
 
+    private static final ObjectMapper PAYLOAD_MAPPER = new ObjectMapper();
+
+    /** Origin id of the owning storage, stamped on NOTIFY payloads; {@code null} disables emitting. */
+    private final String originId;
+
     public PostgreSqlRepository(EntityDescriptor<K, V> descriptor, DataSource dataSource,
                                 ThreadLocal<Connection> txConnection, StorageLog log) {
+        this(descriptor, dataSource, txConnection, log, null);
+    }
+
+    public PostgreSqlRepository(EntityDescriptor<K, V> descriptor, DataSource dataSource,
+                                ThreadLocal<Connection> txConnection, StorageLog log, String originId) {
         super(descriptor, dataSource, txConnection, log);
+        this.originId = originId;
+    }
+
+    // ------------------------------------------------------------------
+    //  Change feed: emit a NOTIFY after each successful write
+    // ------------------------------------------------------------------
+
+    @Override
+    public CompletableFuture<Void> save(V entity) {
+        return super.save(entity).thenApply(done -> {
+            notifyChange(ChangeOp.SAVE, descriptor.keyExtractor().apply(entity), versionOf(entity));
+            return done;
+        });
+    }
+
+    @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        return super.saveAll(entities).thenApply(done -> {
+            for (V entity : entities) {
+                notifyChange(ChangeOp.SAVE, descriptor.keyExtractor().apply(entity), versionOf(entity));
+            }
+            return done;
+        });
+    }
+
+    @Override
+    public CompletableFuture<Boolean> delete(K key) {
+        return super.delete(key).thenApply(existed -> {
+            if (existed) {
+                notifyChange(ChangeOp.DELETE, key, ChangeEvent.UNKNOWN_VERSION);
+            }
+            return existed;
+        });
+    }
+
+    /**
+     * Publishes a change on the {@code NOTIFY} channel. Emitted on a fresh pooled connection after
+     * the (already committed, for the common autocommit path) write, so a failure here never breaks
+     * the write. Skipped when {@code originId} is null (the storage's change feed is not in use).
+     */
+    private void notifyChange(ChangeOp op, K key, long version) {
+        if (originId == null) {
+            return;
+        }
+        String payload = PgChangePayload.encode(
+            PAYLOAD_MAPPER, descriptor.collection(), key.toString(), op, version, originId);
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT pg_notify(?, ?)")) {
+            ps.setString(1, PgChangePayload.CHANNEL);
+            ps.setString(2, payload);
+            ps.execute();
+        } catch (SQLException e) {
+            // A failed notification must never fail the write it follows; cache freshness self-heals.
+            log.emit(StorageOp.SAVE, StorageLogLevel.WARN,
+                b -> b.detail("pg_notify failed for '" + descriptor.collection() + "'").error(e));
+        }
+    }
+
+    /** The entity's optimistic-lock version after the write, or {@code -1} when not versioned. */
+    private long versionOf(V entity) {
+        if (!descriptor.isVersioned()) {
+            return ChangeEvent.UNKNOWN_VERSION;
+        }
+        Long v = descriptor.versionGetter().apply(entity);
+        return v != null ? v : ChangeEvent.UNKNOWN_VERSION;
     }
 
     @Override

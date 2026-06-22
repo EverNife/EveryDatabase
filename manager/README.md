@@ -28,6 +28,7 @@ you control, and resolve them lazily — without turning the library into an ORM
 - [⭐ One entity, many databases, many key types](#-one-entity-many-databases-many-key-types)
 - [Multiple registries — the same type, different resolvers](#multiple-registries--the-same-type-different-resolvers)
 - [Parent registries](#parent-registries)
+- [Keeping caches fresh across instances (`CacheSync`)](#keeping-caches-fresh-across-instances-cachesync)
 - [What it guarantees (and what it doesn't)](#what-it-guarantees-and-what-it-doesnt)
 - [Non-goals](#non-goals)
 
@@ -473,6 +474,77 @@ always local - `register(...)`/`manager(...)` never touch the parent. `isRegiste
 
 ---
 
+## Keeping caches fresh across instances (`CacheSync`)
+
+A `CachingManager` only sees its **own** writes. When 5–20 application instances share one backend
+and instance A updates an entity, instances B…N keep serving their stale cached copy until TTL. Wire
+`CacheSync` to close that gap. It's the **single entry point** and hides *which* mechanism a backend
+uses: it picks the backend-native **push** feed when available (Mongo/Postgres/InMemory) and falls
+back to **polling** otherwise (MySQL/MariaDB). The same wiring works on any backend:
+
+```java
+RefRegistry registry = new RefRegistry();
+CachingManager<UUID, Guild>  guilds  = registry.manager(GUILDS,  storage, CachePolicy.always());
+CachingManager<UUID, Player> players = registry.manager(PLAYERS, storage, CachePolicy.ttl(Duration.ofSeconds(30)));
+
+CacheSync sync = CacheSync.attach(storage)
+        .pollEvery(Duration.ofSeconds(10))   // only used if `storage` can't push (MySQL/MariaDB)
+        .bind(guilds)
+        .bind(players)
+        .start();
+// ... on shutdown:
+sync.close();
+```
+
+If `storage` can push, it subscribes and `pollEvery` is ignored; if it can't, it polls every
+interval. With neither a feed nor a `pollEvery`, `start()` throws a clear error telling you to add
+one. So you **don't need to know your backend** — switching MySQL → Mongo needs no code change, it
+just gets faster.
+
+A write through any instance now invalidates the same entity's cache in every other instance: the
+cell is marked stale and the next `resolve` reloads authoritative state. The cell's monotonic stamp
+makes this safe — a late invalidation can never clobber a newer local write nor resurrect a newer
+delete.
+
+**How each backend is served:**
+
+| Backend | Mechanism | Notes |
+|---|---|---|
+| **MongoDB** | Change Streams (push) | resumable (survives a brief disconnect); needs a **replica set**. SAVE and DELETE both propagate (the entity key is the document `_id`). |
+| **PostgreSQL** | `LISTEN/NOTIFY` (push) | zero extra infra; fire-and-forget → pair with a TTL policy |
+| **InMemory** | local writes (push) | per-process reference implementation |
+| **MySQL/MariaDB** | version polling (pull) | needs `.pollEvery(...)` |
+| H2 · LocalFile | version polling (pull) | embedded/single-node; H2 polling detects deletes only |
+
+### Managers on different backends — `CacheSync.auto()`
+
+When your managers live on **different** backends, `auto()` routes each one by its own storage —
+push where the backend supports it, poll where it doesn't:
+
+```java
+CacheSync sync = CacheSync.auto()
+        .pollEvery(Duration.ofSeconds(10))   // fallback for the non-push managers
+        .bind(guildsOnMongo)     // -> push (change stream)
+        .bind(walletsOnMySql)    // -> poll (version polling)
+        .start();
+```
+
+Notes (apply to both `attach` and `auto`):
+- **Keys** are parsed back from their persisted `toString()` form — `UUID`/`Long`/`Integer`/`String`
+  work out of the box; for a composite/`record` key pass a parser: `.bind(manager, str -> myKey(str))`.
+- **Own writes** are skipped by default (this instance's cache was already updated write-through);
+  call `.includeOwnOrigin()` for the rare several-caches-over-one-storage-in-one-process setup.
+- Delivery is **at-least-once and best-effort** (Postgres may drop a notification, polling has a
+  one-interval latency) — always keep a TTL or version-check as the safety net.
+- **Polling detail:** detecting in-place *updates* needs a versioned entity (`@OptimisticLock`); a
+  non-versioned descriptor (and H2) reports version `0`, so polling then catches only deletes.
+
+The two underlying primitives stay available if you want explicit control: a raw
+`ChangeFeedStorage.subscribe(...)` (push) and `PollingCacheSync.every(Duration).bind(...).start()`
+(pull) — `CacheSync` just wires them for you. Spec: `specs/SPEC_cache_sync.md`.
+
+---
+
 ## What it guarantees (and what it doesn't)
 
 The cache hands out the **same instance** per key for its lifetime — an identity map. Publication is
@@ -486,8 +558,8 @@ state, and freshness is bounded:
 | **Write staleness** (you save a stale copy over a newer one) | ✅ (versioned backends) | `OptimisticLockException` → auto-evict + reload |
 | **Mutating a swapped-out value** | ❌ | mutate *through* `saveAndCache`, or single-writer discipline |
 
-Cross-process writes are invisible to a local cache — bound them with a TTL and/or an external
-invalidation signal wired to `manager.evict(key)`.
+Cross-process writes are invisible to a local cache unless you wire **[`CacheSync`](#keeping-caches-fresh-across-instances-cachesync)**
+(backend change feed → `invalidate`/`evict`); otherwise bound staleness with a TTL policy.
 
 ---
 

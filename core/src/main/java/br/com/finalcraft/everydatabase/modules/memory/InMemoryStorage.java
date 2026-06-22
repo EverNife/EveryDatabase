@@ -4,6 +4,10 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
+import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
+import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.log.StorageOp;
@@ -27,11 +31,21 @@ import java.util.function.Function;
  * code using {@code TransactionalStorage} works against in-memory storage during tests.</p>
  *
  * <p>All operations are synchronous and complete immediately on the calling thread.</p>
+ *
+ * <p>Also implements {@link ChangeFeedStorage} as the <b>reference implementation</b>: local
+ * writes emit {@link br.com.finalcraft.everydatabase.changefeed.ChangeEvent}s synchronously. Since
+ * the store is per-instance there is no cross-process scenario to solve in production, but it makes
+ * the capability real and fully testable without a database server.</p>
  */
-public final class InMemoryStorage implements Storage, TransactionalStorage, SchemaAwareStorage {
+public final class InMemoryStorage implements Storage, TransactionalStorage, SchemaAwareStorage, ChangeFeedStorage {
 
     private final ConcurrentHashMap<String, InMemoryRepository<?, ?>> repositories = new ConcurrentHashMap<>();
     private volatile boolean initialized = false;
+
+    /** Stable per-instance origin id, stamped on emitted change events. */
+    private final String originId = "mem-" + UUID.randomUUID();
+    /** In-process change-feed dispatcher; repositories of this storage emit through it. */
+    private final ChangeFeedSupport changeFeed = new ChangeFeedSupport();
 
     /** Registered migrations, kept sorted by version. Mutated only before {@link #migrate()}. */
     private final List<Migration> registeredMigrations = new ArrayList<>();
@@ -88,6 +102,7 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
     @Override
     public CompletableFuture<Void> close() {
         repositories.clear();
+        changeFeed.closeAll();
         initialized = false;
         log.closed();
         return CompletableFuture.completedFuture(null);
@@ -111,8 +126,22 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
         }
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
-            k -> new InMemoryRepository<>(descriptor, log)
+            k -> new InMemoryRepository<>(descriptor, log, changeFeed, originId)
         );
+    }
+
+    // ------------------------------------------------------------------
+    //  ChangeFeedStorage
+    // ------------------------------------------------------------------
+
+    @Override
+    public String originId() {
+        return originId;
+    }
+
+    @Override
+    public ChangeSubscription subscribe(ChangeListener listener) {
+        return changeFeed.subscribe(listener);
     }
 
     /**

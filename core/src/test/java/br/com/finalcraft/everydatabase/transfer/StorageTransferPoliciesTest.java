@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -744,7 +745,7 @@ class StorageTransferPoliciesTest {
                     public CompletableFuture<Optional<V>> find(K key) { return base.find(key); }
 
                     @Override
-                    public CompletableFuture<java.util.List<V>> findMany(java.util.Collection<K> keys) {
+                    public CompletableFuture<List<V>> findMany(Collection<K> keys) {
                         return base.findMany(keys);
                     }
 
@@ -752,7 +753,7 @@ class StorageTransferPoliciesTest {
                     public CompletableFuture<Void> save(V entity) { return base.save(entity); }
 
                     @Override
-                    public CompletableFuture<Void> saveAll(java.util.Collection<V> entities) {
+                    public CompletableFuture<Void> saveAll(Collection<V> entities) {
                         int n = callCount.incrementAndGet();
                         if (n == throwOnNth) {
                             // Throw only on the exact Nth call; all others succeed
@@ -774,15 +775,20 @@ class StorageTransferPoliciesTest {
                     public CompletableFuture<Long> count() { return base.count(); }
 
                     @Override
-                    public CompletableFuture<java.util.stream.Stream<V>> all() { return base.all(); }
+                    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+                        return base.versions(keys);
+                    }
 
                     @Override
-                    public CompletableFuture<java.util.List<V>> findBy(String fieldPath, Object value) {
+                    public CompletableFuture<Stream<V>> all() { return base.all(); }
+
+                    @Override
+                    public CompletableFuture<List<V>> findBy(String fieldPath, Object value) {
                         return base.findBy(fieldPath, value);
                     }
 
                     @Override
-                    public CompletableFuture<java.util.List<V>> query(Query query) {
+                    public CompletableFuture<List<V>> query(Query query) {
                         return base.query(query);
                     }
                 };
