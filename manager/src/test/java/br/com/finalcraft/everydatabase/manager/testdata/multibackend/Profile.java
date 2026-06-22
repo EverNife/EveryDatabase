@@ -15,13 +15,13 @@ import java.util.UUID;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-public class PlayerProfile {
+public class Profile {
 
-    private UUID uuid;                               // key: UUID
+    private UUID uuid;                          // key: UUID
 
-    private Ref<String, Clan>           clan;        // String key   -> PostgreSQL
-    private Ref<Long, Wallet>           wallet;      // Long key     -> MongoDB
-    private Ref<Integer, Stats>         stats;       // Integer key  -> H2
-    private Ref<Settings.Key, Settings> settings;    // record key   -> LocalFile
-    private Ref<Session.Id, Session>    session;     // record key   -> InMemory
+    private Ref<String, Clan>      clan;        // String key   -> PostgreSQL
+    private Ref<Long, Wallet>      wallet;      // Long key     -> MongoDB
+    private Ref<Integer, Stats>    stats;       // Integer key  -> H2
+    private Ref<Home.Key, Home>    home;        // record key   -> LocalFile
+    private Ref<Session.Id, Session> session;   // record key   -> InMemory
 }

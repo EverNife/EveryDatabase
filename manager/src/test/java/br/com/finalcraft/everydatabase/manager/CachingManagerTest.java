@@ -5,6 +5,9 @@ import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.manager.cache.CacheOptions;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
+import br.com.finalcraft.everydatabase.manager.testdata.Inventory;
+import br.com.finalcraft.everydatabase.manager.testdata.Item;
+import br.com.finalcraft.everydatabase.manager.testdata.Player;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import org.junit.jupiter.api.AfterEach;
@@ -32,7 +35,15 @@ class CachingManagerTest {
         guildDescriptor = EntityDescriptor.builder(UUID.class, Guild.class)
                 .collection("guilds")
                 .keyExtractor(g -> g.getId())
-                .codec(registry.codec(Guild.class))   // Guild carries a Ref field (battleData)
+                .codec(registry.codec(Guild.class))   // Guild carries Ref fields (leader/founder/...)
+                .build();
+    }
+
+    private EntityDescriptor<UUID, Player> playerDescriptor() {
+        return EntityDescriptor.builder(UUID.class, Player.class)
+                .collection("players")
+                .keyExtractor(Player::getUuid)
+                .codec(registry.codec(Player.class))
                 .build();
     }
 
@@ -54,6 +65,31 @@ class CachingManagerTest {
         UUID id = UUID.randomUUID();
         mgr.repository().save(new Guild(id, name)).join();
         return id;
+    }
+
+    @Test
+    void a_player_with_a_nested_inventory_round_trips_through_the_cache() {
+        CachingManager<UUID, Player> players =
+                new CachingManager<>(playerDescriptor(), storage, CachePolicy.always(), registry);
+        UUID id = UUID.randomUUID();
+        Item sword = new Item("DIAMOND_SWORD", 1,
+                Arrays.asList("Sharp", "Legendary"), Map.of("sharpness", 5, "unbreaking", 3));
+        Player player = new Player(id, "Steve", 42, 1000L,
+                new Inventory("Hotbar", 9, Arrays.asList(sword, new Item("APPLE", 16))), null);
+
+        players.saveAndCache(player).join();
+        players.evict(id);   // drop the in-memory instance so the next read decodes from the backend
+
+        Player back = players.resolve(id).join().orElseThrow(AssertionError::new);
+        assertEquals(42, back.getLevel());
+        assertEquals(1000L, back.getCoins());
+        assertEquals("Hotbar", back.getInventory().getTitle());
+        assertEquals(9, back.getInventory().getMaxSize());
+        assertEquals(2, back.getInventory().getItems().size());
+        Item firstItem = back.getInventory().getItems().get(0);
+        assertEquals("DIAMOND_SWORD", firstItem.getMaterial());
+        assertEquals(Arrays.asList("Sharp", "Legendary"), firstItem.getLore());
+        assertEquals(5, firstItem.getEnchants().get("sharpness"));
     }
 
     @Test

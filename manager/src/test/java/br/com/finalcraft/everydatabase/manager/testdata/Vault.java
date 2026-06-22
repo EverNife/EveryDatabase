@@ -8,43 +8,43 @@ import java.util.UUID;
 
 /**
  * A write-back test entity using the {@link DirtyFlag @DirtyFlag} annotation form (no
- * {@code IDirtyable} interface): a balance mutated in memory sets the annotated flag directly, and
- * the manager reads / clears / re-sets it by reflection. Jackson reads/writes the fields directly,
- * so decoding never trips the dirtying mutator and a freshly loaded instance is clean.
+ * {@code IDirtyable} interface): a coin balance mutated in memory sets the annotated flag directly,
+ * and the manager reads / clears / re-sets it by reflection. Jackson reads/writes the fields
+ * directly, so decoding never trips the dirtying mutator and a freshly loaded instance is clean.
  */
 @JsonAutoDetect(
         fieldVisibility = JsonAutoDetect.Visibility.ANY,
         getterVisibility = JsonAutoDetect.Visibility.NONE,
         isGetterVisibility = JsonAutoDetect.Visibility.NONE,
         setterVisibility = JsonAutoDetect.Visibility.NONE)
-public class DirtyFlagAccount {
+public class Vault {
 
     private UUID id;
-    private int balance;
+    private long coins;
 
     @DirtyFlag
     @JsonIgnore
     private transient boolean dirty;
 
-    public DirtyFlagAccount() {
+    public Vault() {
     }
 
-    public DirtyFlagAccount(UUID id, int balance) {
+    public Vault(UUID id, long coins) {
         this.id = id;
-        this.balance = balance;
+        this.coins = coins;
     }
 
     public UUID getId() {
         return id;
     }
 
-    public int getBalance() {
-        return balance;
+    public long getCoins() {
+        return coins;
     }
 
     /** A domain mutation sets the annotated dirty flag directly (write-back). */
-    public void deposit(int amount) {
-        this.balance += amount;
+    public void deposit(long amount) {
+        this.coins += amount;
         this.dirty = true;
     }
 }

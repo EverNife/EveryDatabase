@@ -1,6 +1,8 @@
-package br.com.finalcraft.everydatabase.manager;
+package br.com.finalcraft.everydatabase.manager.refs;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
+import br.com.finalcraft.everydatabase.manager.CachingManager;
+import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;

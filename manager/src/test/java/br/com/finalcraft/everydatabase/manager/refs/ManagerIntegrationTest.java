@@ -1,11 +1,13 @@
-package br.com.finalcraft.everydatabase.manager;
+package br.com.finalcraft.everydatabase.manager.refs;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
+import br.com.finalcraft.everydatabase.manager.CachingManager;
+import br.com.finalcraft.everydatabase.manager.Ref;
+import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
 import br.com.finalcraft.everydatabase.manager.testdata.Player;
-import br.com.finalcraft.everydatabase.manager.testdata.Squad;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,17 +44,18 @@ class ManagerIntegrationTest {
                 .build();
     }
 
-    @Test
-    void a_player_resolves_its_guild_ref_end_to_end_through_two_managers() {
-        EntityDescriptor<UUID, Guild> guildDesc = guildDescriptor();
-        EntityDescriptor<UUID, Player> playerDesc = EntityDescriptor.builder(UUID.class, Player.class)
+    private EntityDescriptor<UUID, Player> playerDescriptor() {
+        return EntityDescriptor.builder(UUID.class, Player.class)
                 .collection("players")
                 .keyExtractor(Player::getUuid)
                 .codec(registry.codec(Player.class))
                 .build();
+    }
 
-        CachingManager<UUID, Guild> guilds = new CachingManager<>(guildDesc, storage, CachePolicy.always(), registry);
-        CachingManager<UUID, Player> players = new CachingManager<>(playerDesc, storage, CachePolicy.always(), registry);
+    @Test
+    void a_player_resolves_its_guild_ref_end_to_end_through_two_managers() {
+        CachingManager<UUID, Guild> guilds = new CachingManager<>(guildDescriptor(), storage, CachePolicy.always(), registry);
+        CachingManager<UUID, Player> players = new CachingManager<>(playerDescriptor(), storage, CachePolicy.always(), registry);
 
         UUID guildId = UUID.randomUUID();
         guilds.saveAndCache(new Guild(guildId, "Knights")).join();
@@ -70,24 +73,25 @@ class ManagerIntegrationTest {
     }
 
     @Test
-    void a_squad_of_refs_resolves_all_members_in_one_batch() {
-        CachingManager<UUID, Guild> guilds = new CachingManager<>(guildDescriptor(), storage, CachePolicy.always(), registry);
+    void a_guild_member_list_resolves_all_members_in_one_batch() {
+        CachingManager<UUID, Player> players = new CachingManager<>(playerDescriptor(), storage, CachePolicy.always(), registry);
 
         UUID a = UUID.randomUUID();
         UUID b = UUID.randomUUID();
         UUID c = UUID.randomUUID();
-        guilds.saveAndCache(new Guild(a, "A")).join();
-        guilds.saveAndCache(new Guild(b, "B")).join();
-        guilds.saveAndCache(new Guild(c, "C")).join();
+        players.saveAndCache(new Player(a, "A")).join();
+        players.saveAndCache(new Player(b, "B")).join();
+        players.saveAndCache(new Player(c, "C")).join();
 
-        Squad squad = new Squad(UUID.randomUUID(), Arrays.asList(
-                Ref.of(a, Guild.class, null), Ref.of(b, Guild.class, null), Ref.of(c, Guild.class, null)));
+        Guild guild = new Guild(UUID.randomUUID(), "Knights");
+        guild.setMembers(Arrays.asList(
+                Ref.of(a, Player.class, null), Ref.of(b, Player.class, null), Ref.of(c, Player.class, null)));
 
-        // Batch-resolve the members' keys via the guild manager (the in-loop N+1 antidote).
-        List<UUID> keys = squad.getMembers().stream().map(Ref::key).collect(Collectors.toList());
-        List<Guild> members = guilds.getAll(keys).join();
+        // Batch-resolve the members' keys via the player manager (the in-loop N+1 antidote).
+        List<UUID> keys = guild.getMembers().stream().map(Ref::key).collect(Collectors.toList());
+        List<Player> members = players.getAll(keys).join();
 
-        Set<String> names = members.stream().map(Guild::getName).collect(Collectors.toSet());
+        Set<String> names = members.stream().map(Player::getName).collect(Collectors.toSet());
         assertEquals(new HashSet<>(Arrays.asList("A", "B", "C")), names);
     }
 }

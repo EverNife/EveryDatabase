@@ -10,14 +10,12 @@ import java.util.UUID;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-public class Settings {
+public class Home {
 
     private Key key;          // composite key
-    private String language;
-    private boolean pvp;
+    private String world;
 
-    /** Composite key: one section of settings owned by a player. */
-    public record Key(UUID owner, String section) {
-
+    /** Composite key: a named home owned by a player. */
+    public record Key(UUID owner, String name) {
     }
 }
