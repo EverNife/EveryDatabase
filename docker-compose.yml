@@ -43,7 +43,8 @@
 # ----------------------------------------------------------------------
 #  Credentials
 # ----------------------------------------------------------------------
-#   MongoDB     -> root / root
+#   MongoDB     -> none (open; 1-node replica set, connect with
+#                  mongodb://localhost:39308/?directConnection=true)
 #   MariaDB     -> root / root
 #   PostgreSQL  -> root / root
 #
@@ -54,15 +55,25 @@ name: evernifecore-space
 services:
 
   # --------------------------------------------------------------------
-  #  MongoDB 7  -  used by MongoStorageTest
+  #  MongoDB 7  -  single-node replica set (used by MongoStorageTest)
+  #
+  #  Runs as a 1-node replica set ("rs0") so the features that REQUIRE one
+  #  work in tests: multi-document transactions and Change Streams (the
+  #  cache-sync change feed). The healthcheck auto-initiates the set on first
+  #  start and then reports healthy only once the node is PRIMARY.
+  #
+  #  No access control: a replica set with auth would also need an internal
+  #  keyfile, which is awkward to provision across hosts (esp. Windows bind
+  #  mounts). This is a throwaway test database, so it runs open. Clients
+  #  connect WITHOUT credentials and with directConnection=true (the node
+  #  advertises an in-container address that the host cannot route to):
+  #     mongodb://localhost:39308/?directConnection=true
   # --------------------------------------------------------------------
   mongo:
     image: mongo:7
     container_name: evernifecore-mongo
     restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: root
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "39308:27017"
     volumes:
@@ -71,13 +82,16 @@ services:
     networks:
       - evernifecore-test
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "-u", "root", "-p", "root",
-             "--authenticationDatabase", "admin",
-             "--eval", "db.adminCommand('ping').ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      # Initiate the set if it has none yet; healthy only once this node is PRIMARY (myState == 1).
+      test: >-
+        mongosh --quiet --eval '
+        try { quit(rs.status().myState === 1 ? 0 : 1) }
+        catch (e) { rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]}); quit(1) }
+        '
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
 
   # --------------------------------------------------------------------
   #  MariaDB 11  -  used by MariaDbStorageTest
