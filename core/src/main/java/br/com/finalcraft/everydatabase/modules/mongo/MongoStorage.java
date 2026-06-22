@@ -1,6 +1,10 @@
 package br.com.finalcraft.everydatabase.modules.mongo;
 
 import br.com.finalcraft.everydatabase.*;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
+import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
+import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
@@ -37,12 +41,12 @@ import java.util.function.Function;
  *
  * <p>Each entity collection stores documents as:
  * <pre>
- * { "storage_key": "key-as-string", "storage_data": { "field": "value", ... } }
+ * { "_id": "key-as-string", "storage_data": { "field": "value", ... } }
  * </pre>
  * where {@code storage_data} is a native BSON sub-document. See {@link MongoRepository}
  * for the full document shape (including {@code _idx_*} and {@code lock_version} fields).
  */
-public final class MongoStorage implements Storage, TransactionalStorage, SchemaAwareStorage {
+public final class MongoStorage implements Storage, TransactionalStorage, SchemaAwareStorage, ChangeFeedStorage {
 
     /** Reserved collection used to record applied migration versions. */
     static final String MIGRATIONS_COLLECTION = "_schema_migrations";
@@ -51,6 +55,13 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     /** Written by init()/close() on an executor thread, read everywhere - volatile for visibility. */
     private volatile MongoClient mongoClient;
     private volatile MongoDatabase database;
+
+    /** Stable per-instance origin id (Mongo events carry no app identity, so it is not stamped). */
+    private final String originId = "mongo-" + UUID.randomUUID();
+    /** In-process change-feed dispatcher; fed by the change-stream listener thread. */
+    private final ChangeFeedSupport changeFeed = new ChangeFeedSupport();
+    /** Lazily started on first subscribe; the change-stream listener thread. */
+    private volatile MongoChangeFeed changeFeedSource;
 
     /** Registered migrations, sorted by version. Mutated only before migrate() is called. */
     private final List<Migration> registeredMigrations = new ArrayList<>();
@@ -123,6 +134,12 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     @Override
     public CompletableFuture<Void> close() {
         return CompletableFuture.supplyAsync(() -> {
+            MongoChangeFeed source = changeFeedSource;
+            if (source != null) {
+                source.stop();   // stop the change-stream thread before the client goes away
+                changeFeedSource = null;
+            }
+            changeFeed.closeAll();
             if (mongoClient != null) {
                 mongoClient.close();
                 mongoClient = null;
@@ -132,6 +149,36 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             log.closed();
             return null;
         }, StorageExecutors.get());
+    }
+
+    // ------------------------------------------------------------------
+    //  ChangeFeedStorage
+    // ------------------------------------------------------------------
+
+    @Override
+    public String originId() {
+        return originId;
+    }
+
+    @Override
+    public ChangeSubscription subscribe(ChangeListener listener) {
+        ensureChangeFeedStarted();
+        return changeFeed.subscribe(listener);
+    }
+
+    /** Lazily starts the change-stream listener on first subscribe (requires {@link #init()}). */
+    private synchronized void ensureChangeFeedStarted() {
+        if (changeFeedSource != null) {
+            return;
+        }
+        MongoDatabase db = database;
+        if (db == null) {
+            throw new IllegalStateException(
+                "MongoStorage.subscribe() requires init() first (no database connection yet).");
+        }
+        MongoChangeFeed source = new MongoChangeFeed(db, changeFeed, log);
+        source.start();
+        changeFeedSource = source;
     }
 
     @Override

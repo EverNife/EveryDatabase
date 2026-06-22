@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReadWriteLock;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 /**
@@ -129,6 +130,39 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             } finally {
                 lock.readLock().unlock();
             }
+        }, StorageExecutors.get());
+    }
+
+    @Override
+    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+        if (keys.isEmpty()){
+            return CompletableFuture.completedFuture(Collections.emptyMap());
+        }
+
+        Function<V, Long> getter = descriptor.versionGetter();
+        return CompletableFuture.supplyAsync(() -> {
+            Map<K, Long> result = new HashMap<>();
+            for (K key : keys) {
+                ReadWriteLock lock = lockFor(key);
+                lock.readLock().lock();
+                try {
+                    ObjectNode root = readRoot(fileFor(key));
+                    if (root == null || !root.has(collection)) continue;
+                    byte[] bytes = store.mapper().writeValueAsBytes(root.get(collection));
+                    V entity = descriptor.codec().decode(bytes);
+                    long version = 0L;
+                    if (getter != null) {
+                        Long got = getter.apply(entity);
+                        version = got != null ? got : 0L;
+                    }
+                    result.put(key, version);
+                } catch (IOException | CodecException e) {
+                    // skip unreadable/corrupt entries
+                } finally {
+                    lock.readLock().unlock();
+                }
+            }
+            return result;
         }, StorageExecutors.get());
     }
 

@@ -36,7 +36,7 @@ import java.util.stream.Stream;
  * <p>Each entity is stored as a MongoDB document of the form:
  * <pre>
  * {
- *   "storage_key":  "key-as-string",
+ *   "_id":          "key-as-string",             // the entity key IS the document _id
  *   "storage_data": { "field": "value", ... },   // native BSON sub-document, not a string
  *   "_idx_type":    "ENABLED",                   // present for each declared IndexHint
  *   "_idx_location_world": "world_nether",
@@ -52,8 +52,13 @@ import java.util.stream.Stream;
  */
 final class MongoRepository<K, V> implements Repository<K, V> {
 
-    /** Field storing the serialised entity key. */
-    static final String COL_KEY     = "storage_key";
+    /**
+     * Field storing the serialised entity key - this <b>is</b> MongoDB's primary key ({@code _id}),
+     * so the entity key is the document identity. Lookups use the automatic unique {@code _id} index,
+     * and a change-stream <b>delete</b> event's {@code documentKey._id} carries the key directly, so
+     * deletes propagate without pre-images.
+     */
+    static final String COL_KEY     = "_id";
     /** Field storing the entity as a native BSON sub-document. */
     static final String COL_DATA    = "storage_data";
     /** Field storing the optimistic-lock version (only present in versioned collections). */
@@ -98,9 +103,9 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      * added {@code _idx_*} fields on existing documents.
      */
     void ensureIndexes() {
-        // Unique index on the storage key - this is entity identity, not an IndexHint.
+        // The entity key is the document _id (COL_KEY), so its unique index is automatic - there is
+        // nothing to create for identity. Only the secondary _idx_* indexes are reconciled below.
         long reconcileStart = System.currentTimeMillis();
-        collection.createIndex(Indexes.ascending(COL_KEY), new IndexOptions().unique(true));
 
         // Snapshot existing _idx_ indexes before modifying
         Map<String, String> existing = existingIndexFields();
@@ -298,7 +303,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      * Versioned save using optimistic locking.
      *
      * <ol>
-     *   <li>Attempt {@code updateOne({storage_key:key, lock_version:incomingVersion},
+     *   <li>Attempt {@code updateOne({_id:key, lock_version:incomingVersion},
      *       {$set:{storage_data:...}, $inc:{lock_version:1}}, upsert=false)}.</li>
      *   <li>If {@code matchedCount == 0}: check whether the document exists.
      *       <ul>
@@ -506,6 +511,32 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             () -> session != null ? collection.countDocuments(session) : collection.countDocuments(),
             StorageExecutors.get()
         );
+    }
+
+    @Override
+    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+        if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyMap());
+        return CompletableFuture.supplyAsync(() -> {
+            List<String> keyStrings = new ArrayList<>(keys.size());
+            Map<String, K> byString = new HashMap<>();
+            for (K k : keys) {
+                String s = k.toString();
+                keyStrings.add(s);
+                byString.put(s, k);
+            }
+            FindIterable<Document> found = (session != null
+                    ? collection.find(session, Filters.in(COL_KEY, keyStrings))
+                    : collection.find(Filters.in(COL_KEY, keyStrings)))
+                    .projection(new Document(COL_VERSION, 1));   // _id (the key) is always returned
+            Map<K, Long> result = new HashMap<>();
+            for (Document doc : found) {
+                K key = byString.get(String.valueOf(doc.get(COL_KEY)));
+                if (key == null) continue;
+                Object v = doc.get(COL_VERSION);
+                result.put(key, v instanceof Number ? ((Number) v).longValue() : 0L);
+            }
+            return result;
+        }, StorageExecutors.get());
     }
 
     @Override

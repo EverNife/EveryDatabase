@@ -141,12 +141,15 @@ class StorageTransferDockerBackendTest {
     static final String PG_SERVER = DotEnvTestUtil.getOrDefault("POSTGRES_URL",
         "jdbc:postgresql://" + PG_HOST + ":" + PG_PORT);
 
-    static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "root");
-    static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "root");
+    static final String MONGO_USER = DotEnvTestUtil.getOrDefault("MONGO_USER", "");
+    static final String MONGO_PASS = DotEnvTestUtil.getOrDefault("MONGO_PASS", "");
     static final String MONGO_HOST = DotEnvTestUtil.getOrDefault("MONGO_HOST", "localhost");
     static final String MONGO_PORT = DotEnvTestUtil.getOrDefault("MONGO_PORT", "39308");
+    // Open 1-node replica set: no credentials, directConnection=true (the node advertises an
+    // in-container host the test machine cannot route to).
     static final String MONGO_URL  = DotEnvTestUtil.getOrDefault("MONGO_URL",
-        "mongodb://" + MONGO_USER + ":" + MONGO_PASS + "@" + MONGO_HOST + ":" + MONGO_PORT);
+        "mongodb://" + (MONGO_USER.isEmpty() ? "" : MONGO_USER + ":" + MONGO_PASS + "@")
+        + MONGO_HOST + ":" + MONGO_PORT + "/?directConnection=true");
 
     // ------------------------------------------------------------------
     //  Availability flags (false until probeBackends() confirms reachability)

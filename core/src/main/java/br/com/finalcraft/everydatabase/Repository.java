@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.query.Query;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
@@ -62,6 +63,22 @@ public interface Repository<K, V> {
      *  Total count of stored entities.
      */
     CompletableFuture<Long> count();
+
+    /**
+     * Returns the current optimistic-lock version of each given key that exists in storage; absent
+     * keys are omitted from the result.
+     *
+     * <p>For a versioned descriptor the value is the stored {@code lock_version}. For a non-versioned
+     * descriptor - or a backend that does not enforce versioning (H2) - it is {@code 0} for every
+     * existing key, so a poller can still detect <em>deletions</em> (a cached key missing from the
+     * result) but not in-place <em>updates</em>.
+     *
+     * <p>This is a cheap, content-free read (key + version only, never the entity body), used by the
+     * manager's {@code PollingCacheSync} to invalidate caches on backends without a native change
+     * feed (MySQL/MariaDB). On backends that do have a change feed it still works, but the push feed
+     * is preferred.
+     */
+    CompletableFuture<Map<K, Long>> versions(Collection<K> keys);
 
     /**
      * Returns all entities as a {@link Stream}.

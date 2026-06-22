@@ -52,19 +52,28 @@ import java.util.function.Function;
 public class CachingManager<K, V> implements RefResolver<K, V> {
 
     protected final Repository<K, V> repository;
+    /** The storage this manager was built on. */
+    protected final Storage storage;
     protected final Class<V> type;
+    /** Key type, captured from the descriptor. */
+    protected final Class<K> keyType;
+    /** Backing collection name, captured from the descriptor. */
+    protected final String collection;
     protected final Function<V, K> keyOf;
     protected final CacheOptions options;
     protected final LruCacheStore<K, V> store;
     /** Monotonic source for publication stamps (orders writes/reloads so none regress a newer one). */
     protected final AtomicLong stampGen = new AtomicLong();
     /** Dirty-tracking accessor for the entity type (write-back), or {@code null} when not trackable. */
-    private final DirtyAccessor dirtyAccessor;
+    protected final DirtyAccessor dirtyAccessor;
 
     /** Creates a manager with the given options and registers it in {@code registry}. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options, RefRegistry registry) {
         this.repository = storage.repository(descriptor);
+        this.storage    = storage;
         this.type       = descriptor.type();
+        this.keyType    = descriptor.keyType();
+        this.collection = descriptor.collection();
         this.dirtyAccessor = DirtyAccessor.forType(type);
         this.keyOf      = descriptor.keyExtractor();
         this.options    = options;
@@ -75,20 +84,6 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Convenience: unbounded cache with the given default policy. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy, RefRegistry registry) {
         this(descriptor, storage, CacheOptions.of(policy), registry);
-    }
-
-    /**
-     * Package-visible: wire a manager directly over a {@code repository}, without going through a
-     * {@link Storage} or registering in a {@link RefRegistry} (so no ref resolution). For tests and
-     * advanced composition.
-     */
-    protected CachingManager(Repository<K, V> repository, Class<V> type, Function<V, K> keyOf, CacheOptions options) {
-        this.repository = repository;
-        this.type       = type;
-        this.dirtyAccessor = DirtyAccessor.forType(type);
-        this.keyOf      = keyOf;
-        this.options    = options;
-        this.store      = new LruCacheStore<>(options.maxSize());
     }
 
     public Repository<K, V> getRepository() {
@@ -440,9 +435,38 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         return type;
     }
 
+    /** The key type this manager caches. Used by {@code CacheSync} to pick a default key parser. */
+    public Class<K> keyType() {
+        return keyType;
+    }
+
+    /**
+     * The backing collection name. Used by {@code CacheSync} to route incoming change events to this
+     * manager.
+     */
+    public String collection() {
+        return collection;
+    }
+
+    /**
+     * The storage this manager was built on. Used by {@code CacheSync.auto()} to route each manager to
+     * its own backend's change feed (push) or to the polling fallback.
+     */
+    public Storage storage() {
+        return storage;
+    }
+
     /** Current number of <b>live</b> cached entries (tombstones from deletes are not counted). */
     public int cachedSize() {
         return store.liveCount();
+    }
+
+    /**
+     * A snapshot of the keys of currently cached <b>live</b> entries. Used by
+     * {@code PollingCacheSync} to know which keys to version-check on backends without a change feed.
+     */
+    public Set<K> cachedKeys() {
+        return store.liveKeysSnapshot();
     }
 
     /**

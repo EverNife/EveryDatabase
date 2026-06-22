@@ -23,6 +23,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -233,6 +234,35 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             () -> Files.exists(keyToPath(key)),
             StorageExecutors.get()
         );
+    }
+
+    @Override
+    public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
+        if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyMap());
+        Function<V, Long> getter = descriptor.versionGetter();
+        return CompletableFuture.supplyAsync(() -> {
+            Map<K, Long> result = new HashMap<>();
+            for (K key : keys) {
+                ReadWriteLock lock = lockFor(key);
+                lock.readLock().lock();
+                try {
+                    Path path = keyToPath(key);
+                    if (!Files.exists(path)) continue;
+                    V entity = descriptor.codec().decode(Files.readAllBytes(path));
+                    long version = 0L;
+                    if (getter != null) {
+                        Long got = getter.apply(entity);
+                        version = got != null ? got : 0L;
+                    }
+                    result.put(key, version);
+                } catch (IOException | CodecException e) {
+                    // skip unreadable/corrupt entries (consistent with the skip-corrupted contract)
+                } finally {
+                    lock.readLock().unlock();
+                }
+            }
+            return result;
+        }, StorageExecutors.get());
     }
 
     @Override
