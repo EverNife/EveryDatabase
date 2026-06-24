@@ -11,6 +11,7 @@ import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.mongodb.ErrorCategory;
@@ -526,7 +527,13 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
-    public CompletableFuture<List<V>> query(Query query) {
+    public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
+        if (query == null) {
+            throw new IllegalArgumentException("query cannot be null");
+        }
+        if (options == null) {
+            options = QueryOptions.none();
+        }
         // Validate synchronously so callers get IllegalArgumentException directly,
         // not wrapped in CompletionException - consistent with all other backends.
         List<Bson> filters = new ArrayList<>(query.conditions().size());
@@ -539,17 +546,43 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             }
             filters.add(toFilter(c, hint));
         }
-        Bson combined = filters.size() == 1 ? filters.get(0) : Filters.and(filters);
+        final QueryOptions finalOptions = options;
+        validateQueryOptions(finalOptions);
+        Bson combined = filters.isEmpty() ? new Document() : (filters.size() == 1 ? filters.get(0) : Filters.and(filters));
         long startMs = System.currentTimeMillis();
 
         return CompletableFuture.supplyAsync(() -> {
             FindIterable<Document> found = session != null
                 ? collection.find(session, combined)
                 : collection.find(combined);
+            if (finalOptions.hasOrder()) {
+                IndexHint hint = hintsByPath.get(finalOptions.orderBy());
+                found = found.sort(finalOptions.order() == IndexHint.Order.DESCENDING
+                    ? Sorts.descending(hint.indexColumnName())
+                    : Sorts.ascending(hint.indexColumnName()));
+            }
+            if (finalOptions.hasOffset()) {
+                found = found.skip(finalOptions.offset());
+            }
+            if (finalOptions.hasLimit()) {
+                found = found.limit(finalOptions.limit());
+            }
             List<V> result = decodeAll(found);
             log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
             return result;
         }, StorageExecutors.get());
+    }
+
+    private void validateQueryOptions(QueryOptions options) {
+        if (!options.hasOrder()) {
+            return;
+        }
+        IndexHint hint = hintsByPath.get(options.orderBy());
+        if (hint == null) {
+            throw new IllegalArgumentException(
+                "Mongo: order field '" + options.orderBy() + "' is not indexed. "
+                + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+        }
     }
 
     private Bson toFilter(Query.Condition c, IndexHint hint) {
