@@ -75,6 +75,16 @@ public final class QueryOptions {
         return !hasOrder() && !hasLimit() && !hasOffset();
     }
 
+    /** Returns a copy with a different limit, keeping the order and offset. */
+    public QueryOptions withLimit(int newLimit) {
+        return new QueryOptions(orderBy, order, newLimit, offset);
+    }
+
+    /** Returns a copy with a different offset, keeping the order and limit. */
+    public QueryOptions withOffset(int newOffset) {
+        return new QueryOptions(orderBy, order, limit, newOffset);
+    }
+
     private static String normalizeOrderBy(String orderBy) {
         if (orderBy == null) {
             return null;
@@ -117,6 +127,21 @@ public final class QueryOptions {
         public Builder offset(int offset) {
             if (offset < 0) throw new IllegalArgumentException("offset cannot be negative: " + offset);
             this.offset = offset;
+            return this;
+        }
+
+        /**
+         * Sugar for {@code offset = pageNumber * pageSize}, {@code limit = pageSize} (0-based page index).
+         *
+         * @param pageNumber 0-based page index ({@code 0} is the first page)
+         * @param pageSize   results per page (must be {@code >= 1})
+         * @throws IllegalArgumentException if {@code pageNumber < 0} or {@code pageSize < 1}
+         */
+        public Builder page(int pageNumber, int pageSize) {
+            if (pageNumber < 0) throw new IllegalArgumentException("pageNumber cannot be negative: " + pageNumber);
+            if (pageSize < 1)   throw new IllegalArgumentException("pageSize must be >= 1: " + pageSize);
+            this.offset = Math.toIntExact((long) pageNumber * pageSize);
+            this.limit  = pageSize;
             return this;
         }
 
