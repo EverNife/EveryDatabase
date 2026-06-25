@@ -9,6 +9,7 @@ import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.log.StorageLogEvent;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Page;
 import br.com.finalcraft.everydatabase.query.Query;
@@ -688,6 +689,107 @@ public abstract class AbstractStorageTest {
         assertEquals(page.totalPages(), names.totalPages());
         assertEquals(page.number(), names.number());
         assertEquals(Arrays.asList("Carol", "Alice"), names.content());
+    }
+
+    // ------------------------------------------------------------------
+    //  queryAfter (keyset / cursor pagination)
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(102)
+    @DisplayName("[base] queryAfter -> keyset pages cover all rows in order, no overlap")
+    void queryAfter_keysetPagesCoverAllInOrder() {
+        seedIndexData();   // scores Bob=50, Alice=100, Carol=200
+        List<UUID> seen = new ArrayList<>();
+        Cursor cursor = Cursor.start("score", IndexHint.Order.ASCENDING);
+        int guard = 0;
+        while (true) {
+            Slice<TestPlayer> s = repo.queryAfter(Query.all(), cursor, 1).join();
+            seen.addAll(ids(s.content()));
+            if (!s.hasNext()) break;
+            cursor = s.nextCursor().orElseThrow(AssertionError::new);
+            if (++guard > 10) fail("keyset pagination did not terminate");
+        }
+        assertEquals(Arrays.asList(UUID_BOB, UUID_ALICE, UUID_CAROL), seen);
+    }
+
+    @Test
+    @Order(102)
+    @DisplayName("[base] queryAfter descending -> pages in descending order, last page has no next cursor")
+    void queryAfter_keysetDescending() {
+        seedIndexData();
+        Slice<TestPlayer> p1 = repo.queryAfter(Query.all(),
+            Cursor.start("score", IndexHint.Order.DESCENDING), 2).join();
+        assertEquals(Arrays.asList(UUID_CAROL, UUID_ALICE), ids(p1.content()));
+        assertTrue(p1.hasNext());
+
+        Slice<TestPlayer> p2 = repo.queryAfter(Query.all(),
+            p1.nextCursor().orElseThrow(AssertionError::new), 2).join();
+        assertEquals(Collections.singletonList(UUID_BOB), ids(p2.content()));
+        assertFalse(p2.hasNext());
+        assertFalse(p2.nextCursor().isPresent());
+    }
+
+    @Test
+    @Order(102)
+    @DisplayName("[base] queryAfter -> cursor survives encode/decode")
+    void queryAfter_cursorEncodeDecode() {
+        seedIndexData();
+        Slice<TestPlayer> p1 = repo.queryAfter(Query.all(),
+            Cursor.start("score", IndexHint.Order.ASCENDING), 1).join();
+        assertEquals(Collections.singletonList(UUID_BOB), ids(p1.content()));
+
+        String token = p1.nextCursor().orElseThrow(AssertionError::new).encode();
+        Slice<TestPlayer> p2 = repo.queryAfter(Query.all(), Cursor.decode(token), 1).join();
+        assertEquals(Collections.singletonList(UUID_ALICE), ids(p2.content()));
+    }
+
+    @Test
+    @Order(102)
+    @DisplayName("[base] queryAfter with a filter -> keyset over the filtered set only")
+    void queryAfter_filtered() {
+        seedIndexData();   // world="world": Alice(100), Carol(200); world_nether: Bob
+        Slice<TestPlayer> p1 = repo.queryAfter(Query.eq("world", "world"),
+            Cursor.start("score", IndexHint.Order.ASCENDING), 1).join();
+        assertEquals(Collections.singletonList(UUID_ALICE), ids(p1.content()));
+        assertTrue(p1.hasNext());
+
+        Slice<TestPlayer> p2 = repo.queryAfter(Query.eq("world", "world"),
+            p1.nextCursor().orElseThrow(AssertionError::new), 1).join();
+        assertEquals(Collections.singletonList(UUID_CAROL), ids(p2.content()));
+        assertFalse(p2.hasNext());
+    }
+
+    @Test
+    @Order(102)
+    @DisplayName("[base] queryAfter over a nullable field -> NULL=least, stable across pages")
+    void queryAfter_nullableField() {
+        repo.saveAll(Arrays.asList(
+            new TestPlayer(UUID_ALICE, "beta",  1, "world", true),
+            new TestPlayer(UUID_BOB,   null,    2, "world", true),
+            new TestPlayer(UUID_CAROL, "alpha", 3, "world", true)
+        )).join();
+        // ascending by name with NULL=least: null (Bob) first, then "alpha" (Carol), then "beta" (Alice)
+        List<UUID> seen = new ArrayList<>();
+        Cursor cursor = Cursor.start("name", IndexHint.Order.ASCENDING);
+        int guard = 0;
+        while (true) {
+            Slice<TestPlayer> s = repo.queryAfter(Query.all(), cursor, 1).join();
+            seen.addAll(ids(s.content()));
+            if (!s.hasNext()) break;
+            cursor = s.nextCursor().orElseThrow(AssertionError::new);
+            if (++guard > 10) fail("keyset pagination did not terminate");
+        }
+        assertEquals(Arrays.asList(UUID_BOB, UUID_CAROL, UUID_ALICE), seen);
+    }
+
+    @Test
+    @Order(102)
+    @DisplayName("[base] queryAfter order by undeclared field -> throws IllegalArgumentException")
+    void queryAfter_undeclaredField_throws() {
+        seedIndexData();
+        assertThrows(IllegalArgumentException.class, (Executable) () ->
+            repo.queryAfter(Query.all(), Cursor.start("randomUuid", IndexHint.Order.ASCENDING), 1).join());
     }
 
     // ------------------------------------------------------------------

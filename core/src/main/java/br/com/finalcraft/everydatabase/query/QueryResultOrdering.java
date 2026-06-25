@@ -89,6 +89,75 @@ public final class QueryResultOrdering {
         return out;
     }
 
+    // ------------------------------------------------------------------
+    //  Keyset (cursor) pagination support
+    // ------------------------------------------------------------------
+
+    /**
+     * Slices an already fully-ordered match set to the rows strictly after {@code cursor}, taking at
+     * most {@code limit}. Used by the scan-based backends, whose {@code query} already returns the
+     * full ordered list. Fetches the position by the same total order used everywhere, so it stays
+     * consistent with the SQL/Mongo keyset predicates.
+     */
+    public static <V> Slice<V> keysetSlice(List<V> ordered, Cursor cursor, int limit,
+                                           IndexHint hint, Function<? super V, ?> keyExtractor) {
+        int from = 0;
+        if (!cursor.isStart()) {
+            Object cv = coerce(cursor.lastValue(), hint);
+            String ck = cursor.lastKey();
+            boolean descending = cursor.direction() == IndexHint.Order.DESCENDING;
+            while (from < ordered.size()) {
+                V row = ordered.get(from);
+                Object rv = IndexValueExtractor.extract(IndexValueExtractor.toTree(row), hint);
+                if (compareInOrder(rv, keyOf(keyExtractor, row), cv, ck, descending) > 0) break;
+                from++;
+            }
+        }
+        int to = Math.min(from + limit, ordered.size());
+        List<V> content = new ArrayList<>(ordered.subList(from, to));
+        boolean hasNext = to < ordered.size();
+        Cursor next = (hasNext && !content.isEmpty())
+            ? nextCursorFrom(content.get(content.size() - 1), hint, cursor.direction(), keyExtractor)
+            : null;
+        QueryOptions order = QueryOptions.builder()
+            .orderBy(cursor.orderBy(), cursor.direction()).limit(limit).build();
+        return Slice.ofCursor(content, order, hasNext, next);
+    }
+
+    /** Builds the cursor positioned right after {@code row} (its order value + key), for the next page. */
+    public static <V> Cursor nextCursorFrom(V row, IndexHint hint, IndexHint.Order direction,
+                                            Function<? super V, ?> keyExtractor) {
+        Object value = IndexValueExtractor.extract(IndexValueExtractor.toTree(row), hint);
+        return Cursor.after(hint.fieldPath(), direction, value, keyOf(keyExtractor, row));
+    }
+
+    /** Coerces a cursor's stored value (which may have drifted to Long/Double through encode/decode) to the hint's type. */
+    public static Object coerce(Object value, IndexHint hint) {
+        if (value == null) return null;
+        switch (hint.fieldType()) {
+            case INT:     return value instanceof Number ? ((Number) value).intValue()  : Integer.valueOf(value.toString());
+            case LONG:    return value instanceof Number ? ((Number) value).longValue() : Long.valueOf(value.toString());
+            case DOUBLE:  return value instanceof Number ? ((Number) value).doubleValue(): Double.valueOf(value.toString());
+            case BOOLEAN: return value instanceof Boolean ? value : Boolean.valueOf(value.toString());
+            case TIMESTAMP: return IndexValueExtractor.toEpochMilli(value);
+            case STRING:
+            default:      return value.toString();
+        }
+    }
+
+    /** Position of {@code (rv, rk)} relative to {@code (cv, ck)} in the total order (value dir, key asc, null=least). */
+    private static int compareInOrder(Object rv, String rk, Object cv, String ck, boolean descending) {
+        int c = compareNullLeast(rv, cv);
+        if (descending) c = -c;
+        if (c != 0) return c;
+        return compareNullLeast(rk, ck);
+    }
+
+    private static <V> String keyOf(Function<? super V, ?> keyExtractor, V row) {
+        Object k = keyExtractor.apply(row);
+        return k == null ? null : k.toString();
+    }
+
     /** Natural-order comparison treating {@code null} as the smallest value. */
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static int compareNullLeast(Object left, Object right) {

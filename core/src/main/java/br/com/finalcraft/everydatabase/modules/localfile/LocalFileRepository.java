@@ -13,9 +13,11 @@ import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.Slice;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -363,6 +365,22 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
             return result;
         });
+    }
+
+    @Override
+    public CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
+        if (query == null)  throw new IllegalArgumentException("query cannot be null");
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        IndexHint hint = hintsByPath.get(cursor.orderBy());
+        if (hint == null) {
+            throw new IllegalArgumentException(
+                "LocalFile: order field '" + cursor.orderBy() + "' is not declared as an IndexHint. "
+                + "Add .index(IndexHint.<type>(\"...\")) on the EntityDescriptor.");
+        }
+        QueryOptions order = QueryOptions.builder().orderBy(cursor.orderBy(), cursor.direction()).build();
+        return query(query, order).thenApply(ordered ->
+            QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor()));
     }
 
     private boolean matchesAll(JsonNode tree, Query query) {

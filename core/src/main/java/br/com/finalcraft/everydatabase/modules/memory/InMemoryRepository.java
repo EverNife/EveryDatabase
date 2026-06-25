@@ -9,9 +9,11 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.Slice;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.*;
@@ -189,6 +191,22 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
             for (K k : candidates) if (store.get(k) != null) n++;
         }
         return CompletableFuture.completedFuture(n);
+    }
+
+    @Override
+    public CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
+        if (query == null)  throw new IllegalArgumentException("query cannot be null");
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        IndexHint hint = hintsByPath.get(cursor.orderBy());
+        if (hint == null) {
+            throw new IllegalArgumentException(
+                "InMemory: order field '" + cursor.orderBy() + "' is not indexed. "
+                + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+        }
+        QueryOptions order = QueryOptions.builder().orderBy(cursor.orderBy(), cursor.direction()).build();
+        return query(query, order).thenApply(ordered ->
+            QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor()));
     }
 
     @Override

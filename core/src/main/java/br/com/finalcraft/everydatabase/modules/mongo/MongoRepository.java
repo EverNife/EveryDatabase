@@ -8,10 +8,13 @@ import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.mongodb.ErrorCategory;
@@ -535,6 +538,71 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             () -> session != null ? collection.countDocuments(session, combined) : collection.countDocuments(combined),
             StorageExecutors.get()
         );
+    }
+
+    @Override
+    public CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
+        if (query == null)  throw new IllegalArgumentException("query cannot be null");
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        IndexHint orderHint = hintsByPath.get(cursor.orderBy());
+        if (orderHint == null) {
+            throw new IllegalArgumentException(
+                "Mongo: order field '" + cursor.orderBy() + "' is not indexed. "
+                + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+        }
+        List<Bson> filters = new ArrayList<>(query.conditions().size() + 1);
+        for (Query.Condition c : query.conditions()) {
+            IndexHint hint = hintsByPath.get(c.fieldPath());
+            if (hint == null) {
+                throw new IllegalArgumentException(
+                    "Mongo: field '" + c.fieldPath() + "' is not indexed. "
+                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+            }
+            filters.add(toFilter(c, hint));
+        }
+        if (!cursor.isStart()) {
+            filters.add(keysetFilter(orderHint, cursor));
+        }
+        Bson combined = filters.isEmpty() ? new Document()
+            : (filters.size() == 1 ? filters.get(0) : Filters.and(filters));
+        boolean ascending = cursor.direction() != IndexHint.Order.DESCENDING;
+        String col = orderHint.indexColumnName();
+        int probe = limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1;
+        long startMs = System.currentTimeMillis();
+        return CompletableFuture.supplyAsync(() -> {
+            FindIterable<Document> found = (session != null ? collection.find(session, combined) : collection.find(combined))
+                .sort(Sorts.orderBy(ascending ? Sorts.ascending(col) : Sorts.descending(col), Sorts.ascending(COL_KEY)))
+                .limit(probe);
+            List<V> rows = decodeAll(found);
+            boolean hasNext = rows.size() > limit;
+            List<V> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
+            Cursor next = (hasNext && !content.isEmpty())
+                ? QueryResultOrdering.nextCursorFrom(content.get(content.size() - 1), orderHint,
+                    cursor.direction(), descriptor.keyExtractor())
+                : null;
+            QueryOptions order = QueryOptions.builder()
+                .orderBy(cursor.orderBy(), cursor.direction()).limit(limit).build();
+            log.queried(descriptor.collection(), query, content.size(), System.currentTimeMillis() - startMs);
+            return Slice.ofCursor(content, order, hasNext, next);
+        }, StorageExecutors.get());
+    }
+
+    /** Mongo keyset predicate matching the NULL=least (native), key-asc total order. */
+    private Bson keysetFilter(IndexHint hint, Cursor cursor) {
+        String col = hint.indexColumnName();
+        Object cv = QueryResultOrdering.coerce(cursor.lastValue(), hint);
+        String ck = cursor.lastKey();
+        boolean descending = cursor.direction() == IndexHint.Order.DESCENDING;
+        if (cv == null) {
+            return descending
+                ? Filters.and(Filters.eq(col, null), Filters.gt(COL_KEY, ck))
+                : Filters.or(Filters.ne(col, null), Filters.and(Filters.eq(col, null), Filters.gt(COL_KEY, ck)));
+        }
+        Object v = toMongoValue(cv, hint);
+        return descending
+            ? Filters.or(Filters.lt(col, v), Filters.and(Filters.eq(col, v), Filters.gt(COL_KEY, ck)), Filters.eq(col, null))
+            : Filters.or(Filters.gt(col, v), Filters.and(Filters.eq(col, v), Filters.gt(COL_KEY, ck)));
     }
 
     @Override

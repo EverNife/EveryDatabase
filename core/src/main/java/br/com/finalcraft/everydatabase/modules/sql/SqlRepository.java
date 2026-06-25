@@ -8,10 +8,13 @@ import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -1068,6 +1071,92 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             sql.append(" OFFSET ?");
             params.add(options.offset());
         }
+    }
+
+    @Override
+    public CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
+        if (query == null)  throw new IllegalArgumentException("query cannot be null");
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        IndexHint orderHint = hintsByPath.get(cursor.orderBy());
+        if (orderHint == null) {
+            throw new IllegalArgumentException(
+                "SQL: order field '" + cursor.orderBy() + "' is not indexed. "
+                + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+        }
+        StringBuilder where = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        for (Query.Condition c : query.conditions()) {
+            IndexHint hint = hintsByPath.get(c.fieldPath());
+            if (hint == null) {
+                throw new IllegalArgumentException(
+                    "SQL: field '" + c.fieldPath() + "' is not indexed. "
+                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+            }
+            if (where.length() > 0) where.append(" AND ");
+            appendCondition(where, params, c, hint);
+        }
+        if (!cursor.isStart()) {
+            if (where.length() > 0) where.append(" AND ");
+            appendKeysetPredicate(where, params, orderHint, cursor);
+        }
+        boolean ascending = cursor.direction() != IndexHint.Order.DESCENDING;
+        String col = q(orderHint.indexColumnName());
+        StringBuilder sql = new StringBuilder("SELECT ").append(q(COL_KEY)).append(", ").append(q(COL_DATA))
+            .append(" FROM ").append(q(tableName()));
+        if (where.length() > 0) sql.append(" WHERE ").append(where);
+        sql.append(" ORDER BY (").append(col).append(" IS NULL) ").append(ascending ? "DESC" : "ASC")
+            .append(", ").append(col).append(ascending ? " ASC" : " DESC")
+            .append(", ").append(q(COL_KEY)).append(" ASC LIMIT ?");
+        params.add(limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1);   // probe one extra for hasNext
+        long startMs = System.currentTimeMillis();
+        return withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                List<V> rows = readEntities(ps);
+                boolean hasNext = rows.size() > limit;
+                List<V> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
+                Cursor next = (hasNext && !content.isEmpty())
+                    ? QueryResultOrdering.nextCursorFrom(content.get(content.size() - 1), orderHint,
+                        cursor.direction(), descriptor.keyExtractor())
+                    : null;
+                QueryOptions order = QueryOptions.builder()
+                    .orderBy(cursor.orderBy(), cursor.direction()).limit(limit).build();
+                log.queried(tableName(), query, content.size(), System.currentTimeMillis() - startMs);
+                return Slice.ofCursor(content, order, hasNext, next);
+            }
+        });
+    }
+
+    /** Appends the keyset "strictly after the cursor" predicate, matching the NULL=least, key-asc total order. */
+    private void appendKeysetPredicate(StringBuilder where, List<Object> params, IndexHint hint, Cursor cursor) {
+        String col = q(hint.indexColumnName());
+        String key = q(COL_KEY);
+        Object cv = QueryResultOrdering.coerce(cursor.lastValue(), hint);
+        String ck = cursor.lastKey();
+        boolean descending = cursor.direction() == IndexHint.Order.DESCENDING;
+        if (cv == null) {
+            if (descending) {   // already in the NULL tail
+                where.append('(').append(col).append(" IS NULL AND ").append(key).append(" > ?)");
+                params.add(ck);
+            } else {            // NULL prefix: anything non-null, or a later NULL by key
+                where.append('(').append(col).append(" IS NOT NULL OR (")
+                    .append(col).append(" IS NULL AND ").append(key).append(" > ?))");
+                params.add(ck);
+            }
+            return;
+        }
+        Object jdbcVal = toJdbcValue(cv, hint);
+        if (descending) {       // F < v, or tie by key, or the NULL tail
+            where.append('(').append(col).append(" < ? OR (").append(col).append(" = ? AND ")
+                .append(key).append(" > ?) OR ").append(col).append(" IS NULL)");
+        } else {                // F > v, or tie by key (NULLs are before v, excluded)
+            where.append('(').append(col).append(" > ? OR (").append(col).append(" = ? AND ")
+                .append(key).append(" > ?))");
+        }
+        params.add(jdbcVal);
+        params.add(jdbcVal);
+        params.add(ck);
     }
 
     private void appendCondition(StringBuilder where, List<Object> params, Query.Condition c, IndexHint hint) {
