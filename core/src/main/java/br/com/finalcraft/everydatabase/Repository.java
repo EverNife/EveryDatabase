@@ -1,9 +1,13 @@
 package br.com.finalcraft.everydatabase;
 
+import br.com.finalcraft.everydatabase.query.Cursor;
+import br.com.finalcraft.everydatabase.query.Page;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import br.com.finalcraft.everydatabase.query.Slice;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -142,4 +146,49 @@ public interface Repository<K, V> {
      * @see QueryOptions
      */
     CompletableFuture<List<V>> query(Query query, QueryOptions options);
+
+    /**
+     * Counts entities matching {@code query}, ignoring pagination. Validates index fields like
+     * {@link #query(Query)}. The default fetches and counts; SQL/Mongo/InMemory override it to count
+     * without materializing rows, so a custom implementation is correct but should override for
+     * efficiency on large collections.
+     */
+    default CompletableFuture<Long> count(Query query) {
+        return query(query).thenApply(list -> (long) list.size());
+    }
+
+    /**
+     * One page of results with next/previous navigation but <em>no</em> total count - the cheap
+     * pagination result. Fetches one extra row to decide {@link Slice#hasNext()}; never runs a count.
+     *
+     * @see Slice
+     */
+    default CompletableFuture<Slice<V>> querySlice(Query query, QueryOptions options) {
+        QueryOptions opts = options == null ? QueryOptions.none() : options;
+        if (!opts.hasLimit()) {
+            return query(query, opts).thenApply(rows -> Slice.of(rows, opts, false));
+        }
+        int probeLimit = opts.limit() == Integer.MAX_VALUE ? Integer.MAX_VALUE : opts.limit() + 1;
+        return query(query, opts.withLimit(probeLimit)).thenApply(rows -> {
+            boolean hasNext = rows.size() > opts.limit();
+            List<V> content = hasNext ? new ArrayList<>(rows.subList(0, opts.limit())) : rows;
+            return Slice.of(content, opts, hasNext);
+        });
+    }
+
+    /**
+     * One page of results <em>with</em> the total match count, so {@link Page#totalElements()} and
+     * {@link Page#totalPages()} are available. Runs {@link #count(Query)} in addition to the page
+     * query - prefer {@link #querySlice(Query, QueryOptions)} when you don't need the total.
+     *
+     * <p>Sequential (count then query) so it stays correct inside a transaction, where the two share
+     * one connection and must not run concurrently.
+     *
+     * @see Page
+     */
+    default CompletableFuture<Page<V>> queryPage(Query query, QueryOptions options) {
+        QueryOptions opts = options == null ? QueryOptions.none() : options;
+        return count(query).thenCompose(total ->
+               query(query, opts).thenApply(content -> Page.of(content, opts, total)));
+    }
 }

@@ -945,6 +945,36 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Long> count(Query query) {
+        if (query == null) {
+            throw new IllegalArgumentException("query cannot be null");
+        }
+        StringBuilder where = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        for (int i = 0; i < query.conditions().size(); i++) {
+            Query.Condition c = query.conditions().get(i);
+            IndexHint hint = hintsByPath.get(c.fieldPath());
+            if (hint == null) {
+                throw new IllegalArgumentException(
+                    "SQL: field '" + c.fieldPath() + "' is not indexed. "
+                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+            }
+            if (i > 0) where.append(" AND ");
+            appendCondition(where, params, c, hint);
+        }
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM ").append(q(tableName()));
+        if (where.length() > 0) sql.append(" WHERE ").append(where);
+        return withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getLong(1) : 0L;
+                }
+            }
+        });
+    }
+
+    @Override
     public CompletableFuture<Stream<V>> all() {
         String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName());
         return withConnection(conn -> {
