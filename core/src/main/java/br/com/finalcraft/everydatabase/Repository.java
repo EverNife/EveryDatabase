@@ -116,6 +116,9 @@ public interface Repository<K, V> {
      * <p>All fields referenced by {@link Query.Condition} must be declared as
      * {@code IndexHint} on the descriptor. Conditions are intersected (AND).
      *
+     * <p>Convenience overload equivalent to {@link #query(Query, QueryOptions)} with
+     * {@link QueryOptions#none()}.
+     *
      * @see Query
      */
     default CompletableFuture<List<V>> query(Query query) {
@@ -125,20 +128,18 @@ public interface Repository<K, V> {
     /**
      * Executes a composite query with optional result ordering and pagination.
      *
-     * <p>Ordering fields must be declared as {@link IndexHint}s, matching the same
-     * cross-backend validation used for query conditions.</p>
+     * <p>This is the single query primitive every backend implements; {@link #query(Query)}
+     * delegates here with {@link QueryOptions#none()}.
      *
+     * <p>Ordering fields must be declared as {@link IndexHint}s, matching the same
+     * cross-backend validation used for query conditions. Ordering and pagination are
+     * consistent across backends - see {@link QueryOptions} for the NULL-ordering and
+     * tie-breaking contract.
+     *
+     * @param options result controls; never {@code null} - pass {@link QueryOptions#none()}
+     *        for plain queries
      * @see Query
      * @see QueryOptions
      */
-    default CompletableFuture<List<V>> query(Query query, QueryOptions options) {
-        QueryOptions resolved = options == null ? QueryOptions.none() : options;
-        if (resolved.isNone()) {
-            return query(query);
-        }
-        CompletableFuture<List<V>> unsupported = new CompletableFuture<>();
-        unsupported.completeExceptionally(new UnsupportedOperationException(
-            "This repository does not support QueryOptions"));
-        return unsupported;
-    }
+    CompletableFuture<List<V>> query(Query query, QueryOptions options);
 }
