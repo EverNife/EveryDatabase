@@ -429,6 +429,31 @@ repo.query(Query.eq("location.world", "world")
 
 > Querying a field that was **not** declared as an index throws `IllegalArgumentException` on **every** backend — including local files, which validate the declaration even though they answer queries with a full scan (`O(n)`, no real index). Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
 
+### Ordering & pagination (`QueryOptions`)
+
+Pass a `QueryOptions` to `query(Query, QueryOptions)` to **order** and **page** results at the storage layer, instead of loading the whole collection and sorting in memory. Use `Query.all()` to match every entity (a leaderboard or a plain page):
+
+```java
+// Top 10 by score (highest first)
+List<PlayerData> top10 = repo.query(
+        Query.all(),
+        QueryOptions.builder().descending("score").limit(10).build()).join();
+
+// Page 2 of 20, ascending — filter first, then order + page
+List<PlayerData> page2 = repo.query(
+        Query.eq("world", "world_nether"),
+        QueryOptions.builder().ascending("score").offset(20).limit(20).build()).join();
+```
+
+The ordering is **identical on every backend**, so a query keeps behaving the same when you swap the storage:
+
+- **`orderBy` must be a declared index field** (same rule as query conditions) — an undeclared field throws `IllegalArgumentException`.
+- **`NULL`/missing values sort as the smallest value** — first when ascending, last when descending.
+- **Ties are broken by the entity key** (ascending), so a paged result is stable; pages never overlap or drop a row because two entities shared a score. Pagination with only `limit`/`offset` (no `orderBy`) is ordered by key for the same reason.
+- `limit(0)` means **unbounded**; a negative `limit`/`offset` is rejected up front (`IllegalArgumentException`).
+
+> H2 opts out of optimistic locking but still orders and pages like the others. SQL backends order on the materialized `_idx_<field>` column (a real B-tree); LocalFile/GroupedFile order during their full scan.
+
 ---
 
 ## Optimistic locking
