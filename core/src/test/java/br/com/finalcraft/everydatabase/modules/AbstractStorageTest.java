@@ -10,8 +10,10 @@ import br.com.finalcraft.everydatabase.log.StorageLogEvent;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import br.com.finalcraft.everydatabase.query.Page;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.testutil.CapturingSink;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.function.Executable;
@@ -612,6 +614,80 @@ public abstract class AbstractStorageTest {
 
     private static List<UUID> ids(List<TestPlayer> players) {
         return players.stream().map(TestPlayer::getUuid).collect(Collectors.toList());
+    }
+
+    // ------------------------------------------------------------------
+    //  count / querySlice / queryPage
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(101)
+    @DisplayName("[base] count(Query) -> total and filtered counts")
+    void count_totalAndFiltered() {
+        seedIndexData();   // Alice world, Bob world_nether, Carol world
+        assertEquals(3L, repo.count(Query.all()).join());
+        assertEquals(2L, repo.count(Query.eq("world", "world")).join());
+        assertEquals(1L, repo.count(Query.eq("world", "world_nether")).join());
+        assertEquals(0L, repo.count(Query.eq("world", "the_end")).join());
+    }
+
+    @Test
+    @Order(101)
+    @DisplayName("[base] querySlice -> next/previous navigation, no count")
+    void querySlice_navigation() {
+        seedIndexData();   // scores Bob=50, Alice=100, Carol=200
+        Slice<TestPlayer> p0 = repo.querySlice(Query.all(),
+            QueryOptions.builder().ascending("score").page(0, 2).build()).join();
+        assertEquals(Arrays.asList(UUID_BOB, UUID_ALICE), ids(p0.content()));
+        assertTrue(p0.hasNext());
+        assertFalse(p0.hasPrevious());
+        assertTrue(p0.isFirst());
+
+        QueryOptions nextReq = p0.nextPageRequest().orElseThrow(AssertionError::new);
+        Slice<TestPlayer> p1 = repo.querySlice(Query.all(), nextReq).join();
+        assertEquals(Collections.singletonList(UUID_CAROL), ids(p1.content()));
+        assertFalse(p1.hasNext());
+        assertTrue(p1.isLast());
+        assertTrue(p1.hasPrevious());
+        assertFalse(p1.nextPageRequest().isPresent());
+    }
+
+    @Test
+    @Order(101)
+    @DisplayName("[base] queryPage -> totals, page count and ordered content")
+    void queryPage_totalsAndContent() {
+        seedIndexData();
+        Page<TestPlayer> page0 = repo.queryPage(Query.all(),
+            QueryOptions.builder().descending("score").page(0, 2).build()).join();
+        assertEquals(3L, page0.totalElements());
+        assertEquals(2, page0.totalPages());          // ceil(3 / 2)
+        assertEquals(0, page0.number());
+        assertEquals(2, page0.size());
+        assertEquals(Arrays.asList(UUID_CAROL, UUID_ALICE), ids(page0.content()));
+        assertTrue(page0.hasNext());
+        assertFalse(page0.hasPrevious());
+
+        Page<TestPlayer> page1 = repo.queryPage(Query.all(),
+            QueryOptions.builder().descending("score").page(1, 2).build()).join();
+        assertEquals(1, page1.number());
+        assertEquals(Collections.singletonList(UUID_BOB), ids(page1.content()));
+        assertFalse(page1.hasNext());
+        assertTrue(page1.hasPrevious());
+        assertTrue(page1.isLast());
+    }
+
+    @Test
+    @Order(101)
+    @DisplayName("[base] Page.map preserves the page metadata")
+    void queryPage_mapPreservesMetadata() {
+        seedIndexData();
+        Page<TestPlayer> page = repo.queryPage(Query.all(),
+            QueryOptions.builder().descending("score").page(0, 2).build()).join();
+        Page<String> names = page.map(TestPlayer::getName);
+        assertEquals(page.totalElements(), names.totalElements());
+        assertEquals(page.totalPages(), names.totalPages());
+        assertEquals(page.number(), names.number());
+        assertEquals(Arrays.asList("Carol", "Alice"), names.content());
     }
 
     // ------------------------------------------------------------------

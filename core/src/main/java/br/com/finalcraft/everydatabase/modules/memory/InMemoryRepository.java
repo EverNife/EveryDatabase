@@ -165,6 +165,33 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Long> count(Query query) {
+        if (query == null) {
+            throw new IllegalArgumentException("query cannot be null");
+        }
+        if (query.conditions().isEmpty()) {
+            return CompletableFuture.completedFuture((long) store.size());
+        }
+        Set<K> candidates = null;
+        for (Query.Condition condition : query.conditions()) {
+            IndexHint hint = hintsByPath.get(condition.fieldPath());
+            if (hint == null) {
+                throw new IllegalArgumentException(
+                    "InMemory: field '" + condition.fieldPath() + "' is not indexed. "
+                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+            }
+            Set<K> hits = evaluateCondition(condition, hint);
+            candidates = (candidates == null) ? new LinkedHashSet<>(hits) : intersect(candidates, hits);
+            if (candidates.isEmpty()) break;
+        }
+        long n = 0;
+        if (candidates != null) {
+            for (K k : candidates) if (store.get(k) != null) n++;
+        }
+        return CompletableFuture.completedFuture(n);
+    }
+
+    @Override
     public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
         Map<K, Long> result = new HashMap<>();
         Function<V, Long> getter = descriptor.versionGetter();

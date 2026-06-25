@@ -515,6 +515,29 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Long> count(Query query) {
+        if (query == null) {
+            throw new IllegalArgumentException("query cannot be null");
+        }
+        List<Bson> filters = new ArrayList<>(query.conditions().size());
+        for (Query.Condition c : query.conditions()) {
+            IndexHint hint = hintsByPath.get(c.fieldPath());
+            if (hint == null) {
+                throw new IllegalArgumentException(
+                    "Mongo: field '" + c.fieldPath() + "' is not indexed. "
+                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+            }
+            filters.add(toFilter(c, hint));
+        }
+        Bson combined = filters.isEmpty() ? new Document()
+            : (filters.size() == 1 ? filters.get(0) : Filters.and(filters));
+        return CompletableFuture.supplyAsync(
+            () -> session != null ? collection.countDocuments(session, combined) : collection.countDocuments(combined),
+            StorageExecutors.get()
+        );
+    }
+
+    @Override
     public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
         if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyMap());
         return CompletableFuture.supplyAsync(() -> {
