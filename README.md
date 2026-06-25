@@ -454,6 +454,53 @@ The ordering is **identical on every backend**, so a query keeps behaving the sa
 
 > H2 opts out of optimistic locking but still orders and pages like the others. SQL backends order on the materialized `_idx_<field>` column (a real B-tree); LocalFile/GroupedFile order during their full scan.
 
+#### Page responses — `querySlice` (cheap) and `queryPage` (with total)
+
+`query(...)` returns a plain `List`. When you want navigation metadata, two richer results are available — both take the same `QueryOptions` (use `.page(n, size)` for 0-based paging):
+
+```java
+// Slice — content + hasNext, fetched by reading one extra row. No COUNT runs.
+Slice<PlayerData> slice = repo.querySlice(
+        Query.all(), QueryOptions.builder().descending("score").page(0, 10).build()).join();
+slice.hasNext();                       // is there a next page?
+slice.nextPageRequest().ifPresent(next -> repo.querySlice(Query.all(), next));   // advance
+
+// Page — adds totalElements / totalPages via an extra count(Query).
+Page<PlayerData> page = repo.queryPage(
+        Query.all(), QueryOptions.builder().descending("score").page(2, 10).build()).join();
+page.totalElements();   // e.g. 237
+page.totalPages();      // e.g. 24
+page.number();          // 2 (0-based)
+page.hasNext(); page.hasPrevious(); page.isLast();
+Page<String> lines = page.map(p -> p.getName() + " — " + p.getScore());   // metadata preserved
+
+// count alone (filtered), without fetching rows
+long inNether = repo.count(Query.eq("world", "world_nether")).join();
+```
+
+> Prefer `querySlice`/`query` when you don't need the total — only `queryPage` pays for the `count`. `Page` is a `Slice` with `totalElements`/`totalPages`; the count and the page are read separately, so under concurrent writes the total may differ from the content by one (same as Spring Data).
+
+#### Keyset (cursor) pagination — `queryAfter`
+
+For deep paging or "load more"/infinite scroll, `queryAfter` seeks by the **position** of the last row instead of an offset, so it stays fast no matter how far in you are (offset scans and discards the skipped rows). It returns a forward-only `Slice` with **no total**, and is stable under concurrent inserts/deletes. The cursor carries the order, so you set it only once:
+
+```java
+// First page (ordered by score, descending)
+Slice<PlayerData> p1 = repo.queryAfter(
+        Query.all(), Cursor.start("score", IndexHint.Order.DESCENDING), 10).join();
+
+// Next page — feed back the cursor
+if (p1.hasNext()) {
+    Slice<PlayerData> p2 = repo.queryAfter(Query.all(), p1.nextCursor().get(), 10).join();
+}
+
+// Stateless transport (command argument, GUI button payload)
+String token = p1.nextCursor().get().encode();
+Slice<PlayerData> resumed = repo.queryAfter(Query.all(), Cursor.decode(token), 10).join();
+```
+
+> Keyset is forward-only and has no "jump to page N" or total — use `queryPage` for "page X of N" admin screens, `queryAfter` for feeds and large/deep lists. The order field must be a declared index; the same NULL=least, key-tie-break order applies, so cursor paging is consistent across every backend.
+
 ---
 
 ## Optimistic locking
