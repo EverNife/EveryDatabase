@@ -1010,6 +1010,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     private void applyQueryOptions(StringBuilder sql, List<Object> params, QueryOptions options) {
+        boolean paginating = options.hasLimit() || options.hasOffset();
         if (options.hasOrder()) {
             IndexHint orderHint = hintsByPath.get(options.orderBy());
             if (orderHint == null) {
@@ -1017,11 +1018,19 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                     "SQL: order field '" + options.orderBy() + "' is not indexed. "
                     + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
             }
-            sql.append(" ORDER BY ")
-                .append(q(orderHint.indexColumnName()))
-                .append(options.order() == IndexHint.Order.DESCENDING ? " DESC" : " ASC");
+            boolean ascending = options.order() != IndexHint.Order.DESCENDING;
+            String col = q(orderHint.indexColumnName());
+            // NULL sorts as the smallest value (first ascending, last descending) on every dialect via
+            // the boolean (col IS NULL) flag, then a stable tie-break by key - so a paged result is
+            // identical across backends, matching the in-memory and Mongo ordering contract.
+            sql.append(" ORDER BY (").append(col).append(" IS NULL) ").append(ascending ? "DESC" : "ASC")
+                .append(", ").append(col).append(ascending ? " ASC" : " DESC")
+                .append(", ").append(q(COL_KEY)).append(" ASC");
+        } else if (paginating) {
+            // Stable pagination needs a deterministic order even without an explicit sort field.
+            sql.append(" ORDER BY ").append(q(COL_KEY)).append(" ASC");
         }
-        if (options.hasLimit() || options.hasOffset()) {
+        if (paginating) {
             sql.append(" LIMIT ?");
             params.add(options.hasLimit() ? options.limit() : Integer.MAX_VALUE);
         }

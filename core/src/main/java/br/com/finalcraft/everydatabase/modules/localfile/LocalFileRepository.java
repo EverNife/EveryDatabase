@@ -15,6 +15,7 @@ import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -349,7 +350,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                     + "Add .index(IndexHint.<type>(\"...\")) on the EntityDescriptor.");
             }
         }
-        validateQueryOptions(finalOptions);
+        QueryResultOrdering.validateOrderField(finalOptions, hintsByPath, "LocalFile");
 
         long startMs = System.currentTimeMillis();
         return all().thenApply(stream -> {
@@ -358,48 +359,10 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 JsonNode tree = IndexValueExtractor.toTree(entity);
                 if (matchesAll(tree, query)) filtered.add(entity);
             });
-            List<V> result = applyQueryOptions(filtered, finalOptions);
+            List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor());
             log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
             return result;
         });
-    }
-
-    private void validateQueryOptions(QueryOptions options) {
-        if (!options.hasOrder()) {
-            return;
-        }
-        if (!hintsByPath.containsKey(options.orderBy())) {
-            throw new IllegalArgumentException(
-                "LocalFile: order field '" + options.orderBy() + "' is not declared as an IndexHint. "
-                + "Add .index(IndexHint.<type>(\"...\")) on the EntityDescriptor.");
-        }
-    }
-
-    private List<V> applyQueryOptions(List<V> result, QueryOptions options) {
-        if (options.hasOrder()) {
-            final IndexHint hint = hintsByPath.get(options.orderBy());
-            final int direction = options.order() == IndexHint.Order.DESCENDING ? -1 : 1;
-            result.sort((left, right) -> direction * compareIndexedValue(left, right, hint));
-        }
-        if (!options.hasOffset() && !options.hasLimit()) {
-            return result;
-        }
-        int from = Math.min(options.offset(), result.size());
-        int to = options.hasLimit() ? Math.min(from + options.limit(), result.size()) : result.size();
-        return new ArrayList<>(result.subList(from, to));
-    }
-
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private int compareIndexedValue(V left, V right, IndexHint hint) {
-        Object leftValue = IndexValueExtractor.extract(IndexValueExtractor.toTree(left), hint);
-        Object rightValue = IndexValueExtractor.extract(IndexValueExtractor.toTree(right), hint);
-        if (leftValue == rightValue) return 0;
-        if (leftValue == null) return 1;
-        if (rightValue == null) return -1;
-        if (leftValue instanceof Comparable && rightValue instanceof Comparable) {
-            return ((Comparable) leftValue).compareTo(rightValue);
-        }
-        return String.valueOf(leftValue).compareTo(String.valueOf(rightValue));
     }
 
     private boolean matchesAll(JsonNode tree, Query query) {

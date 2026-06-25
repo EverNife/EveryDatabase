@@ -11,6 +11,7 @@ import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.*;
@@ -220,7 +221,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
                                               : intersect(candidates, hits);
             if (candidates.isEmpty()) break; // short-circuit
         }
-        validateQueryOptions(options);
+        QueryResultOrdering.validateOrderField(options, hintsByPath, "InMemory");
 
         List<V> result = new ArrayList<>(query.conditions().isEmpty() ? store.size() : (candidates == null ? 0 : candidates.size()));
         if (query.conditions().isEmpty()) {
@@ -233,48 +234,10 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
                 if (v != null) result.add(deepCopy(v));
             }
         }
-        result = applyQueryOptions(result, options);
+        result = QueryResultOrdering.apply(result, options, hintsByPath, descriptor.keyExtractor());
 
         log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
         return CompletableFuture.completedFuture(result);
-    }
-
-    private void validateQueryOptions(QueryOptions options) {
-        if (!options.hasOrder()) {
-            return;
-        }
-        if (!hintsByPath.containsKey(options.orderBy())) {
-            throw new IllegalArgumentException(
-                "InMemory: order field '" + options.orderBy() + "' is not indexed. "
-                + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
-        }
-    }
-
-    private List<V> applyQueryOptions(List<V> result, QueryOptions options) {
-        if (options.hasOrder()) {
-            final IndexHint hint = hintsByPath.get(options.orderBy());
-            final int direction = options.order() == IndexHint.Order.DESCENDING ? -1 : 1;
-            result.sort((left, right) -> direction * compareIndexedValue(left, right, hint));
-        }
-        if (!options.hasOffset() && !options.hasLimit()) {
-            return result;
-        }
-        int from = Math.min(options.offset(), result.size());
-        int to = options.hasLimit() ? Math.min(from + options.limit(), result.size()) : result.size();
-        return new ArrayList<>(result.subList(from, to));
-    }
-
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private int compareIndexedValue(V left, V right, IndexHint hint) {
-        Object leftValue = IndexValueExtractor.extract(IndexValueExtractor.toTree(left), hint);
-        Object rightValue = IndexValueExtractor.extract(IndexValueExtractor.toTree(right), hint);
-        if (leftValue == rightValue) return 0;
-        if (leftValue == null) return 1;
-        if (rightValue == null) return -1;
-        if (leftValue instanceof Comparable && rightValue instanceof Comparable) {
-            return ((Comparable) leftValue).compareTo(rightValue);
-        }
-        return String.valueOf(leftValue).compareTo(String.valueOf(rightValue));
     }
 
     // ------------------------------------------------------------------

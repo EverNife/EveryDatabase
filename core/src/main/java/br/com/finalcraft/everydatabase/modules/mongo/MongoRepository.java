@@ -586,11 +586,18 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             FindIterable<Document> found = session != null
                 ? collection.find(session, combined)
                 : collection.find(combined);
+            boolean paginating = finalOptions.hasOffset() || finalOptions.hasLimit();
             if (finalOptions.hasOrder()) {
                 IndexHint hint = hintsByPath.get(finalOptions.orderBy());
-                found = found.sort(finalOptions.order() == IndexHint.Order.DESCENDING
+                Bson valueSort = finalOptions.order() == IndexHint.Order.DESCENDING
                     ? Sorts.descending(hint.indexColumnName())
-                    : Sorts.ascending(hint.indexColumnName()));
+                    : Sorts.ascending(hint.indexColumnName());
+                // Mongo sorts null/missing as the smallest value (first ascending, last descending),
+                // matching the other backends; _id (the entity key) breaks ties so paging is stable.
+                found = found.sort(Sorts.orderBy(valueSort, Sorts.ascending(COL_KEY)));
+            } else if (paginating) {
+                // Stable pagination needs a deterministic order even without an explicit sort field.
+                found = found.sort(Sorts.ascending(COL_KEY));
             }
             if (finalOptions.hasOffset()) {
                 found = found.skip(finalOptions.offset());

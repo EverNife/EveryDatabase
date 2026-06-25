@@ -531,6 +531,89 @@ public abstract class AbstractStorageTest {
         );
     }
 
+    @Test
+    @Order(99)
+    @DisplayName("[base] query order by score with ties -> stable tie-break by key (same on every backend)")
+    void query_orderWithTies_stableByKey() {
+        // Alice & Bob share score 100; Carol has 200. Ties break by the entity key, ascending.
+        repo.saveAll(Arrays.asList(
+            new TestPlayer(UUID_ALICE, "Alice", 100, "world", true),
+            new TestPlayer(UUID_BOB,   "Bob",   100, "world", true),
+            new TestPlayer(UUID_CAROL, "Carol", 200, "world", true)
+        )).join();
+
+        List<UUID> asc = ids(repo.query(Query.all(),
+            QueryOptions.builder().ascending("score").build()).join());
+        assertEquals(Arrays.asList(UUID_ALICE, UUID_BOB, UUID_CAROL), asc,
+            "ties come first in key order, then Carol");
+
+        List<UUID> desc = ids(repo.query(Query.all(),
+            QueryOptions.builder().descending("score").build()).join());
+        assertEquals(Arrays.asList(UUID_CAROL, UUID_ALICE, UUID_BOB), desc,
+            "Carol first; the tie-break stays ascending by key regardless of sort direction");
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query order by nullable field -> NULL sorts as the smallest value")
+    void query_orderByNullableField_nullsSortLeast() {
+        // 'name' is a declared string index; Bob has a null name.
+        repo.saveAll(Arrays.asList(
+            new TestPlayer(UUID_ALICE, "beta",  1, "world", true),
+            new TestPlayer(UUID_BOB,   null,    2, "world", true),
+            new TestPlayer(UUID_CAROL, "alpha", 3, "world", true)
+        )).join();
+
+        List<UUID> asc = ids(repo.query(Query.all(),
+            QueryOptions.builder().ascending("name").build()).join());
+        assertEquals(Arrays.asList(UUID_BOB, UUID_CAROL, UUID_ALICE), asc,
+            "null first, then 'alpha', then 'beta'");
+
+        List<UUID> desc = ids(repo.query(Query.all(),
+            QueryOptions.builder().descending("name").build()).join());
+        assertEquals(Arrays.asList(UUID_ALICE, UUID_CAROL, UUID_BOB), desc,
+            "'beta', 'alpha', then null last");
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query(all) with limit/offset but no order -> deterministic key-ordered page")
+    void query_paginationWithoutOrder_isKeyOrdered() {
+        seedIndexData();   // Alice(...01), Bob(...02), Carol(...03)
+        List<UUID> page1 = ids(repo.query(Query.all(),
+            QueryOptions.builder().limit(2).build()).join());
+        assertEquals(Arrays.asList(UUID_ALICE, UUID_BOB), page1);
+
+        List<UUID> page2 = ids(repo.query(Query.all(),
+            QueryOptions.builder().offset(2).limit(2).build()).join());
+        assertEquals(Collections.singletonList(UUID_CAROL), page2);
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query offset beyond size -> empty; limit beyond size -> all")
+    void query_offsetAndLimitBeyondSize_clamp() {
+        seedIndexData();
+        assertTrue(repo.query(Query.all(),
+            QueryOptions.builder().ascending("score").offset(10).build()).join().isEmpty());
+        assertEquals(3, repo.query(Query.all(),
+            QueryOptions.builder().ascending("score").limit(100).build()).join().size());
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query order asc, offset only (no limit) -> skips prefix, keeps the rest")
+    void query_orderAsc_offsetOnly_skipsPrefix() {
+        seedIndexData();   // scores Bob=50, Alice=100, Carol=200
+        List<UUID> rest = ids(repo.query(Query.all(),
+            QueryOptions.builder().ascending("score").offset(1).build()).join());
+        assertEquals(Arrays.asList(UUID_ALICE, UUID_CAROL), rest);
+    }
+
+    private static List<UUID> ids(List<TestPlayer> players) {
+        return players.stream().map(TestPlayer::getUuid).collect(Collectors.toList());
+    }
+
     // ------------------------------------------------------------------
     //  query - TIMESTAMP / createdAt index
     // ------------------------------------------------------------------
