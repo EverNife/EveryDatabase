@@ -10,6 +10,9 @@ import java.util.*;
  *
  * <p>Queries are built via static factory methods and combined with {@link #and(Query)}:
  * <pre>{@code
+ * // All entities, useful with QueryOptions sorting/pagination
+ * repo.query(Query.all(), QueryOptions.builder().orderBy("score", IndexHint.Order.DESCENDING).limit(20).build())
+ *
  * // Single equality
  * repo.query(Query.eq("type", "ENABLED"))
  *
@@ -99,6 +102,11 @@ public final class Query {
     //  Factories
     // ------------------------------------------------------------------
 
+    /** No conditions; matches all entities and is useful with query options. */
+    public static Query all() {
+        return new Query(Collections.emptyList());
+    }
+
     /** {@code fieldPath = value}. */
     public static Query eq(String fieldPath, Object value) {
         return new Query(Collections.singletonList(
@@ -141,6 +149,9 @@ public final class Query {
      * client-side.
      */
     public Query and(Query other) {
+        if (other == null) {
+            throw new IllegalArgumentException("other cannot be null");
+        }
         List<Condition> merged = new ArrayList<>(this.conditions.size() + other.conditions.size());
         merged.addAll(this.conditions);
         merged.addAll(other.conditions);
@@ -149,6 +160,9 @@ public final class Query {
 
     @Override
     public String toString() {
+        if (conditions.isEmpty()) {
+            return "Query{ALL}";
+        }
         StringBuilder sb = new StringBuilder("Query{");
         for (int i = 0; i < conditions.size(); i++) {
             if (i > 0) sb.append(" AND ");
