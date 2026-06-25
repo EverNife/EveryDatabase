@@ -14,6 +14,7 @@ import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import br.com.finalcraft.everydatabase.modules.sql.SqlMigration;
 import br.com.finalcraft.everydatabase.modules.sql.h2.H2SqlStorage;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import org.junit.jupiter.api.*;
 
@@ -788,8 +789,8 @@ class StorageTransferPoliciesTest {
                     }
 
                     @Override
-                    public CompletableFuture<List<V>> query(Query query) {
-                        return base.query(query);
+                    public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
+                        return base.query(query, options);
                     }
                 };
             }

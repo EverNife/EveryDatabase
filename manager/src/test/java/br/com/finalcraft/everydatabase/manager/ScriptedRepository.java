@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.manager;
 
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -112,7 +113,7 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
-    public CompletableFuture<List<V>> query(Query query) {
+    public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
         throw new UnsupportedOperationException();
     }
 }
