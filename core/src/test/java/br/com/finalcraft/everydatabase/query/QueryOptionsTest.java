@@ -79,4 +79,39 @@ class QueryOptionsTest {
         assertEquals(5, opts.offset());
         assertFalse(opts.isNone());
     }
+
+    @Test
+    @DisplayName("page(n, size) maps to offset = n*size, limit = size (0-based)")
+    void page_mapsToOffsetAndLimit() {
+        QueryOptions first = QueryOptions.builder().descending("score").page(0, 20).build();
+        assertEquals(0, first.offset());
+        assertEquals(20, first.limit());
+
+        QueryOptions third = QueryOptions.builder().page(2, 20).build();
+        assertEquals(40, third.offset());
+        assertEquals(20, third.limit());
+    }
+
+    @Test
+    @DisplayName("page() rejects negative page number and non-positive page size")
+    void page_rejectsInvalid() {
+        assertThrows(IllegalArgumentException.class, () -> QueryOptions.builder().page(-1, 10));
+        assertThrows(IllegalArgumentException.class, () -> QueryOptions.builder().page(0, 0));
+        assertThrows(IllegalArgumentException.class, () -> QueryOptions.builder().page(0, -5));
+    }
+
+    @Test
+    @DisplayName("withLimit/withOffset return copies keeping the other fields")
+    void withLimitOffset_copy() {
+        QueryOptions base = QueryOptions.builder().descending("score").page(1, 10).build();
+        QueryOptions probe = base.withLimit(11);
+        assertEquals(11, probe.limit());
+        assertEquals(base.offset(), probe.offset());
+        assertEquals("score", probe.orderBy());
+        assertEquals(IndexHint.Order.DESCENDING, probe.order());
+
+        QueryOptions advanced = base.withOffset(base.offset() + base.limit());
+        assertEquals(20, advanced.offset());
+        assertEquals(10, advanced.limit());
+    }
 }
