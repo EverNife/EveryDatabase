@@ -11,6 +11,7 @@ import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.testutil.CapturingSink;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.function.Executable;
@@ -458,6 +459,75 @@ public abstract class AbstractStorageTest {
         seedIndexData();
         assertThrows(IllegalArgumentException.class, (Executable) () ->
             repo.query(Query.eq("nonExistentField", "value")).join()
+        );
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query(all, order by score desc limit 2) -> returns highest scores")
+    void query_all_orderDesc_limit_returnsTopScores() {
+        seedIndexData();
+        List<TestPlayer> found = repo.query(
+            Query.all(),
+            QueryOptions.builder()
+                .descending("score")
+                .limit(2)
+                .build()
+        ).join();
+
+        assertEquals(2, found.size());
+        assertEquals(UUID_CAROL, found.get(0).getUuid());
+        assertEquals(UUID_ALICE, found.get(1).getUuid());
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query(all, order by score asc offset 1 limit 1) -> returns page")
+    void query_all_orderAsc_offsetLimit_returnsPage() {
+        seedIndexData();
+        List<TestPlayer> found = repo.query(
+            Query.all(),
+            QueryOptions.builder()
+                .ascending("score")
+                .offset(1)
+                .limit(1)
+                .build()
+        ).join();
+
+        assertEquals(1, found.size());
+        assertEquals(UUID_ALICE, found.get(0).getUuid());
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query(eq + order desc limit) -> filters before ordering")
+    void query_filter_orderDesc_limit_returnsTopFiltered() {
+        seedIndexData();
+        List<TestPlayer> found = repo.query(
+            Query.eq("world", "world"),
+            QueryOptions.builder()
+                .descending("score")
+                .limit(1)
+                .build()
+        ).join();
+
+        assertEquals(1, found.size());
+        assertEquals(UUID_CAROL, found.get(0).getUuid());
+    }
+
+    @Test
+    @Order(99)
+    @DisplayName("[base] query order by undeclared field -> throws IllegalArgumentException")
+    void query_orderByUndeclaredField_throwsIllegalArgument() {
+        seedIndexData();
+        assertThrows(IllegalArgumentException.class, (Executable) () ->
+            repo.query(
+                Query.all(),
+                QueryOptions.builder()
+                    .ascending("randomUuid")
+                    .limit(1)
+                    .build()
+            ).join()
         );
     }
 

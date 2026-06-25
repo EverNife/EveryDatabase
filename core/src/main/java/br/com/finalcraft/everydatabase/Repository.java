@@ -1,6 +1,8 @@
 package br.com.finalcraft.everydatabase;
 
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.IndexHint;
 
 import java.util.Collection;
 import java.util.List;
@@ -116,5 +118,27 @@ public interface Repository<K, V> {
      *
      * @see Query
      */
-    CompletableFuture<List<V>> query(Query query);
+    default CompletableFuture<List<V>> query(Query query) {
+        return query(query, QueryOptions.none());
+    }
+
+    /**
+     * Executes a composite query with optional result ordering and pagination.
+     *
+     * <p>Ordering fields must be declared as {@link IndexHint}s, matching the same
+     * cross-backend validation used for query conditions.</p>
+     *
+     * @see Query
+     * @see QueryOptions
+     */
+    default CompletableFuture<List<V>> query(Query query, QueryOptions options) {
+        QueryOptions resolved = options == null ? QueryOptions.none() : options;
+        if (resolved.isNone()) {
+            return query(query);
+        }
+        CompletableFuture<List<V>> unsupported = new CompletableFuture<>();
+        unsupported.completeExceptionally(new UnsupportedOperationException(
+            "This repository does not support QueryOptions"));
+        return unsupported;
+    }
 }

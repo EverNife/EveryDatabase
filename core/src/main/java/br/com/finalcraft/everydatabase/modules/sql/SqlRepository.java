@@ -11,6 +11,7 @@ import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -963,7 +964,13 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
-    public CompletableFuture<List<V>> query(Query query) {
+    public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
+        if (query == null) {
+            throw new IllegalArgumentException("query cannot be null");
+        }
+        if (options == null) {
+            options = QueryOptions.none();
+        }
         // Build WHERE clause and parameter list.
         StringBuilder where = new StringBuilder();
         List<Object> params = new ArrayList<>();
@@ -980,17 +987,48 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             appendCondition(where, params, c, hint);
         }
 
-        String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName()) + " WHERE " + where;
+        StringBuilder sql = new StringBuilder("SELECT ")
+            .append(q(COL_KEY))
+            .append(", ")
+            .append(q(COL_DATA))
+            .append(" FROM ")
+            .append(q(tableName()));
+        if (where.length() > 0) {
+            sql.append(" WHERE ").append(where);
+        }
+        applyQueryOptions(sql, params, options);
         long startMs = System.currentTimeMillis();
 
         return withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
                 for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
                 List<V> result = readEntities(ps);
                 log.queried(tableName(), query, result.size(), System.currentTimeMillis() - startMs);
                 return result;
             }
         });
+    }
+
+    private void applyQueryOptions(StringBuilder sql, List<Object> params, QueryOptions options) {
+        if (options.hasOrder()) {
+            IndexHint orderHint = hintsByPath.get(options.orderBy());
+            if (orderHint == null) {
+                throw new IllegalArgumentException(
+                    "SQL: order field '" + options.orderBy() + "' is not indexed. "
+                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+            }
+            sql.append(" ORDER BY ")
+                .append(q(orderHint.indexColumnName()))
+                .append(options.order() == IndexHint.Order.DESCENDING ? " DESC" : " ASC");
+        }
+        if (options.hasLimit() || options.hasOffset()) {
+            sql.append(" LIMIT ?");
+            params.add(options.hasLimit() ? options.limit() : Integer.MAX_VALUE);
+        }
+        if (options.hasOffset()) {
+            sql.append(" OFFSET ?");
+            params.add(options.offset());
+        }
     }
 
     private void appendCondition(StringBuilder where, List<Object> params, Query.Condition c, IndexHint hint) {

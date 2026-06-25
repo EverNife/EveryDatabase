@@ -14,6 +14,7 @@ import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -331,7 +332,14 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
-    public CompletableFuture<List<V>> query(Query query) {
+    public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
+        if (query == null) {
+            throw new IllegalArgumentException("query cannot be null");
+        }
+        if (options == null) {
+            options = QueryOptions.none();
+        }
+        final QueryOptions finalOptions = options;
         // The scan could answer undeclared fields, but we reject them so a query that
         // works here does not start throwing when the storage is swapped for SQL/Mongo.
         for (Query.Condition c : query.conditions()) {
@@ -341,17 +349,57 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                     + "Add .index(IndexHint.<type>(\"...\")) on the EntityDescriptor.");
             }
         }
+        validateQueryOptions(finalOptions);
 
         long startMs = System.currentTimeMillis();
         return all().thenApply(stream -> {
-            List<V> result = new ArrayList<>();
+            List<V> filtered = new ArrayList<>();
             stream.forEach(entity -> {
                 JsonNode tree = IndexValueExtractor.toTree(entity);
-                if (matchesAll(tree, query)) result.add(entity);
+                if (matchesAll(tree, query)) filtered.add(entity);
             });
+            List<V> result = applyQueryOptions(filtered, finalOptions);
             log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
             return result;
         });
+    }
+
+    private void validateQueryOptions(QueryOptions options) {
+        if (!options.hasOrder()) {
+            return;
+        }
+        if (!hintsByPath.containsKey(options.orderBy())) {
+            throw new IllegalArgumentException(
+                "LocalFile: order field '" + options.orderBy() + "' is not declared as an IndexHint. "
+                + "Add .index(IndexHint.<type>(\"...\")) on the EntityDescriptor.");
+        }
+    }
+
+    private List<V> applyQueryOptions(List<V> result, QueryOptions options) {
+        if (options.hasOrder()) {
+            final IndexHint hint = hintsByPath.get(options.orderBy());
+            final int direction = options.order() == IndexHint.Order.DESCENDING ? -1 : 1;
+            result.sort((left, right) -> direction * compareIndexedValue(left, right, hint));
+        }
+        if (!options.hasOffset() && !options.hasLimit()) {
+            return result;
+        }
+        int from = Math.min(options.offset(), result.size());
+        int to = options.hasLimit() ? Math.min(from + options.limit(), result.size()) : result.size();
+        return new ArrayList<>(result.subList(from, to));
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private int compareIndexedValue(V left, V right, IndexHint hint) {
+        Object leftValue = IndexValueExtractor.extract(IndexValueExtractor.toTree(left), hint);
+        Object rightValue = IndexValueExtractor.extract(IndexValueExtractor.toTree(right), hint);
+        if (leftValue == rightValue) return 0;
+        if (leftValue == null) return 1;
+        if (rightValue == null) return -1;
+        if (leftValue instanceof Comparable && rightValue instanceof Comparable) {
+            return ((Comparable) leftValue).compareTo(rightValue);
+        }
+        return String.valueOf(leftValue).compareTo(String.valueOf(rightValue));
     }
 
     private boolean matchesAll(JsonNode tree, Query query) {
