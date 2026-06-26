@@ -3,14 +3,23 @@ package br.com.finalcraft.everydatabase.modules;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
+import br.com.finalcraft.everydatabase.query.Cursor;
+import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.QueryOptions;
 import org.instancio.Instancio;
 import org.junit.jupiter.api.*;
 
+import java.io.File;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.lang.reflect.Method;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
 import static br.com.finalcraft.everydatabase.modules.AbstractStorageTest.DESCRIPTOR;
@@ -908,6 +917,218 @@ public abstract class AbstractStorageStressTest {
     private static void report(String fmt, Object... args) {
         if (args.length == 0) System.out.println(fmt);
         else                  System.out.printf(fmt + "%n", args);
+    }
+
+    // ==================================================================
+    //  Configurable micro-benchmark
+    //  Tagged "benchmark": excluded from the default test run (the build only
+    //  includes it with -PrunBenchmark). Run one backend's suite with, e.g.:
+    //    gradlew :core:test -PrunBenchmark --tests "*H2StorageStressTest.benchmarkSuite"
+    //  Tunables (system properties): bench.sizes (CSV), bench.iterations, bench.warmups,
+    //  bench.concurrency. Each reported value is the MEDIAN across iterations, and the run
+    //  also writes build/benchmarks/<backend>.csv.
+    // ==================================================================
+
+    @Test
+    @Tag("benchmark")
+    @DisplayName("[benchmark] throughput suite (sizes x iterations, median + CSV)")
+    void benchmarkSuite() throws Exception {
+        int[] sizes     = parseSizes(System.getProperty("bench.sizes", "1000,10000"));
+        int iterations  = Integer.getInteger("bench.iterations", 3);
+        int warmups     = Integer.getInteger("bench.warmups", 1);
+        int concurrency = Integer.getInteger("bench.concurrency", 8);
+        String backend  = backendName();
+
+        List<String[]> csv = new ArrayList<>();
+        csv.add(new String[]{"backend", "size", "metric", "unit", "median"});
+
+        report("\n#################################################");
+        report("BENCHMARK backend=%s sizes=%s iterations=%d warmups=%d concurrency=%d",
+            backend, Arrays.toString(sizes), iterations, warmups, concurrency);
+        report("#################################################");
+
+        for (int size : sizes) {
+            for (int w = 0; w < warmups; w++) runWorkload(size, concurrency, "warmup" + w);
+
+            Map<String, List<Double>> samples = new LinkedHashMap<>();
+            for (int it = 0; it < iterations; it++) {
+                runWorkload(size, concurrency, "iter" + it)
+                    .forEach((k, v) -> samples.computeIfAbsent(k, x -> new ArrayList<>()).add(v));
+            }
+
+            report("%n----- %s | size=%,d | median of %d -----", backend, size, iterations);
+            for (Map.Entry<String, List<Double>> e : samples.entrySet()) {
+                double med  = median(e.getValue());
+                String unit = unitFor(e.getKey());
+                report("  %-20s : %,12.2f %s", e.getKey(), med, unit);
+                csv.add(new String[]{backend, Integer.toString(size), e.getKey(), unit,
+                    String.format(Locale.ROOT, "%.2f", med)});
+            }
+        }
+        writeCsv(backend, csv);
+    }
+
+    /** Runs one full measurement pass on a fresh storage and returns metric -> value. */
+    private Map<String, Double> runWorkload(int size, int concurrency, String tag) throws Exception {
+        final int sample = Math.min(size, 1_000);
+        // Single-op writes are O(N)-per-op on file backends (each rewrites the whole file/group),
+        // so the per-record write samples use a smaller bound to keep the run time sane.
+        final int writeSample = Math.min(size, 200);
+        Map<String, Double> r = new LinkedHashMap<>();
+        Storage st = createStorage("bench_" + size + "_" + tag);
+        try {
+            st.init().join();
+            final Repository<UUID, TestPlayer> repo = st.repository(DESCRIPTOR);
+
+            final List<TestPlayer> data = makeDataset(size);
+            final List<UUID> keys = data.stream().map(TestPlayer::getUuid).collect(Collectors.toList());
+            final List<TestPlayer> sampleData = data.subList(0, sample);
+            final List<UUID> sampleKeys = keys.subList(0, sample);
+            final List<TestPlayer> writeData = data.subList(0, writeSample);
+
+            long memBefore = usedMemoryBytes();
+
+            r.put("insert.bulk", opsPerSec(size, timed(() -> {
+                for (int b = 0; b < size; b += BATCH_SIZE)
+                    repo.saveAll(data.subList(b, Math.min(b + BATCH_SIZE, size))).join();
+            })));
+
+            r.put("mem.heap.delta", Math.max(0L, usedMemoryBytes() - memBefore) / (1024.0 * 1024.0));
+
+            r.put("count",         msD(timed(() -> repo.count().join())));
+            r.put("query.indexed", msD(timed(() -> repo.query(Query.eq("world", "world")).join())));
+            r.put("scan.all",      msD(timed(() -> repo.all().join().count())));
+            r.put("findMany",      msD(timed(() -> repo.findMany(sampleKeys).join())));
+            r.put("versions",      msD(timed(() -> repo.versions(sampleKeys).join())));
+
+            r.put("find.byId", opsPerSec(sample, timed(() -> {
+                for (UUID k : sampleKeys) repo.find(k).join();
+            })));
+            r.put("save.single", opsPerSec(writeSample, timed(() -> {
+                for (TestPlayer p : writeData) repo.save(p).join();
+            })));
+
+            final int pageSize = 50;
+            final int deepPage = Math.max(0, (size / pageSize) - 2);
+            r.put("page.offsetDeep", msD(timed(() -> repo.query(Query.range("score", 0, size),
+                QueryOptions.builder().ascending("score").page(deepPage, pageSize).build()).join())));
+            r.put("page.keyset", msD(timed(() -> repo.queryAfter(Query.range("score", 0, size),
+                Cursor.start("score", IndexHint.Order.ASCENDING), pageSize).join())));
+
+            for (TestPlayer p : sampleData) p.setScore(p.getScore() + 1);
+            r.put("update.bulk", opsPerSec(sample, timed(() -> repo.saveAll(sampleData).join())));
+
+            r.put("concurrent.rw", concurrentMixed(repo, keys, data, concurrency, 2_000));
+
+            final int delCount = writeSample;
+            final List<UUID> delKeys = keys.subList(0, delCount);
+            r.put("delete", opsPerSec(delCount, timed(() -> {
+                for (UUID k : delKeys) repo.delete(k).join();
+            })));
+
+            return r;
+        } finally {
+            st.close().join();
+        }
+    }
+
+    /**
+     * Mixed point read/write across {@code threads}, {@code totalOps} ops total; returns ops/s.
+     * Each thread works inside its own key partition, so concurrent writes never target the same
+     * key (or, for file backends, the same file) - it measures throughput, not write-conflict handling.
+     */
+    private static double concurrentMixed(Repository<UUID, TestPlayer> repo, List<UUID> keys,
+                                          List<TestPlayer> data, int threads, int totalOps) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            final int n = keys.size();
+            final int chunk = Math.max(1, n / threads);
+            final int opsPerThread = Math.max(1, totalOps / threads);
+            long start = System.nanoTime();
+            List<Future<?>> futures = new ArrayList<>();
+            for (int t = 0; t < threads; t++) {
+                final int from = Math.min(t * chunk, n - 1);
+                final int span = Math.max(1, Math.min(chunk, n - from));
+                futures.add(pool.submit(() -> {
+                    for (int i = 0; i < opsPerThread; i++) {
+                        int idx = from + (i % span);
+                        if ((i & 1) == 0) repo.find(keys.get(idx)).join();
+                        else              repo.save(data.get(idx)).join();
+                    }
+                }));
+            }
+            for (Future<?> f : futures) f.get();
+            return opsPerSec((long) opsPerThread * threads, System.nanoTime() - start);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private List<TestPlayer> makeDataset(int size) {
+        List<TestPlayer> players = Instancio.ofList(TestPlayer.class).size(size).create();
+        Instant base = Instant.now().minus(size, ChronoUnit.DAYS);
+        for (int i = 0; i < players.size(); i++) {
+            TestPlayer p = players.get(i);
+            p.setScore(i);
+            p.setWorld(i % 3 == 0 ? "world_nether" : "world");
+            p.setActive(i % 2 == 0);
+            p.setCreatedAt(base.plus(i, ChronoUnit.DAYS).toEpochMilli());
+        }
+        return players;
+    }
+
+    private String backendName() {
+        return getClass().getSimpleName().replace("StorageStressTest", "");
+    }
+
+    private static int[] parseSizes(String csv) {
+        String[] parts = csv.split(",");
+        int[] out = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) out[i] = Integer.parseInt(parts[i].trim());
+        return out;
+    }
+
+    private static double msD(long nanos) {
+        return nanos / 1_000_000.0;
+    }
+
+    private static double median(List<Double> values) {
+        List<Double> s = new ArrayList<>(values);
+        Collections.sort(s);
+        int n = s.size();
+        if (n == 0) return 0.0;
+        return (n % 2 == 1) ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2.0;
+    }
+
+    private static final Set<String> OPS_METRICS = new HashSet<>(Arrays.asList(
+        "insert.bulk", "find.byId", "save.single", "update.bulk", "delete", "concurrent.rw"));
+
+    private static String unitFor(String metric) {
+        if (OPS_METRICS.contains(metric)) return "ops/s";
+        if (metric.startsWith("mem."))    return "MB";
+        return "ms";
+    }
+
+    /** Rough used-heap sample (a GC hint precedes it; treat as indicative, not exact). */
+    private static long usedMemoryBytes() {
+        System.gc();
+        Runtime rt = Runtime.getRuntime();
+        return rt.totalMemory() - rt.freeMemory();
+    }
+
+    private static void writeCsv(String backend, List<String[]> rows) {
+        File dir = new File("build/benchmarks");
+        if (!dir.exists() && !dir.mkdirs()) {
+            report("[benchmark] could not create %s; skipping CSV export", dir.getPath());
+            return;
+        }
+        File out = new File(dir, backend + ".csv");
+        try (PrintWriter w = new PrintWriter(out, "UTF-8")) {
+            for (String[] row : rows) w.println(String.join(",", row));
+            report("[benchmark] wrote %s", out.getPath());
+        } catch (IOException e) {
+            report("[benchmark] CSV export failed: %s", e.getMessage());
+        }
     }
 
     private static final class RangeScenario {

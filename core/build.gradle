@@ -15,6 +15,17 @@ test {
         if (project.hasProperty('skipStress')) {
             excludeTags 'stress'
         }
+        // The @Tag("benchmark") micro-benchmark suite is opt-in (it spins up many storages
+        // across sizes x iterations). Excluded from every normal run unless -PrunBenchmark.
+        if (!project.hasProperty('runBenchmark')) {
+            excludeTags 'benchmark'
+        }
+    }
+
+    // Forward -Dbench.* benchmark tunables (sizes, iterations, warmups, concurrency) from the
+    // Gradle JVM to the test JVM, so they can be set on the command line.
+    System.properties.each { k, v ->
+        if (k.toString().startsWith('bench.')) systemProperty(k.toString(), v.toString())
     }
 
     // ---- Storage log level (controls StorageLogConfig.defaults()) --------------------
