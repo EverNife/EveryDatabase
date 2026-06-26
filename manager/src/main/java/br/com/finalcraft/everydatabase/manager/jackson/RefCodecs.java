@@ -1,5 +1,6 @@
 package br.com.finalcraft.everydatabase.manager.jackson;
 
+import br.com.finalcraft.everydatabase.codec.JacksonConfig;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,9 +17,10 @@ public final class RefCodecs {
     private RefCodecs() {
     }
 
-    /** A fresh compact {@code ObjectMapper} with a {@link RefModule} bound to {@code registry}. */
+    /** A fresh {@code ObjectMapper} with the EveryDatabase default profile
+     *  ({@link JacksonConfig#storageSafe}) plus a {@link RefModule} bound to {@code registry}. */
     public static ObjectMapper newMapper(RefRegistry registry) {
-        return new ObjectMapper().registerModule(new RefModule(registry));
+        return JacksonConfig.storageSafe(new ObjectMapper()).registerModule(new RefModule(registry));
     }
 
     /**

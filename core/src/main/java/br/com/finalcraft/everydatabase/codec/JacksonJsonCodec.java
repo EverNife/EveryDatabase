@@ -20,14 +20,13 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
  *
  * @param <V> the entity type
  */
-public final class JacksonJsonCodec<V> implements Codec<V> {
+public final class JacksonJsonCodec<V> implements Codec<V>, ObjectMapperAware {
 
-    private static final ObjectMapper COMPACT_MAPPER = JsonMapper.builder()
-        .build();
+    private static final ObjectMapper STORAGE_SAFE_MAPPER =
+        JacksonConfig.storageSafe(new JsonMapper());
 
-    private static final ObjectMapper PRETTY_MAPPER = JsonMapper.builder()
-        .enable(SerializationFeature.INDENT_OUTPUT)
-        .build();
+    private static final ObjectMapper STORAGE_SAFE_PRETTY_MAPPER =
+        JacksonConfig.storageSafe(new JsonMapper()).enable(SerializationFeature.INDENT_OUTPUT);
 
     private final ObjectMapper mapper;
     private final Class<V> type;
@@ -37,7 +36,7 @@ public final class JacksonJsonCodec<V> implements Codec<V> {
      * {@link ObjectMapper}.
      */
     public JacksonJsonCodec(Class<V> type) {
-        this(type, COMPACT_MAPPER);
+        this(type, STORAGE_SAFE_MAPPER);
     }
 
     /**
@@ -57,7 +56,7 @@ public final class JacksonJsonCodec<V> implements Codec<V> {
      * payload as-is, whitespace included.
      */
     public static <V> JacksonJsonCodec<V> pretty(Class<V> type) {
-        return new JacksonJsonCodec<>(type, PRETTY_MAPPER);
+        return new JacksonJsonCodec<>(type, STORAGE_SAFE_PRETTY_MAPPER);
     }
 
     @Override
@@ -81,6 +80,15 @@ public final class JacksonJsonCodec<V> implements Codec<V> {
     @Override
     public String contentType() {
         return "application/json";
+    }
+
+    /**
+     * Exposes the underlying mapper so index/tree consumers can serialise entities
+     * with the exact same configuration this codec persists them with.
+     */
+    @Override
+    public ObjectMapper objectMapper() {
+        return mapper;
     }
 
 }

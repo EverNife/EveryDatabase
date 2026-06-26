@@ -2,7 +2,7 @@
 # Project version - single source of truth. Consumed by the root build.gradle
 # (every module's `version`), stamped into the READMEs by `stampDocsVersions`, and
 # checked by `verifyDocsVersions` (wired into `check`).
-everydatabase = "1.0.3"
+everydatabase = "1.1.0"
 
 jabel = "0.4.2"
 # HikariCP 4.x is the last line built for Java 8 (5.x is Java 11 bytecode).
@@ -36,6 +36,10 @@ mongodb-driver-sync = { module = "org.mongodb:mongodb-driver-sync", version.ref 
 h2 = { module = "com.h2database:h2", version.ref = "h2" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+# Datatype modules registered into the default codec mappers by JacksonConfig (java.time + Optional).
+# Same jackson version line; both are Java 8 compatible.
+jackson-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }
+jackson-jdk8 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jdk8", version.ref = "jackson" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j-simple" }
 lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }

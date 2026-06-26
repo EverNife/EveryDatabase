@@ -81,10 +81,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.3'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.1.0'
 }
 ```
 
@@ -92,13 +92,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.0.3') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.1.0') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -118,7 +118,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.0.3</version>
+  <version>1.1.0</version>
 </dependency>
 ```
 
@@ -243,6 +243,8 @@ Storage storage = Storages.createMongo(new MongoConfig("mongodb://localhost:2701
 You discover them with `instanceof`, so the compiler stops you from using transactions on a backend that doesn't support them.
 
 > **Codec tip:** `new JacksonJsonCodec<>(Type.class)` emits **compact** JSON (smallest payload — what you want in a database). Use `JacksonJsonCodec.pretty(Type.class)` for indented, human-readable output — pairs nicely with `LocalFileStorage` when you want to read the files by eye.
+
+> **Default mapper (`JacksonConfig`):** the built-in codecs come batteries-included — the `java.time` (`Instant`, `LocalDate`, `Duration`, …) and `Optional` modules are registered, dates serialise as **ISO-8601** text (not numeric epochs), map entries are emitted in **canonical key order** (deterministic, diff-friendly bytes), and unknown properties are **tolerated** on read so a field removed in newer code doesn't break old stored data. Need a custom `ObjectMapper`? Pass it to `new JacksonJsonCodec<>(Type.class, mapper)`, or apply a profile to your own mapper with `JacksonConfig.storageSafe(mapper)` (the default) / `JacksonConfig.compact(mapper)` (identical to `storageSafe` but **drops null/absent** properties, via `NON_ABSENT` — same ISO dates and ordering, so the two are fully interchange-compatible). Every profile shares one frozen *read* contract, so any profile reads what any other wrote.
 
 > **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every supported backend (no quoting or escaping ever needed).
 
@@ -683,8 +685,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.3'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 ```
 
 ```java

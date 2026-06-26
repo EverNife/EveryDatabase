@@ -45,11 +45,15 @@ public final class EveryDatabaseDependencies {
     //  enumerated explicitly, each stamped with its catalog-sourced version.
     // =================================================================================
 
-    /** Jackson JSON stack: required by {@code JacksonJsonCodec} (and by the YAML codec, which builds on it). */
+    /** Jackson JSON stack: required by {@code JacksonJsonCodec} (and by the YAML codec, which builds on it).
+     *  Includes the datatype modules ({@code jsr310} for {@code java.time}, {@code jdk8} for {@code Optional})
+     *  that {@code JacksonConfig} registers into the default codec mappers. */
     private static final String[] JACKSON_JSON_STACK = {
             "com.fasterxml.jackson.core:jackson-core:" + DependencyVersions.JACKSON,
             "com.fasterxml.jackson.core:jackson-annotations:" + DependencyVersions.JACKSON,
             "com.fasterxml.jackson.core:jackson-databind:" + DependencyVersions.JACKSON,
+            "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:" + DependencyVersions.JACKSON,
+            "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:" + DependencyVersions.JACKSON,
     };
 
     /** YAML additions on top of {@link #JACKSON_JSON_STACK}: required by {@code JacksonYamlCodec}. */

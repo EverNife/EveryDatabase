@@ -64,10 +64,11 @@ class LibbySmokeTest {
 
         EveryDatabaseDependencies.loadAll(manager);
 
-        // The 14-jar flat tree of everydatabase-core: the 12 backend jars plus the
+        // The 16-jar flat tree of everydatabase-core: the 14 backend jars plus the
         // two JDBC drivers, which ship by default in every distribution flavor.
         List<String> expected = Arrays.asList(
             "jackson-core", "jackson-annotations", "jackson-databind",
+            "jackson-datatype-jsr310", "jackson-datatype-jdk8",
             "jackson-dataformat-yaml", "snakeyaml",
             "HikariCP", "slf4j-api",
             "h2",
@@ -89,6 +90,6 @@ class LibbySmokeTest {
         assertFalse(manager.loaded.contains("HikariCP"), "the failing artifact is not loaded");
         assertTrue(manager.loaded.contains("h2"), "other artifacts still load");
         assertTrue(manager.loaded.contains("jackson-databind"), "other artifacts still load");
-        assertEquals(13, manager.loaded.size(), "all artifacts except the failing one");
+        assertEquals(15, manager.loaded.size(), "all artifacts except the failing one");
     }
 }

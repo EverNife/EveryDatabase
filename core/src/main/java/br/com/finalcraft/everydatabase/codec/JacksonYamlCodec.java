@@ -18,9 +18,9 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
  *
  * @param <V> the entity type
  */
-public final class JacksonYamlCodec<V> implements Codec<V> {
+public final class JacksonYamlCodec<V> implements Codec<V>, ObjectMapperAware {
 
-    private static final ObjectMapper DEFAULT_MAPPER = YAMLMapper.builder().build();
+    private static final ObjectMapper DEFAULT_MAPPER = JacksonConfig.storageSafe(new YAMLMapper());
 
     private final ObjectMapper mapper;
     private final Class<V>     type;
@@ -68,5 +68,14 @@ public final class JacksonYamlCodec<V> implements Codec<V> {
     @Override
     public String fileExtension() {
         return "yml";
+    }
+
+    /**
+     * Exposes the underlying mapper so index/tree consumers can serialise entities
+     * with the exact same configuration this codec persists them with.
+     */
+    @Override
+    public ObjectMapper objectMapper() {
+        return mapper;
     }
 }

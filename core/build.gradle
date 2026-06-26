@@ -63,6 +63,10 @@ dependencies {
 
     // Internal machinery - consumers never compile against these.
     implementation libs.jackson.yaml   // YAMLMapper is used only inside JacksonYamlCodec
+    // Datatype modules registered by JacksonConfig into the default codec mappers.
+    // Only referenced inside JacksonConfig bodies (no public signature), so implementation, not api.
+    implementation libs.jackson.jsr310 // java.time support (Instant, LocalDate, Duration, ...)
+    implementation libs.jackson.jdk8   // Optional / OptionalInt / ... support
     implementation libs.hikaricp       // pooling is an implementation detail of SqlStorage
 
     // Pure JDBC drivers, discovered via DriverManager - no compile-time references anywhere.
