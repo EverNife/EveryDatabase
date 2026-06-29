@@ -143,14 +143,16 @@ public final class CacheSync implements AutoCloseable {
      * feed or polling: every bound manager publishes a signal on each local write, and the sync
      * subscribes to the transport to invalidate/evict on signals from other instances. Takes
      * <b>precedence</b> over a native change feed and over polling, and works for any backend (including
-     * feedless ones like MySQL/MariaDB). Only supported in {@link #attach(Storage)} mode.
+     * feedless ones like MySQL/MariaDB).
      *
      * <p>Works in both {@link #attach(Storage)} and {@link #auto()} mode: a single shared transport is
      * the push source for <b>every</b> bound manager (the transport is backend-agnostic; events route by
-     * collection), so it covers managers spread across different backends with one channel.
+     * collection - so collection names must be unique across all managers bound to one sync).
      *
      * <p>The transport's lifecycle is the caller's: {@link #close()} stops the subscriptions and clears
-     * the publish hooks, but does not close the transport (it may be shared by several syncs).
+     * the publish hooks, but does not close the transport. With the {@link #transportFallback(boolean)
+     * fallback} enabled, prefer <b>one transport per {@code CacheSync}</b>: a transport drives a single
+     * connectivity listener, so sharing one across syncs would leave the earlier syncs' fallback inactive.
      */
     public CacheSync via(CacheSyncTransport transport) {
         this.transport = transport;
@@ -166,6 +168,10 @@ public final class CacheSync implements AutoCloseable {
      * <p>Only effective for transports that report connectivity via
      * {@link CacheSyncTransport#onConnectionStateChanged}; for those that don't, the standby poller is
      * created but never activated.
+     *
+     * <p>The standby poller inherits {@code PollingCacheSync}'s first-observation gap on each reconnect (a
+     * key changed in the brief window straddling a disconnect may be missed); pair the managers with a
+     * {@code CachePolicy.ttl(...)} as the self-heal.
      */
     public CacheSync transportFallback(boolean enabled) {
         this.transportFallback = enabled;
@@ -337,11 +343,21 @@ public final class CacheSync implements AutoCloseable {
         }
     }
 
-    /** Indexes a group's bindings by collection name, resolving each one's key parser. */
+    /**
+     * Indexes a group's bindings by collection name, resolving each one's key parser. Rejects a
+     * duplicate collection: events route purely by collection name, so two managers under the same
+     * name would route ambiguously (and one would silently never be invalidated) - fail fast at start.
+     */
     private static Map<String, Bound<?>> buildByCollection(List<Binding<?>> groupBindings) {
         Map<String, Bound<?>> byCollection = new HashMap<>();
         for (Binding<?> binding : groupBindings) {
-            byCollection.put(binding.manager.collection(), binding.resolve());
+            String collection = binding.manager.collection();
+            Bound<?> previous = byCollection.putIfAbsent(collection, binding.resolve());
+            if (previous != null) {
+                throw new IllegalStateException(
+                    "two bound managers share collection '" + collection + "'; cache-sync routes purely "
+                    + "by collection name, so it must be unique across all managers bound to one CacheSync");
+            }
         }
         return byCollection;
     }

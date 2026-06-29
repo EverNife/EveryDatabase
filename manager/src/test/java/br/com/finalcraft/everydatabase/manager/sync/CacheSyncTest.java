@@ -354,6 +354,25 @@ class CacheSyncTest {
     }
 
     @Test
+    void start_rejects_two_managers_sharing_a_collection_name() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry reg1 = new RefRegistry();
+        RefRegistry reg2 = new RefRegistry();
+        // Two managers under the SAME collection: a transport routes purely by collection, so this is
+        // ambiguous and must be rejected at start() rather than silently dropping one.
+        CachingManager<UUID, Guild> a = new CachingManager<>(guildDescriptor(reg1, "guilds"), storage, CachePolicy.always(), reg1);
+        CachingManager<UUID, Guild> b = new CachingManager<>(guildDescriptor(reg2, "guilds"), storage, CachePolicy.always(), reg2);
+
+        FakeTransport transport = new FakeTransport();
+        CacheSync sync = CacheSync.attach(storage).via(transport).bind(a).bind(b);
+        IllegalStateException ex = assertThrows(IllegalStateException.class, sync::start);
+        assertTrue(ex.getMessage().contains("collection"), "error names the colliding collection");
+
+        storage.close().join();
+    }
+
+    @Test
     void closing_the_sync_stops_publishing() {
         InMemoryStorage storage = Storages.createInMemory();
         storage.init().join();

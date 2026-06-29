@@ -3,8 +3,10 @@ package br.com.finalcraft.everydatabase.manager.sync.jedis;
 import redis.clients.jedis.JedisPoolConfig;
 
 /**
- * Connection settings for a {@link JedisCacheSyncTransport}. Immutable; the same settings work
- * unchanged against Redis and Valkey (identical RESP wire protocol).
+ * Connection settings for a {@link JedisCacheSyncTransport}. Effectively immutable - the only mutable
+ * field is the caller-supplied {@link Builder#poolConfig(JedisPoolConfig) poolConfig}, which is held by
+ * reference and must not be mutated after {@code build()}. The same settings work unchanged against Redis
+ * and Valkey (identical RESP wire protocol).
  *
  * <p>The minimal form needs only a host and port - everything else has a sensible default:
  * <pre>{@code

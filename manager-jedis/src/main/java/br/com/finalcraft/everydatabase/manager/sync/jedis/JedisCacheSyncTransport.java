@@ -113,6 +113,10 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
 
     @Override
     public ChangeSubscription subscribe(ChangeListener listener) {
+        if (closed) {
+            // Fail fast instead of returning a live-looking subscription that never delivers.
+            throw new IllegalStateException("transport is closed");
+        }
         ChangeSubscription subscription = feed.subscribe(listener);
         ensureSubscriberStarted();
         return subscription;
@@ -121,6 +125,17 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
     @Override
     public void onConnectionStateChanged(Consumer<Boolean> listener) {
         this.connectionListener = listener;
+        // Deliver the current known state immediately so a late/replacement listener (a second or a
+        // restarted CacheSync registering on an already-settled transport) learns up/down without
+        // waiting for the next transition - otherwise its fallback poller could never activate.
+        Boolean current = lastConnected;
+        if (listener != null && current != null) {
+            try {
+                listener.accept(current);
+            } catch (Throwable ignored) {
+                // a connection listener must never break delivery
+            }
+        }
     }
 
     /** Lazily starts the SUBSCRIBE listener thread on first subscribe. Idempotent; a no-op once closed. */
@@ -139,8 +154,12 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         while (running) {
             Jedis jedis = null;
             try {
-                jedis = new Jedis(hostAndPort, clientConfig);   // connects + auth/select/ssl from the config
-                subscriberConn = jedis;                          // publish so stop() can close it during subscribe
+                // new Jedis(hostAndPort, clientConfig) connects + authenticates EAGERLY in the
+                // constructor (unlike the bare new Jedis(host,port)). A hung handshake here is not
+                // force-closable by stop() yet (subscriberConn is still null), but it is bounded by the
+                // connect/socket timeouts (default 2000ms each), after which it throws and the loop exits.
+                jedis = new Jedis(hostAndPort, clientConfig);
+                subscriberConn = jedis;   // visible now, so stop() can close it during the blocking subscribe
                 CountDownLatch latch = new CountDownLatch(1);
                 subscribedLatch = latch;
 
