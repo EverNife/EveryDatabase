@@ -17,6 +17,7 @@ import redis.clients.jedis.JedisPubSub;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
 /**
@@ -47,6 +48,11 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
     private final Consumer<Throwable> errorHandler;   // nullable
     private volatile Consumer<Boolean> connectionListener;   // nullable; notified on connect/disconnect
     private volatile Boolean lastConnected;                  // last reported state (dedupe transitions)
+
+    // Observability counters (always-on, ~free).
+    private final LongAdder publishCount = new LongAdder();
+    private final LongAdder publishFailureCount = new LongAdder();
+    private final LongAdder reconnectCount = new LongAdder();
 
     private volatile boolean running = false;
     private volatile boolean closed = false;   // terminal: once closed, the subscriber is never resurrected
@@ -100,13 +106,35 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         return originId;
     }
 
+    /** Number of signals successfully published. */
+    public long publishCount() {
+        return publishCount.sum();
+    }
+
+    /** Number of publishes that failed (swallowed - the cache self-heals via TTL). */
+    public long publishFailureCount() {
+        return publishFailureCount.sum();
+    }
+
+    /** Number of subscriber reconnect attempts (after a dropped connection or a server-side unsubscribe). */
+    public long reconnectCount() {
+        return reconnectCount.sum();
+    }
+
+    /** Whether the subscriber is currently connected (best-effort; an unknown/initial state reads false). */
+    public boolean connected() {
+        return Boolean.TRUE.equals(lastConnected);
+    }
+
     @Override
     public void publish(ChangeEvent event) {
         String payload = ChangePayload.encode(mapper, event);
         try (Jedis jedis = publishPool.getResource()) {
             jedis.publish(channel, payload);
+            publishCount.increment();
         } catch (Exception e) {
             // A failed publish must never break the write it follows; cache freshness self-heals.
+            publishFailureCount.increment();
             reportError(e);
         }
     }
@@ -183,6 +211,7 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                     // this cannot spin us in a tight, zero-delay reconnect loop (the catch path below
                     // already backs off on a thrown drop; this covers the exception-free exit).
                     setConnected(false);
+                    reconnectCount.increment();
                     reportError(new IllegalStateException(
                             "Jedis SUBSCRIBE returned unexpectedly (server unsubscribe?); reconnecting"));
                     sleepBeforeReconnect();
@@ -192,6 +221,7 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                     return;   // expected: the transport is closing
                 }
                 setConnected(false);
+                reconnectCount.increment();
                 reportError(e);
                 sleepBeforeReconnect();
             } finally {

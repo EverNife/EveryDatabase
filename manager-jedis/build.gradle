@@ -42,6 +42,14 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // Keep logging/observability ON during tests so runs emit proper logs (mirrors :core).
+    systemProperty 'everydatabase.log.level',                  'info'
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel',   'warn'
+    systemProperty 'org.slf4j.simpleLogger.log.everydatabase', 'info'
+    systemProperty 'org.slf4j.simpleLogger.showDateTime',      'true'
+    systemProperty 'org.slf4j.simpleLogger.dateTimeFormat',    'HH:mm:ss.SSS'
+    systemProperty 'org.slf4j.simpleLogger.showThreadName',    'false'
+    systemProperty 'org.slf4j.simpleLogger.logFile',           'System.out'
 }
 
 publishing {

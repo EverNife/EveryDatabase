@@ -5,11 +5,13 @@ import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.manager.cache.*;
+import br.com.finalcraft.everydatabase.manager.observ.CacheStats;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 
 /**
@@ -70,6 +72,14 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Optional hook fired after a successful local write; used by {@code CacheSync.via(...)} to publish a signal. */
     private volatile LocalWriteListener<K> localWriteListener;
 
+    /** Always-on, ~free metrics counters (read via {@link #stats()}); striped to avoid hot-path contention. */
+    private final LongAdder statHits = new LongAdder();
+    private final LongAdder statMisses = new LongAdder();
+    private final LongAdder statLoadSuccess = new LongAdder();
+    private final LongAdder statLoadFailure = new LongAdder();
+    private final LongAdder statInvalidations = new LongAdder();
+    private final LongAdder statEvictions = new LongAdder();
+
     /** Creates a manager with the given options and registers it in {@code registry}. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options, RefRegistry registry) {
         this.repository = storage.repository(descriptor);
@@ -105,33 +115,50 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     @Override
     public CacheEntry<V> peekCell(K key, CachePolicy policy) {
         CacheEntry<V> cell = store.get(key);
-        return serveable(cell, policy) ? cell : null;
+        if (serveable(cell, policy)) {
+            statHits.increment();
+            return cell;
+        }
+        statMisses.increment();
+        return null;
     }
 
     @Override
     public CompletableFuture<CacheEntry<V>> resolveCell(K key, CachePolicy policy) {
         CacheEntry<V> existing = store.get(key);
         if (serveable(existing, policy)) {
+            statHits.increment();
             return CompletableFuture.completedFuture(existing);
         }
+        statMisses.increment();
         if (!policy.cacheable()) {
             // True bypass: load without caching; hand back a throwaway, unshared cell.
             return repository.find(key)
-                    .thenApply(opt -> opt.isPresent() ? new CacheEntry<>(opt.get()) : null);
+                    .whenComplete((opt, ex) -> { if (ex != null) statLoadFailure.increment(); })
+                    .thenApply(opt -> {
+                        if (!opt.isPresent()) {
+                            return null;
+                        }
+                        statLoadSuccess.increment();
+                        return new CacheEntry<>(opt.get());
+                    });
         }
         // A cold miss has no cell yet; anything else (stale, or a tombstone) is a reload.
         final boolean coldMiss = (existing == null);
         final long stamp = stampGen.incrementAndGet();
-        return repository.find(key).thenApply(opt -> {
-            if (!opt.isPresent()) {
-                return null;
-            }
-            V value = opt.get();
-            CacheEntry<V> cell = coldMiss
-                    ? store.installColdMiss(key, value, stamp)   // keep-first, but loses to a newer delete
-                    : updateInPlace(key, value, stamp);          // stamp-guarded (resurrects an older tombstone)
-            return cell.isDeleted() ? null : cell;               // a newer delete won -> treat as absent
-        });
+        return repository.find(key)
+                .whenComplete((opt, ex) -> { if (ex != null) statLoadFailure.increment(); })
+                .thenApply(opt -> {
+                    if (!opt.isPresent()) {
+                        return null;
+                    }
+                    statLoadSuccess.increment();
+                    V value = opt.get();
+                    CacheEntry<V> cell = coldMiss
+                            ? store.installColdMiss(key, value, stamp)   // keep-first, but loses to a newer delete
+                            : updateInPlace(key, value, stamp);          // stamp-guarded (resurrects an older tombstone)
+                    return cell.isDeleted() ? null : cell;               // a newer delete won -> treat as absent
+                });
     }
 
     /**
@@ -178,8 +205,10 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         for (K key : keys) {
             CacheEntry<V> entry = store.get(key);
             if (serveable(entry, policy)) {
+                statHits.increment();
                 hits.put(key, entry.getValue());
             } else {
+                statMisses.increment();
                 misses.add(key);
             }
         }
@@ -187,9 +216,12 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
             return CompletableFuture.completedFuture(new ArrayList<>(hits.values()));
         }
         final boolean cacheable = policy.cacheable();
-        return repository.findMany(misses).thenApply(loaded -> {
+        return repository.findMany(misses)
+                .whenComplete((loaded, ex) -> { if (ex != null) statLoadFailure.increment(); })
+                .thenApply(loaded -> {
             List<V> result = new ArrayList<>(hits.values());
             for (V value : loaded) {
+                statLoadSuccess.increment();
                 if (cacheable) {
                     // Update the cell in place (refreshes a stale entry; creates one if absent).
                     result.add(updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet()).getValue());
@@ -261,6 +293,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         return repository.delete(key).whenComplete((existed, ex) -> {
             if (ex == null) {
                 store.tombstone(key, stamp);
+                statEvictions.increment();
                 fireLocalWrite(ChangeOp.DELETE, key);
             } else {
                 store.remove(key);
@@ -431,17 +464,20 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
 
     /** Marks a cached entry stale (atomically, under the store lock): the next read reloads it. */
     public void invalidate(K key) {
+        statInvalidations.increment();
         store.markStale(key);
     }
 
     /** Removes a cached entry outright. */
     public void evict(K key) {
+        statEvictions.increment();
         store.remove(key);
     }
 
     /** Marks every cached entry stale (e.g. after a bulk external change). */
     public void invalidateAll() {
         for (CacheEntry<V> entry : store.valuesSnapshot()) {
+            statInvalidations.increment();
             entry.markStale();
         }
     }
@@ -500,6 +536,27 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Current number of <b>live</b> cached entries (tombstones from deletes are not counted). */
     public int cachedSize() {
         return store.liveCount();
+    }
+
+    /**
+     * An immutable snapshot of this manager's metrics (hits/misses/loads/invalidations/evictions and the
+     * live size). Counting is always on and ~free ({@link LongAdder}); only reading allocates. Counts
+     * manager-mediated reads (resolve/peek/getAll) - a memoized {@code Ref}'s lock-free cell reads are
+     * not counted.
+     */
+    public CacheStats stats() {
+        return new CacheStats(statHits.sum(), statMisses.sum(), statLoadSuccess.sum(),
+                statLoadFailure.sum(), statInvalidations.sum(), statEvictions.sum(), cachedSize());
+    }
+
+    /** Resets the metrics counters to zero (best-effort; for tests or windowed reporting). */
+    public void resetStats() {
+        statHits.reset();
+        statMisses.reset();
+        statLoadSuccess.reset();
+        statLoadFailure.reset();
+        statInvalidations.reset();
+        statEvictions.reset();
     }
 
     /**

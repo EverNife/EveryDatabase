@@ -6,6 +6,8 @@ import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.manager.CachingManager;
 import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncMode;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncObserver;
 import br.com.finalcraft.everydatabase.manager.sync.CacheSync;
 import br.com.finalcraft.everydatabase.manager.testdata.Quest;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
@@ -48,6 +50,13 @@ public abstract class AbstractJedisCacheSyncTest {
     /** Human name of the server (for skip messages), e.g. "Valkey"/"Redis". */
     protected abstract String serverName();
 
+    /** Logs transport connectivity/mode changes during tests, so runs surface cache-sync events. */
+    private static final CacheSyncObserver LOGGING_OBSERVER = new CacheSyncObserver() {
+        @Override public void onTransportConnected() { System.out.println("[cache-sync] transport connected (push)"); }
+        @Override public void onTransportDisconnected() { System.out.println("[cache-sync] transport disconnected -> fallback polling"); }
+        @Override public void onModeChange(CacheSyncMode mode) { System.out.println("[cache-sync] mode -> " + mode); }
+    };
+
     /** Self-skip when the server is unreachable, so the build never fails just because it is down. */
     protected void assumeServerAvailable() {
         Assumptions.assumeTrue(reachable(port()),
@@ -86,8 +95,8 @@ public abstract class AbstractJedisCacheSyncTest {
 
         writerTransport = JedisCacheSyncTransport.connect(config());
         readerTransport = JedisCacheSyncTransport.connect(config());
-        writerSync = CacheSync.attach(writerStorage).via(writerTransport).bind(writer).start();
-        readerSync = CacheSync.attach(readerStorage).via(readerTransport).bind(reader).start();
+        writerSync = CacheSync.attach(writerStorage).via(writerTransport).observe(LOGGING_OBSERVER).bind(writer).start();
+        readerSync = CacheSync.attach(readerStorage).via(readerTransport).observe(LOGGING_OBSERVER).bind(reader).start();
     }
 
     @AfterEach
@@ -124,6 +133,11 @@ public abstract class AbstractJedisCacheSyncTest {
 
         assertTrue(reader.resolve(id).join().orElseThrow(AssertionError::new).getTitle().startsWith("v-"),
                 "reader reloaded the remote update");
+
+        // Observability: the writer published signals and the reader applied at least one.
+        assertTrue(writerTransport.publishCount() > 0, "writer published cache-sync signals");
+        assertTrue(readerSync.stats().signalsApplied() > 0, "reader applied at least one signal");
+        assertTrue(readerTransport.connected(), "reader transport reports connected");
     }
 
     @Test

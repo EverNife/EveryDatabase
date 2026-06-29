@@ -5,6 +5,9 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
 import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 import br.com.finalcraft.everydatabase.manager.CachingManager;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncMode;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncObserver;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncStats;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -13,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -84,6 +88,17 @@ public final class CacheSync implements AutoCloseable {
     private volatile Consumer<Throwable> errorHandler;
     private volatile CacheSyncTransport transport;
     private volatile boolean transportFallback = true;
+
+    // Observability (always-on, ~free): operational state + routing counters, read via stats().
+    private volatile CacheSyncObserver observer;
+    private volatile boolean transportConnected = false;
+    private volatile long fallbackEnteredAt = -1L;        // wall-clock when fallback began, -1 when not in fallback
+    private volatile long accumulatedFallbackMillis = 0L;
+    private final LongAdder signalsReceived = new LongAdder();
+    private final LongAdder signalsApplied = new LongAdder();
+    private final LongAdder signalsSkippedOwnOrigin = new LongAdder();
+    private final LongAdder signalsUnmapped = new LongAdder();
+    private final LongAdder parseFailures = new LongAdder();
 
     private boolean started;
     private final List<ChangeSubscription> subscriptions = new ArrayList<>();
@@ -178,6 +193,15 @@ public final class CacheSync implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Registers an optional {@link CacheSyncObserver} notified of transport connect/disconnect and mode
+     * changes (e.g. to log "transport down, falling back to polling"). At most one; the latest wins.
+     */
+    public CacheSync observe(CacheSyncObserver observer) {
+        this.observer = observer;
+        return this;
+    }
+
     /** Binds {@code manager} using the built-in parser for its key type (see {@link KeyParsers}). */
     public <K, V> CacheSync bind(CachingManager<K, V> manager) {
         return bind(manager, null);
@@ -251,6 +275,48 @@ public final class CacheSync implements AutoCloseable {
     }
 
     /**
+     * The mechanism currently in use - the highest-value operational signal. With a transport, reports
+     * {@link CacheSyncMode#TRANSPORT_PUSH} while connected and {@link CacheSyncMode#TRANSPORT_FALLBACK_POLL}
+     * while disconnected; otherwise {@code FEED}/{@code POLL}; {@code IDLE} before {@link #start()}.
+     */
+    public CacheSyncMode mode() {
+        synchronized (lifecycle) {
+            if (!started) {
+                return CacheSyncMode.IDLE;
+            }
+            if (transport != null) {
+                return transportConnected ? CacheSyncMode.TRANSPORT_PUSH : CacheSyncMode.TRANSPORT_FALLBACK_POLL;
+            }
+            if (!subscriptions.isEmpty()) {
+                return CacheSyncMode.FEED;
+            }
+            if (!pollers.isEmpty()) {
+                return CacheSyncMode.POLL;
+            }
+            return CacheSyncMode.IDLE;
+        }
+    }
+
+    /** Whether the transport is currently connected (only meaningful when a transport is in use). */
+    public boolean transportConnected() {
+        return transportConnected;
+    }
+
+    /** Total wall-clock time the transport has spent disconnected (the standby poller covering for it). */
+    public long timeInFallbackMillis() {
+        long acc = accumulatedFallbackMillis;
+        long entered = fallbackEnteredAt;
+        return entered >= 0 ? acc + (System.currentTimeMillis() - entered) : acc;
+    }
+
+    /** An immutable snapshot of the sync's mode, connectivity, fallback time, and routing counters. */
+    public CacheSyncStats stats() {
+        return new CacheSyncStats(mode(), transportConnected, timeInFallbackMillis(),
+                signalsReceived.sum(), signalsApplied.sum(), signalsSkippedOwnOrigin.sum(),
+                signalsUnmapped.sum(), parseFailures.sum());
+    }
+
+    /**
      * Runs one poll cycle on every internal poller (the non-push groups), synchronously. Push groups
      * are unaffected. Exposed for deterministic tests; production relies on the scheduled interval.
      */
@@ -311,11 +377,38 @@ public final class CacheSync implements AutoCloseable {
             if (!started) {
                 return;   // the sync was closed; ignore late connectivity callbacks
             }
+            transportConnected = connected;
             if (connected) {
+                if (fallbackEnteredAt >= 0) {
+                    accumulatedFallbackMillis += System.currentTimeMillis() - fallbackEnteredAt;
+                    fallbackEnteredAt = -1L;
+                }
                 fallback.close();   // push restored: stop the safety-net polling (bindings/state are kept)
             } else {
+                if (fallbackEnteredAt < 0) {
+                    fallbackEnteredAt = System.currentTimeMillis();
+                }
                 fallback.start();   // push down: schedule the safety-net polling
             }
+            notifyObserver(connected);
+        }
+    }
+
+    /** Fires the observer (if any) on a connectivity transition; never lets it break delivery. */
+    private void notifyObserver(boolean connected) {
+        CacheSyncObserver obs = observer;
+        if (obs == null) {
+            return;
+        }
+        try {
+            if (connected) {
+                obs.onTransportConnected();
+            } else {
+                obs.onTransportDisconnected();
+            }
+            obs.onModeChange(mode());
+        } catch (RuntimeException ignored) {
+            // an observer must never break delivery
         }
     }
 
@@ -401,7 +494,7 @@ public final class CacheSync implements AutoCloseable {
             this.keyParser = keyParser;
         }
 
-        void apply(ChangeEvent event, Consumer<Throwable> errorHandler) {
+        boolean apply(ChangeEvent event, Consumer<Throwable> errorHandler) {
             K key;
             try {
                 key = keyParser.apply(event.key());
@@ -409,7 +502,7 @@ public final class CacheSync implements AutoCloseable {
                 if (errorHandler != null) {
                     errorHandler.accept(ex);
                 }
-                return; // unparseable key; skip rather than break the source delivery thread
+                return false; // unparseable key; skip rather than break the source delivery thread
             }
             switch (event.op()) {
                 case SAVE:
@@ -421,6 +514,7 @@ public final class CacheSync implements AutoCloseable {
                 default:
                     break;
             }
+            return true;
         }
     }
 
@@ -435,15 +529,23 @@ public final class CacheSync implements AutoCloseable {
         }
 
         void onChange(ChangeEvent event) {
+            signalsReceived.increment();
             if (!includeOwnOrigin) {
                 String origin = event.originId();
                 if (origin != null && !origin.isEmpty() && origin.equals(ownOrigin)) {
+                    signalsSkippedOwnOrigin.increment();
                     return; // our own write; this cache was already refreshed write-through
                 }
             }
             Bound<?> bound = byCollection.get(event.collection());
-            if (bound != null) {
-                bound.apply(event, errorHandler);
+            if (bound == null) {
+                signalsUnmapped.increment();
+                return;
+            }
+            if (bound.apply(event, errorHandler)) {
+                signalsApplied.increment();
+            } else {
+                parseFailures.increment();
             }
         }
     }

@@ -15,6 +15,9 @@ import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.manager.CachingManager;
 import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncMode;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncObserver;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncStats;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import org.junit.jupiter.api.Test;
@@ -24,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -439,6 +443,76 @@ class CacheSyncTest {
             cache.repository().delete(id).join();
             sync.pollOnce();
             assertTrue(cache.peek(id).isPresent(), "with fallback disabled, no polling runs");
+        }
+
+        storage.close().join();
+    }
+
+    // ------------------------------------------------------------------
+    //  Observability: mode / transport connectivity / routing counters
+    // ------------------------------------------------------------------
+
+    @Test
+    void mode_and_observer_track_transport_connectivity() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+
+        FakeTransport transport = new FakeTransport();
+        List<CacheSyncMode> modeChanges = new ArrayList<>();
+        AtomicInteger connected = new AtomicInteger();
+        AtomicInteger disconnected = new AtomicInteger();
+        CacheSyncObserver obs = new CacheSyncObserver() {
+            @Override public void onTransportConnected() { connected.incrementAndGet(); }
+            @Override public void onTransportDisconnected() { disconnected.incrementAndGet(); }
+            @Override public void onModeChange(CacheSyncMode mode) { modeChanges.add(mode); }
+        };
+
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).observe(obs).bind(cache).start()) {
+            transport.fireConnectivity(true);
+            assertEquals(CacheSyncMode.TRANSPORT_PUSH, sync.mode());
+            assertTrue(sync.transportConnected());
+            assertEquals(1, connected.get());
+
+            transport.fireConnectivity(false);
+            assertEquals(CacheSyncMode.TRANSPORT_FALLBACK_POLL, sync.mode());
+            assertFalse(sync.transportConnected());
+            assertEquals(1, disconnected.get());
+            assertTrue(sync.timeInFallbackMillis() >= 0);
+
+            transport.fireConnectivity(true);
+            assertEquals(CacheSyncMode.TRANSPORT_PUSH, sync.mode());
+            assertEquals(2, connected.get());
+            assertTrue(modeChanges.size() >= 3, "a mode change fired per connectivity transition");
+        }
+
+        storage.close().join();
+    }
+
+    @Test
+    void routing_counters_are_recorded_in_stats() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+
+        FakeTransport transport = new FakeTransport();
+        UUID id = UUID.randomUUID();
+        cache.saveAndCache(new Guild(id, "v")).join();
+
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).bind(cache).start()) {
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 1, "other"));        // applied
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 1, transport.originId())); // own -> skipped
+            transport.deliver(new ChangeEvent("other_coll", id.toString(), ChangeOp.SAVE, 1, "other"));    // unmapped
+            transport.deliver(new ChangeEvent("guilds", "not-a-uuid", ChangeOp.SAVE, 1, "other"));         // parse fail
+
+            CacheSyncStats s = sync.stats();
+            assertEquals(4, s.signalsReceived());
+            assertEquals(1, s.signalsApplied());
+            assertEquals(1, s.signalsSkippedOwnOrigin());
+            assertEquals(1, s.signalsUnmapped());
+            assertEquals(1, s.parseFailures());
         }
 
         storage.close().join();

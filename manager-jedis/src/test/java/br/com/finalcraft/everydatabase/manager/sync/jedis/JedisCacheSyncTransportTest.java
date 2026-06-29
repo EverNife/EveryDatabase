@@ -1,8 +1,10 @@
 package br.com.finalcraft.everydatabase.manager.sync.jedis;
 
+import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,6 +58,22 @@ class JedisCacheSyncTransportTest {
         assertEquals("cache-sync", renamed.username());
         assertEquals(3, renamed.database());
         assertEquals(2500, renamed.socketTimeoutMs());
+    }
+
+    @Test
+    void publish_to_an_unreachable_server_counts_a_failure_and_does_not_throw() {
+        // Nothing listening on this port: publish must swallow the failure, count it, and never throw.
+        JedisCacheSyncTransport transport = JedisCacheSyncTransport.connect(
+                JedisCacheSyncConfig.builder("localhost", 6390)
+                        .connectTimeoutMs(300).socketTimeoutMs(300).build());
+        try {
+            assertDoesNotThrow(() -> transport.publish(ChangeEvent.save("c", "k")));
+            assertEquals(1, transport.publishFailureCount());
+            assertEquals(0, transport.publishCount());
+            assertFalse(transport.connected());
+        } finally {
+            transport.close();
+        }
     }
 
     @Test
