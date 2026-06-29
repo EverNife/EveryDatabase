@@ -2,7 +2,7 @@
 # Project version - single source of truth. Consumed by the root build.gradle
 # (every module's `version`), stamped into the READMEs by `stampDocsVersions`, and
 # checked by `verifyDocsVersions` (wired into `check`).
-everydatabase = "1.0.4"
+everydatabase = "1.0.5"
 
 jabel = "0.4.2"
 # HikariCP 4.x is the last line built for Java 8 (5.x is Java 11 bytecode).
