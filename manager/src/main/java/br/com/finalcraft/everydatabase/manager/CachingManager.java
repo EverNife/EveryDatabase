@@ -402,19 +402,29 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      * {@code DELETE} on delete - so an external cache-sync transport can publish a change signal. Wired
      * by {@code CacheSync.via(...)}; pass {@code null} to clear it. The hook must not throw: a failure is
      * swallowed so it never breaks the write it follows.
+     *
+     * <p>Only one hook may be installed at a time: setting a non-null hook while one is already present
+     * throws, so a manager accidentally wired to two transports fails fast instead of silently
+     * publishing to only the last one. Clear it ({@code null}) before re-wiring.
      */
     public void setLocalWriteListener(LocalWriteListener<K> listener) {
+        if (listener != null && this.localWriteListener != null) {
+            throw new IllegalStateException(
+                "this manager already has a local-write listener (it is already wired to a CacheSync "
+                + "transport); close that CacheSync before wiring another");
+        }
         this.localWriteListener = listener;
     }
 
-    /** Fires the local-write hook if set, isolating any failure from the write path. */
+    /** Fires the local-write hook if set, isolating any failure (incl. {@link Error}) from the write path. */
     private void fireLocalWrite(ChangeOp op, K key) {
         LocalWriteListener<K> listener = localWriteListener;
         if (listener != null) {
             try {
                 listener.onWrite(op, key);
-            } catch (RuntimeException ignored) {
-                // a publish failure must never break the write it follows
+            } catch (Throwable ignored) {
+                // a publish failure must never break the write it follows (the write already succeeded;
+                // this runs inside whenComplete/handle, which would otherwise flip it to a failed future)
             }
         }
     }
