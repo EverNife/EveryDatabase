@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.manager;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.manager.cache.*;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 
@@ -66,6 +67,8 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     protected final AtomicLong stampGen = new AtomicLong();
     /** Dirty-tracking accessor for the entity type (write-back), or {@code null} when not trackable. */
     protected final DirtyAccessor dirtyAccessor;
+    /** Optional hook fired after a successful local write; used by {@code CacheSync.via(...)} to publish a signal. */
+    private volatile LocalWriteListener<K> localWriteListener;
 
     /** Creates a manager with the given options and registers it in {@code registry}. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options, RefRegistry registry) {
@@ -232,6 +235,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                 if (options.policy().cacheable()) {
                     updateInPlace(key, value, stamp);   // write-through: update the cell in place
                 }
+                fireLocalWrite(ChangeOp.SAVE, key);
             } else if (isOptimisticLock(ex)) {
                 store.remove(key);
             }
@@ -257,6 +261,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         return repository.delete(key).whenComplete((existed, ex) -> {
             if (ex == null) {
                 store.tombstone(key, stamp);
+                fireLocalWrite(ChangeOp.DELETE, key);
             } else {
                 store.remove(key);
             }
@@ -298,10 +303,13 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         }
         return repository.saveAll(entities).handle((ignored, batchError) -> {
             if (batchError == null) {
-                if (options.policy().cacheable()) {
-                    for (V value : entities) {
-                        updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet());
+                boolean cacheable = options.policy().cacheable();
+                for (V value : entities) {
+                    K savedKey = keyOf.apply(value);
+                    if (cacheable) {
+                        updateInPlace(savedKey, value, stampGen.incrementAndGet());
                     }
+                    fireLocalWrite(ChangeOp.SAVE, savedKey);
                 }
                 return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
             }
@@ -322,6 +330,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                 if (options.policy().cacheable()) {
                     updateInPlace(key, value, stamp);
                 }
+                fireLocalWrite(ChangeOp.SAVE, key);
                 return new KeyOutcome<>(key, KeyOutcome.Status.SAVED, null);
             }
             if (isOptimisticLock(error)) {
@@ -386,6 +395,28 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
             cause = cause.getCause();
         }
         return cause;
+    }
+
+    /**
+     * Sets a hook fired after each successful local write through this manager - {@code SAVE} on save,
+     * {@code DELETE} on delete - so an external cache-sync transport can publish a change signal. Wired
+     * by {@code CacheSync.via(...)}; pass {@code null} to clear it. The hook must not throw: a failure is
+     * swallowed so it never breaks the write it follows.
+     */
+    public void setLocalWriteListener(LocalWriteListener<K> listener) {
+        this.localWriteListener = listener;
+    }
+
+    /** Fires the local-write hook if set, isolating any failure from the write path. */
+    private void fireLocalWrite(ChangeOp op, K key) {
+        LocalWriteListener<K> listener = localWriteListener;
+        if (listener != null) {
+            try {
+                listener.onWrite(op, key);
+            } catch (RuntimeException ignored) {
+                // a publish failure must never break the write it follows
+            }
+        }
     }
 
     /** Marks a cached entry stale (atomically, under the store lock): the next read reloads it. */
@@ -493,5 +524,14 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
             cause = cause.getCause();
         }
         return false;
+    }
+
+    /**
+     * A hook invoked after a successful local write through this manager, so an external cache-sync
+     * transport can publish a change signal to other instances. Wired by {@code CacheSync.via(...)}.
+     */
+    @FunctionalInterface
+    public interface LocalWriteListener<K> {
+        void onWrite(ChangeOp op, K key);
     }
 }

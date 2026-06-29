@@ -79,6 +79,7 @@ public final class CacheSync implements AutoCloseable {
     private volatile Duration pollInterval;
     private volatile boolean includeOwnOrigin = false;
     private volatile Consumer<Throwable> errorHandler;
+    private volatile CacheSyncTransport transport;
 
     private boolean started;
     private final List<ChangeSubscription> subscriptions = new ArrayList<>();
@@ -133,6 +134,24 @@ public final class CacheSync implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Routes invalidation through an explicit pub/sub {@code transport} instead of the backend's native
+     * feed or polling: every bound manager publishes a signal on each local write, and the sync
+     * subscribes to the transport to invalidate/evict on signals from other instances. Takes
+     * <b>precedence</b> over a native change feed and over polling, and works for any backend (including
+     * feedless ones like MySQL/MariaDB). Only supported in {@link #attach(Storage)} mode.
+     *
+     * <p>The transport's lifecycle is the caller's: {@link #close()} stops the subscriptions and clears
+     * the publish hooks, but does not close the transport (it may be shared by several syncs).
+     */
+    public CacheSync via(CacheSyncTransport transport) {
+        if (autoMode) {
+            throw new IllegalStateException("via(...) is only supported in attach(storage) mode, not auto()");
+        }
+        this.transport = transport;
+        return this;
+    }
+
     /** Binds {@code manager} using the built-in parser for its key type (see {@link KeyParsers}). */
     public <K, V> CacheSync bind(CachingManager<K, V> manager) {
         return bind(manager, null);
@@ -183,6 +202,11 @@ public final class CacheSync implements AutoCloseable {
                 try { poller.close(); } catch (RuntimeException ignored) { }
             }
             pollers.clear();
+            if (transport != null) {
+                for (Binding<?> binding : bindings) {
+                    binding.manager.setLocalWriteListener(null);   // stop publishing once the sync is closed
+                }
+            }
             started = false;
         }
     }
@@ -223,13 +247,18 @@ public final class CacheSync implements AutoCloseable {
     }
 
     private void setupGroup(Storage source, List<Binding<?>> groupBindings) {
-        if (source instanceof ChangeFeedStorage) {
-            ChangeFeedStorage feed = (ChangeFeedStorage) source;
-            Map<String, Bound<?>> byCollection = new HashMap<>();
+        if (transport != null) {
+            // Explicit pub/sub transport: subscribe for incoming signals and make each manager publish
+            // on local writes. Takes precedence over a native feed and over polling.
+            Map<String, Bound<?>> byCollection = buildByCollection(groupBindings);
+            subscriptions.add(transport.subscribe(new PushGroup(transport.originId(), byCollection)::onChange));
             for (Binding<?> binding : groupBindings) {
-                byCollection.put(binding.manager.collection(), binding.resolve());
+                installPublishHook(binding, transport);
             }
-            subscriptions.add(feed.subscribe(new PushGroup(feed, byCollection)::onChange));
+        } else if (source instanceof ChangeFeedStorage) {
+            ChangeFeedStorage feed = (ChangeFeedStorage) source;
+            Map<String, Bound<?>> byCollection = buildByCollection(groupBindings);
+            subscriptions.add(feed.subscribe(new PushGroup(feed.originId(), byCollection)::onChange));
         } else if (pollInterval != null) {
             PollingCacheSync poller = PollingCacheSync.every(pollInterval);
             if (errorHandler != null) {
@@ -247,6 +276,24 @@ public final class CacheSync implements AutoCloseable {
                 + "the polling fallback, or back these managers with a push-capable storage "
                 + "(MongoDB, PostgreSQL).");
         }
+    }
+
+    /** Indexes a group's bindings by collection name, resolving each one's key parser. */
+    private static Map<String, Bound<?>> buildByCollection(List<Binding<?>> groupBindings) {
+        Map<String, Bound<?>> byCollection = new HashMap<>();
+        for (Binding<?> binding : groupBindings) {
+            byCollection.put(binding.manager.collection(), binding.resolve());
+        }
+        return byCollection;
+    }
+
+    /** Makes {@code binding}'s manager publish a signal to {@code transport} on every local write. */
+    private <K> void installPublishHook(Binding<K> binding, CacheSyncTransport transport) {
+        CachingManager<K, ?> manager = binding.manager;
+        String collection = manager.collection();
+        String originId = transport.originId();
+        manager.setLocalWriteListener((op, key) ->
+                transport.publish(new ChangeEvent(collection, key.toString(), op, ChangeEvent.UNKNOWN_VERSION, originId)));
     }
 
     // ------------------------------------------------------------------
@@ -302,20 +349,20 @@ public final class CacheSync implements AutoCloseable {
         }
     }
 
-    /** Routes a single push storage's events to the managers bound to it. */
+    /** Routes a single push source's events to the managers bound to it (a native feed or a transport). */
     private final class PushGroup {
-        private final ChangeFeedStorage feed;
+        private final String ownOrigin;
         private final Map<String, Bound<?>> byCollection;
 
-        PushGroup(ChangeFeedStorage feed, Map<String, Bound<?>> byCollection) {
-            this.feed = feed;
+        PushGroup(String ownOrigin, Map<String, Bound<?>> byCollection) {
+            this.ownOrigin = ownOrigin;
             this.byCollection = byCollection;
         }
 
         void onChange(ChangeEvent event) {
             if (!includeOwnOrigin) {
                 String origin = event.originId();
-                if (origin != null && !origin.isEmpty() && origin.equals(feed.originId())) {
+                if (origin != null && !origin.isEmpty() && origin.equals(ownOrigin)) {
                     return; // our own write; this cache was already refreshed write-through
                 }
             }

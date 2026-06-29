@@ -20,6 +20,8 @@ import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
@@ -261,6 +263,88 @@ class CacheSyncTest {
     }
 
     // ------------------------------------------------------------------
+    //  Transport (.via): publish hook + routing over a fake transport
+    // ------------------------------------------------------------------
+
+    @Test
+    void via_transport_publishes_a_signal_on_each_local_write() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+
+        FakeTransport transport = new FakeTransport();
+        UUID id = UUID.randomUUID();
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).bind(cache).start()) {
+            cache.saveAndCache(new Guild(id, "v1")).join();
+            cache.deleteAndEvict(id).join();
+        }
+
+        assertEquals(2, transport.published.size(), "one signal per local write");
+        ChangeEvent saved = transport.published.get(0);
+        assertEquals(ChangeOp.SAVE, saved.op());
+        assertEquals("guilds", saved.collection());
+        assertEquals(id.toString(), saved.key());
+        assertEquals(transport.originId(), saved.originId(), "stamped with the transport's origin");
+        assertEquals(ChangeOp.DELETE, transport.published.get(1).op());
+    }
+
+    @Test
+    void via_transport_foreign_origin_invalidates_but_own_origin_is_skipped() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+
+        FakeTransport transport = new FakeTransport();
+        UUID id = UUID.randomUUID();
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).bind(cache).start()) {
+            cache.saveAndCache(new Guild(id, "cached")).join();
+            assertTrue(cache.peek(id).isPresent());
+
+            // Echo of our own write (same transport origin): skipped, cache untouched.
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 1, transport.originId()));
+            assertTrue(cache.peek(id).isPresent(), "own-origin signal is skipped");
+
+            // A foreign instance's write: invalidates.
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 2, "other-instance"));
+            assertFalse(cache.peek(id).isPresent(), "foreign-origin signal invalidates");
+
+            // A foreign instance's delete: evicts.
+            cache.saveAndCache(new Guild(id, "again")).join();
+            assertTrue(cache.peek(id).isPresent());
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.DELETE, 3, "other-instance"));
+            assertFalse(cache.peek(id).isPresent(), "foreign-origin delete evicts");
+        }
+        storage.close().join();
+    }
+
+    @Test
+    void via_is_rejected_in_auto_mode() {
+        FakeTransport transport = new FakeTransport();
+        assertThrows(IllegalStateException.class, () -> CacheSync.auto().via(transport));
+    }
+
+    @Test
+    void closing_the_sync_stops_publishing() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+        FakeTransport transport = new FakeTransport();
+
+        CacheSync sync = CacheSync.attach(storage).via(transport).bind(cache).start();
+        cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
+        int afterFirstWrite = transport.published.size();
+        sync.close();
+
+        cache.saveAndCache(new Guild(UUID.randomUUID(), "v2")).join();
+        assertEquals(afterFirstWrite, transport.published.size(), "no publish after close cleared the hook");
+
+        storage.close().join();
+    }
+
+    // ------------------------------------------------------------------
     //  Test doubles
     // ------------------------------------------------------------------
 
@@ -283,6 +367,22 @@ class CacheSyncTest {
         @Override public <K, V> Repository<K, V> repository(EntityDescriptor<K, V> d) { return inner.repository(d); }
         @Override public StorageLogConfig getStorageLogConfig() { return inner.getStorageLogConfig(); }
         @Override public Storage setStorageLogConfig(StorageLogConfig config) { inner.setStorageLogConfig(config); return this; }
+    }
+
+    /**
+     * A {@link CacheSyncTransport} that records published signals and lets a test {@link #deliver}
+     * synthetic events with any origin/collection - the transport analogue of {@code FakeFeedStorage}.
+     */
+    private static final class FakeTransport implements CacheSyncTransport {
+        private final List<ChangeEvent> published = new ArrayList<>();
+        private final ChangeFeedSupport feed = new ChangeFeedSupport();
+
+        void deliver(ChangeEvent event) { feed.emit(event); }
+
+        @Override public String originId() { return "fake-transport"; }
+        @Override public void publish(ChangeEvent event) { published.add(event); }
+        @Override public ChangeSubscription subscribe(ChangeListener listener) { return feed.subscribe(listener); }
+        @Override public void close() { feed.closeAll(); }
     }
 
     /** A storage that does not implement {@link ChangeFeedStorage}. */
