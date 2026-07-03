@@ -408,7 +408,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                         Document found = session != null
                             ? collection.find(session, Filters.eq(COL_KEY, key.toString())).first()
                             : collection.find(Filters.eq(COL_KEY, key.toString())).first();
-                        long actualVersion = found != null
+                        long actualVersion = found != null && found.get(COL_VERSION) instanceof Number
                             ? ((Number) found.get(COL_VERSION)).longValue()
                             : -1L;
                         log.optimisticLockConflict(descriptor.collection(), key, incomingVersion, actualVersion);
@@ -447,6 +447,17 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         long count = entities.size();
 
         if (descriptor.isVersioned()) {
+            if (session != null) {
+                // Inside a transaction every save shares this repository's ClientSession, which
+                // is not thread-safe - chain the per-entity saves strictly one-after-another
+                // instead of fanning out to concurrent pool tasks (mirrors the SQL saveAll,
+                // which loops on the single transactional connection).
+                CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
+                for (V entity : entities) {
+                    chain = chain.thenCompose(ignored -> saveVersioned(entity));
+                }
+                return chain.thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
+            }
             // Optimistic-lock check-then-act per entity is inherent to versioning - reuse save().
             List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
             for (V entity : entities) futures.add(save(entity));
@@ -787,6 +798,12 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      */
     private V decodeEntity(Document outer) throws CodecException {
         Document dataDoc = outer.get(COL_DATA, Document.class);
+        if (dataDoc == null) {
+            // A document without the data sub-document (written by external tooling or a
+            // partial migration) is corrupted from this repository's point of view - surface
+            // it as a CodecException so readers fall into the skip-corrupted contract.
+            throw new CodecException("Mongo document is missing the '" + COL_DATA + "' sub-document");
+        }
         String json = dataDoc.toJson(RELAXED_JSON);
         return descriptor.codec().decode(json.getBytes(StandardCharsets.UTF_8));
     }

@@ -17,6 +17,7 @@ import br.com.finalcraft.everydatabase.tx.TransactionScope;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.MongoException;
 import com.mongodb.client.*;
 import org.bson.Document;
 
@@ -242,19 +243,22 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     public <R> CompletableFuture<R> inTransaction(Function<TransactionScope, CompletableFuture<R>> work) {
         return CompletableFuture.supplyAsync(() -> {
             ClientSession session = mongoClient.startSession();
-            session.startTransaction();
-            MongoTransactionScope scope = new MongoTransactionScope(database, session, log);
             long startMs = System.currentTimeMillis();
-            log.txBegin(null);
 
+            // Everything after startSession() lives inside the try so the session is closed
+            // even when startTransaction() itself fails (e.g. standalone deployment).
             try {
+                session.startTransaction();
+                MongoTransactionScope scope = new MongoTransactionScope(database, session, log);
+                log.txBegin(null);
+
                 R result = work.apply(scope).join();
 
                 if (scope.isRolledBack()) {
                     session.abortTransaction();
                     log.txRollback(null, System.currentTimeMillis() - startMs, null);
                 } else {
-                    session.commitTransaction();
+                    commitWithRetry(session);
                     log.txCommit(null, System.currentTimeMillis() - startMs);
                 }
 
@@ -270,6 +274,26 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 session.close();
             }
         }, StorageExecutors.get());
+    }
+
+    /**
+     * Commits, retrying while the driver cannot know whether the commit landed (the
+     * {@code UnknownTransactionCommitResult} error label - e.g. a primary failover
+     * mid-commit). Retrying the commit is the driver-documented safe response because the
+     * server treats a repeated commit idempotently. A {@code TransientTransactionError} is
+     * deliberately NOT retried here: recovering from it means re-running the caller's whole
+     * lambda, and only the caller knows whether that work is idempotent.
+     */
+    private static void commitWithRetry(ClientSession session) {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                session.commitTransaction();
+                return;
+            } catch (MongoException e) {
+                boolean retryable = e.hasErrorLabel(MongoException.UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL);
+                if (!retryable || attempt >= 3) throw e;
+            }
+        }
     }
 
     // ------------------------------------------------------------------
