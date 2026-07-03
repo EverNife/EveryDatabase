@@ -6,6 +6,7 @@ import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.schema.Migration;
+import br.com.finalcraft.everydatabase.schema.Migrations;
 import br.com.finalcraft.everydatabase.schema.MigrationContext;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
@@ -14,8 +15,10 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.type.CollectionType;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -173,6 +176,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     public SchemaAwareStorage register(List<Migration> migrations) {
         registeredMigrations.addAll(migrations);
         Collections.sort(registeredMigrations, Comparator.comparing(Migration::version));
+        Migrations.requireUniqueVersions(registeredMigrations);
         return this;
     }
 
@@ -288,13 +292,29 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
         ));
         try {
             byte[] bytes = MAPPER.writeValueAsBytes(entries);
-            Files.write(trackingFilePath(), bytes,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
+            writeLedgerAtomically(trackingFilePath(), bytes);
         } catch (Exception e) {
             throw log.errored(StorageOp.MIGRATION_COMPLETE, null,
                 new RuntimeException("LocalFile: failed to write migration tracking file", e));
+        }
+    }
+
+    /**
+     * Writes the migration ledger via a temp file + atomic move (same crash-safety the entity
+     * files get). A plain truncate-then-write could be interrupted mid-write, and a truncated
+     * ledger reads back as "nothing applied" - the next boot would re-run every migration over
+     * already-migrated data.
+     */
+    private static void writeLedgerAtomically(Path target, byte[] bytes) throws IOException {
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+        Files.write(tmp, bytes,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE);
+        try {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

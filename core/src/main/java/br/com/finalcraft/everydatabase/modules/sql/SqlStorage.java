@@ -7,6 +7,7 @@ import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.schema.Migration;
 import br.com.finalcraft.everydatabase.schema.MigrationContext;
+import br.com.finalcraft.everydatabase.schema.Migrations;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionScope;
@@ -332,6 +333,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     public SchemaAwareStorage register(List<Migration> migrations) {
         registeredMigrations.addAll(migrations);
         registeredMigrations.sort(Comparator.comparing(Migration::version));
+        Migrations.requireUniqueVersions(registeredMigrations);
         return this;
     }
 
