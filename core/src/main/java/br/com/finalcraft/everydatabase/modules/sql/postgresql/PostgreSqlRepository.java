@@ -88,9 +88,19 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
     }
 
     /**
-     * Publishes a change on the {@code NOTIFY} channel. Emitted on a fresh pooled connection after
-     * the (already committed, for the common autocommit path) write, so a failure here never breaks
-     * the write. Skipped when {@code originId} is null (the storage's change feed is not in use).
+     * Publishes a change on the {@code NOTIFY} channel. Skipped when {@code originId} is null
+     * (the storage's change feed is not in use). A failure here never breaks the write it
+     * follows; cache freshness self-heals.
+     *
+     * <p>Two emission paths, both piggybacking on PostgreSQL's native NOTIFY visibility:
+     * <ul>
+     *   <li><b>Inside a transaction</b> (the write ran on the {@code txConnection} and this
+     *       method runs inline on the same thread): the NOTIFY is issued on that same
+     *       connection, so PostgreSQL queues it and only delivers on COMMIT - and silently
+     *       discards it on ROLLBACK. No phantom events for uncommitted or rolled-back writes.</li>
+     *   <li><b>Autocommit</b> (no transaction in progress): a fresh pooled connection emits
+     *       immediately, after the already-committed write.</li>
+     * </ul>
      */
     private void notifyChange(ChangeOp op, K key, long version) {
         if (originId == null) {
@@ -98,13 +108,25 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
         }
         String payload = PgChangePayload.encode(
             PAYLOAD_MAPPER, descriptor.collection(), key.toString(), op, version, originId);
+        Connection tx = txConnection.get();
+        if (tx != null) {
+            // Do NOT close the transaction's connection here - only the statement.
+            try (PreparedStatement ps = tx.prepareStatement("SELECT pg_notify(?, ?)")) {
+                ps.setString(1, PgChangePayload.CHANNEL);
+                ps.setString(2, payload);
+                ps.execute();
+            } catch (SQLException e) {
+                log.emit(StorageOp.SAVE, StorageLogLevel.WARN,
+                    b -> b.detail("pg_notify failed for '" + descriptor.collection() + "'").error(e));
+            }
+            return;
+        }
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT pg_notify(?, ?)")) {
             ps.setString(1, PgChangePayload.CHANNEL);
             ps.setString(2, payload);
             ps.execute();
         } catch (SQLException e) {
-            // A failed notification must never fail the write it follows; cache freshness self-heals.
             log.emit(StorageOp.SAVE, StorageLogLevel.WARN,
                 b -> b.detail("pg_notify failed for '" + descriptor.collection() + "'").error(e));
         }
