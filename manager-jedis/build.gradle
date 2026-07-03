@@ -20,8 +20,9 @@ dependencies {
     compileOnly project(':core')
     compileOnly libs.jackson.databind
 
-    // The one real dependency this module exists to add: the Redis/Valkey client. Jedis 5.x
-    // is Java-8 bytecode and works unchanged against both Redis and Valkey (identical RESP).
+    // The one real dependency this module exists to add: the Redis/Valkey client. Jedis 7.x
+    // still supports JDK 8 (official compatibility: 8/11/17/21) and works unchanged against
+    // both Redis and Valkey (identical RESP).
     implementation libs.jedis
 
     // compileOnly does not reach the test classpaths, so the tests depend on the real modules

@@ -119,11 +119,15 @@ configure([project(':core'), project(':libby'), project(':manager'), project(':m
 def versionedDocs = [file('README.md')]
 
 // Returns `text` with every everydatabase artifact coordinate set to `ver`.
-// Two shapes are covered: Gradle/plain quoted coordinates, and Maven <version> tags.
+// Three shapes are covered: Gradle/plain quoted coordinates, Maven <version> tags, and the
+// shields.io version badge (badge/version-<ver>-<color>) in the README header.
+// The badge <ver> may itself contain hyphens (pre-releases like 1.1.0-rc1), so it is matched
+// greedily up to the trailing -<color>[?query]) delimiter instead of stopping at the first hyphen.
 def stampEveryDatabaseVersion = { String text, String ver ->
     text
         .replaceAll(/(["']br\.com\.finalcraft\.everydatabase:everydatabase-[a-z-]+:)[^"']+(["'])/) { all, pre, post -> "${pre}${ver}${post}" }
         .replaceAll(/(<artifactId>everydatabase-[a-z-]+<\/artifactId>\s*<version>)[^<]+(<\/version>)/) { all, pre, post -> "${pre}${ver}${post}" }
+        .replaceAll(/(badge\/version-)[^)]+(-[a-z0-9]+(?:\?[^)]*)?\))/) { all, pre, post -> "${pre}${ver}${post}" }
 }
 
 tasks.register('stampDocsVersions') {
