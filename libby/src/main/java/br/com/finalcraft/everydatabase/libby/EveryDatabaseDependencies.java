@@ -201,6 +201,32 @@ public final class EveryDatabaseDependencies {
         load(dependencyManager, toLibraries(POSTGRES_DRIVER));
     }
 
+    // ---------------------------------------------------------------------------------
+    //  Public coordinate accessors: consumers that RELOCATE the runtime jars themselves
+    //  (e.g. a plugin that embeds everydatabase-core under a shaded prefix) reuse these
+    //  catalog-sourced coordinate lists and apply their own relocation, instead of the
+    //  unrelocated loadX bundles above. The versions come from DependencyVersions, so a
+    //  relocating consumer can never drift from what everydatabase-core compiles against.
+    // ---------------------------------------------------------------------------------
+
+    /** Jackson JSON+YAML coordinates (incl. the jsr310/jdk8 datatype modules and snakeyaml). */
+    public static List<String> jacksonYamlCoordinates() { return flat(JACKSON_JSON_STACK, JACKSON_YAML_EXTRAS); }
+
+    /** HikariCP + slf4j-api (the SQL pool stack shared by every SQL backend). */
+    public static List<String> sqlPoolCoordinates() { return flat(SQL_POOL_STACK); }
+
+    /** Embedded H2 engine (its JDBC driver is built in). */
+    public static List<String> h2Coordinates() { return flat(H2_ENGINE); }
+
+    /** MySQL/MariaDB JDBC driver. */
+    public static List<String> mysqlDriverCoordinates() { return flat(MYSQL_DRIVER); }
+
+    /** PostgreSQL JDBC driver. */
+    public static List<String> postgresDriverCoordinates() { return flat(POSTGRES_DRIVER); }
+
+    /** MongoDB synchronous driver + its flat transitive set. */
+    public static List<String> mongoCoordinates() { return flat(MONGO_STACK); }
+
     /**
      * Ensures Maven Central is registered as a download repository, then loads
      * the given libraries through the parallel bulk loader.
@@ -219,6 +245,17 @@ public final class EveryDatabaseDependencies {
             }
         }
         return libraries;
+    }
+
+    /** Flattens groups of {@code "group:artifact:version"} coordinate strings into one list. */
+    private static List<String> flat(String[]... groups) {
+        List<String> out = new ArrayList<>();
+        for (String[] group : groups) {
+            for (String coordinates : group) {
+                out.add(coordinates);
+            }
+        }
+        return out;
     }
 
 }
