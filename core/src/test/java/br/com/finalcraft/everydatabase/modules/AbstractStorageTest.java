@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.log.StorageLogEvent;
@@ -23,6 +24,7 @@ import java.lang.reflect.Method;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -240,6 +242,38 @@ public abstract class AbstractStorageTest {
         assertEquals(1L,  repo.count().join(), "count() must not grow after upsert");
     }
 
+    @Test
+    @Order(22)
+    @DisplayName("[base] save()/saveAll() with key over MAX_KEY_LENGTH -> failed future, nothing persisted")
+    void save_keyTooLong_failsFastAndPersistsNothing() {
+        EntityDescriptor<String, TestPlayer> longKeyDescriptor =
+            EntityDescriptor.builder(String.class, TestPlayer.class)
+                .collection("test_longkeys")
+                .keyExtractor(TestPlayer::getName)
+                .codec(new JacksonJsonCodec<>(TestPlayer.class))
+                .build();
+        Repository<String, TestPlayer> longKeyRepo = storage.repository(longKeyDescriptor);
+
+        String tooLong = String.join("", Collections.nCopies(StorageKeys.MAX_KEY_LENGTH + 1, "k"));
+        TestPlayer oversized = new TestPlayer(UUID_GHOST, tooLong, 1);
+
+        CompletionException saveEx = assertThrows(CompletionException.class,
+            () -> longKeyRepo.save(oversized).join());
+        assertTrue(saveEx.getCause() instanceof IllegalArgumentException,
+            "save() must fail with IllegalArgumentException, got: " + saveEx.getCause());
+
+        // A batch containing one oversized key is rejected up front - the valid entity
+        // must not slip through either.
+        TestPlayer valid = new TestPlayer(UUID_ALICE, "Alice", 100);
+        CompletionException batchEx = assertThrows(CompletionException.class,
+            () -> longKeyRepo.saveAll(Arrays.asList(valid, oversized)).join());
+        assertTrue(batchEx.getCause() instanceof IllegalArgumentException,
+            "saveAll() must fail with IllegalArgumentException, got: " + batchEx.getCause());
+
+        assertEquals(0L, longKeyRepo.count().join(), "nothing may be persisted after a rejected key");
+        assertFalse(longKeyRepo.exists(tooLong).join(), "the oversized key must not exist");
+    }
+
     // ------------------------------------------------------------------
     //  exists + count
     // ------------------------------------------------------------------
@@ -259,6 +293,24 @@ public abstract class AbstractStorageTest {
         repo.save(alice()).join();
         repo.save(bob()).join();
         assertEquals(2L, repo.count().join());
+    }
+
+    @Test
+    @Order(32)
+    @DisplayName("[base] versions() on a non-versioned descriptor -> 0 for existing keys, absent keys omitted")
+    void versions_nonVersionedDescriptor_reportsZeroAndOmitsAbsent() {
+        repo.save(alice()).join();
+        repo.save(bob()).join();
+
+        Map<UUID, Long> versions = repo.versions(Arrays.asList(UUID_ALICE, UUID_BOB, UUID_GHOST)).join();
+
+        assertEquals(2, versions.size(), "absent keys must be omitted, not mapped to a value");
+        assertEquals(0L, versions.get(UUID_ALICE), "non-versioned descriptor must report version 0");
+        assertEquals(0L, versions.get(UUID_BOB),   "non-versioned descriptor must report version 0");
+        assertFalse(versions.containsKey(UUID_GHOST), "absent key must not appear in the result");
+
+        assertTrue(repo.versions(Collections.emptyList()).join().isEmpty(),
+            "an empty key collection must produce an empty result");
     }
 
     // ------------------------------------------------------------------
@@ -453,6 +505,29 @@ public abstract class AbstractStorageTest {
         List<UUID> uuids = found.stream().map(TestPlayer::getUuid).collect(Collectors.toList());
         assertTrue(uuids.contains(UUID_ALICE));
         assertTrue(uuids.contains(UUID_CAROL));
+    }
+
+    @Test
+    @Order(97)
+    @DisplayName("[base] query numeric values coerce to the hint type (Long/Double against INT index)")
+    void query_numericValueTypeCoercion_matchesAcrossBoxedTypes() {
+        seedIndexData();
+
+        // 'score' is an INT hint; a Long or integral Double query value must match the
+        // same rows an Integer does - on every backend, including the map/scan ones.
+        List<TestPlayer> eqLong = repo.query(Query.eq("score", 100L)).join();
+        assertEquals(1, eqLong.size(), "eq with a Long against an INT index must match");
+        assertEquals(UUID_ALICE, eqLong.get(0).getUuid());
+
+        List<TestPlayer> inLong = repo.query(Query.in("score", 50L, 200L)).join();
+        assertEquals(2, inLong.size(), "in with Longs against an INT index must match");
+
+        List<TestPlayer> rangeMixed = repo.query(Query.range("score", 50L, 150.0)).join();
+        assertEquals(2, rangeMixed.size(), "range with Long/Double bounds must match Alice and Bob");
+
+        // A fractional value can never equal an INT-indexed value: no match, no error.
+        assertTrue(repo.query(Query.eq("score", 100.5)).join().isEmpty(),
+            "a fractional eq value must match nothing on an INT index");
     }
 
     @Test
