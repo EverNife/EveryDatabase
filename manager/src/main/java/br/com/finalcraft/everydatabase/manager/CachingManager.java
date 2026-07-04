@@ -201,7 +201,9 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     public CompletableFuture<List<V>> getAll(Collection<K> keys) {
         CachePolicy policy = options.policy();
         Map<K, V> hits = new LinkedHashMap<>();
-        List<K> misses = new ArrayList<>();
+        // A Set so duplicate keys in the input are de-duplicated: findMany would otherwise be
+        // asked for the same missing key twice and the result would carry a duplicate entry.
+        Set<K> misses = new LinkedHashSet<>();
         for (K key : keys) {
             CacheEntry<V> entry = store.get(key);
             if (serveable(entry, policy)) {
@@ -244,7 +246,12 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      */
     public CompletableFuture<Void> preloadAll() {
         return repository.all().thenAccept(stream ->
-                stream.forEach(value -> store.installIfAbsent(keyOf.apply(value), new CacheEntry<>(value))));
+                stream.forEach(value -> store.installIfAbsent(
+                        keyOf.apply(value),
+                        // A real monotonic stamp (not 0) so a preloaded cell orders correctly against
+                        // later writes/reloads: a subsequent publish with a higher stamp still wins,
+                        // and a slower stale reload that started earlier does not regress it.
+                        new CacheEntry<>(value, stampGen.incrementAndGet()))));
     }
 
     // ------------------------------------------------------------------
@@ -347,7 +354,12 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                 statEvictions.increment();
                 fireLocalWrite(ChangeOp.DELETE, key);
             } else {
-                store.remove(key);
+                // The delete failed, so the entity may well still exist: invalidate (mark stale)
+                // rather than remove, matching this method's contract. markStale keeps the cell, so
+                // a dirty write-back value is not silently dropped by a failed delete; the next read
+                // reloads the current backend state.
+                statInvalidations.increment();
+                store.markStale(key);
             }
         });
     }

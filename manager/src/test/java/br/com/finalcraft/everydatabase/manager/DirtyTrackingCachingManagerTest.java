@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -187,6 +188,33 @@ class DirtyTrackingCachingManagerTest {
         assertTrue(mgr.peek(errId).isPresent(), "...and keeps its cell");
 
         assertFalse(mgr.peek(conflictId).isPresent(), "a conflict evicts the stale cell (reload on next read)");
+    }
+
+    @Test
+    void deleteAndEvict_on_a_failed_delete_keeps_the_cell_instead_of_dropping_it() {
+        ScriptedRepository<UUID, Bank> repo = new ScriptedRepository<>(Bank::getId);
+        EntityDescriptor<UUID, Bank> scriptedDesc = EntityDescriptor.builder(UUID.class, Bank.class)
+                .collection("scripted_del")
+                .keyExtractor(Bank::getId)
+                .codec(registry.codec(Bank.class))
+                .build();
+        CachingManager<UUID, Bank> mgr = new CachingManager<>(
+                scriptedDesc, storageReturning(repo), CacheOptions.of(CachePolicy.always()), registry);
+
+        UUID id = UUID.randomUUID();
+        Bank account = mgr.seedIfAbsent(id, new Bank(id, 5));
+        account.deposit(10);                                         // unsaved local change -> dirty
+        assertTrue(account.isDirty());
+
+        repo.failDelete(id, () -> new RuntimeException("backend unavailable"));
+
+        // The delete failed, so the entity may still exist: the returned future is exceptional...
+        assertThrows(CompletionException.class, () -> mgr.deleteAndEvict(id).join());
+
+        // ...and the failure path invalidates (mark stale) rather than removing, so the dirty cell
+        // survives - the unsaved change is not lost and the entity is still served.
+        assertTrue(mgr.peek(id).isPresent(), "a failed delete must not drop the cached entity");
+        assertTrue(mgr.peek(id).get().isDirty(), "the unsaved local change is preserved");
     }
 
     @Test

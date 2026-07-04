@@ -20,6 +20,7 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
 
     private final Map<K, V> data = new ConcurrentHashMap<>();
     private final Map<K, Supplier<? extends RuntimeException>> saveFailures = new ConcurrentHashMap<>();
+    private final Map<K, Supplier<? extends RuntimeException>> deleteFailures = new ConcurrentHashMap<>();
     private final Function<V, K> keyOf;
 
     ScriptedRepository(Function<V, K> keyOf) {
@@ -29,6 +30,11 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     /** Makes {@code save}/{@code saveAll} fail for {@code key} with the supplied exception. */
     void failSave(K key, Supplier<? extends RuntimeException> exception) {
         saveFailures.put(key, exception);
+    }
+
+    /** Makes {@code delete} fail for {@code key} with the supplied exception. */
+    void failDelete(K key, Supplier<? extends RuntimeException> exception) {
+        deleteFailures.put(key, exception);
     }
 
     private static <T> CompletableFuture<T> failed(Throwable t) {
@@ -80,6 +86,10 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Boolean> delete(K key) {
+        Supplier<? extends RuntimeException> failure = deleteFailures.get(key);
+        if (failure != null) {
+            return failed(failure.get());
+        }
         return CompletableFuture.completedFuture(data.remove(key) != null);
     }
 

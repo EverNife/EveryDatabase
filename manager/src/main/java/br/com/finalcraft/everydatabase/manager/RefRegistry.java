@@ -83,12 +83,27 @@ public final class RefRegistry {
     // ------------------------------------------------------------------
 
     /**
-     * Registers (or replaces) the resolver for {@code type}. {@link CachingManager} calls this
-     * from its constructor, so {@link #manager(EntityDescriptor, Storage, CachePolicy)} and a
+     * Registers the resolver for {@code type}. {@link CachingManager} calls this from its
+     * constructor, so {@link #manager(EntityDescriptor, Storage, CachePolicy)} and a
      * {@code CachingManager} built with this registry both self-register here.
+     *
+     * <p>Rejects a <b>conflicting</b> duplicate: if a different resolver is already registered for
+     * {@code type} in this registry, this throws instead of silently overwriting it - two managers
+     * for the same type would collide last-writer-wins, a bug discoverable only at runtime, which is
+     * exactly what the no-global-registry design exists to prevent. Re-registering the very same
+     * resolver instance is a harmless no-op; to intentionally replace, {@link #unregister} first.
+     *
+     * @throws IllegalStateException if a different resolver is already registered for {@code type}
      */
     public void register(Class<?> type, RefResolver<?, ?> resolver) {
-        resolvers.put(type, resolver);
+        RefResolver<?, ?> existing = resolvers.putIfAbsent(type, resolver);
+        if (existing != null && existing != resolver) {
+            throw new IllegalStateException(
+                "a resolver is already registered for " + type.getName() + " in this RefRegistry - "
+                + "two managers for the same type would collide (last-writer-wins). Use a separate "
+                + "RefRegistry per context, or unregister(" + type.getSimpleName()
+                + ".class) before registering a replacement.");
+        }
     }
 
     /** Removes the resolver for {@code type}, if any. */

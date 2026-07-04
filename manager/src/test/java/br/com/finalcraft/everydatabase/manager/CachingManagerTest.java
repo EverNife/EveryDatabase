@@ -137,6 +137,18 @@ class CachingManagerTest {
     }
 
     @Test
+    void getAll_deduplicates_duplicate_keys_in_the_input() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID a = seedGuild(mgr, "A");   // seeded into the backend only, so it is a cache miss
+
+        // The same missing key three times must not be fetched (or returned) three times.
+        List<Guild> all = mgr.getAll(Arrays.asList(a, a, a)).join();
+
+        assertEquals(1, all.size(), "duplicate keys must collapse to a single result");
+        assertEquals(a, all.get(0).getId());
+    }
+
+    @Test
     void preloadAll_mirrors_the_whole_collection() {
         CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
         UUID a = seedGuild(mgr, "A");
