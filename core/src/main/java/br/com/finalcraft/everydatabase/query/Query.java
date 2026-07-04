@@ -107,8 +107,18 @@ public final class Query {
         return new Query(Collections.emptyList());
     }
 
-    /** {@code fieldPath = value}. */
+    /**
+     * {@code fieldPath = value}.
+     *
+     * @throws IllegalArgumentException if {@code value} is {@code null} - equality against
+     *         {@code null} has no portable meaning (SQL {@code = NULL} matches nothing,
+     *         map-based backends would NPE); there is no IS NULL operator yet
+     */
     public static Query eq(String fieldPath, Object value) {
+        if (value == null) {
+            throw new IllegalArgumentException(
+                "Query.eq(\"" + fieldPath + "\", null): null is not a queryable value");
+        }
         return new Query(Collections.singletonList(
             new Condition(fieldPath, Op.EQ, value, null, null, null)
         ));
@@ -124,9 +134,24 @@ public final class Query {
         ));
     }
 
-    /** {@code fieldPath IN (values...)}. */
+    /**
+     * {@code fieldPath IN (values...)}.
+     *
+     * @throws IllegalArgumentException if {@code values} is {@code null} or contains a
+     *         {@code null} element (see {@link #eq(String, Object)})
+     */
     public static Query in(String fieldPath, Collection<?> values) {
+        if (values == null) {
+            throw new IllegalArgumentException(
+                "Query.in(\"" + fieldPath + "\", null): the values collection cannot be null");
+        }
         List<Object> copy = new ArrayList<>(values);
+        for (Object v : copy) {
+            if (v == null) {
+                throw new IllegalArgumentException(
+                    "Query.in(\"" + fieldPath + "\", ...): null is not a queryable value");
+            }
+        }
         return new Query(Collections.singletonList(
             new Condition(fieldPath, Op.IN, null, null, null, Collections.unmodifiableList(copy))
         ));

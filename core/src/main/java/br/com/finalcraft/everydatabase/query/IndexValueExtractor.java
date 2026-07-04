@@ -150,21 +150,86 @@ public final class IndexValueExtractor {
     }
 
     // ------------------------------------------------------------------
-    //  TIMESTAMP query-parameter normalisation
+    //  Query-parameter normalisation
     // ------------------------------------------------------------------
 
     /**
-     * Converts a query parameter value to epoch-milliseconds ({@code Long}) when the
-     * hint's field type is {@link IndexHint.FieldType#TIMESTAMP}.
+     * Coerces a query parameter value to the Java type the hint's
+     * {@link IndexHint.FieldType} stores, mirroring {@link #extract}. This is what lets
+     * the map/scan backends (InMemory, LocalFile, GroupedFile) match SQL/Mongo semantics:
+     * their index lookups compare with {@code equals}, so {@code eq("score", 100L)}
+     * against an INT field must look up {@code Integer 100}, not {@code Long 100L}.
+     * (SQL and Mongo don't need this - JDBC and BSON coerce natively.)
      *
-     * <p>Accepted types: {@link Instant}, {@link LocalDateTime} (treated as UTC),
-     * {@link Long}, {@link Integer}, any {@link Number}, or an ISO-8601 {@link String}.
+     * <p>TIMESTAMP accepts {@link Instant}, {@link LocalDateTime} (treated as UTC), any
+     * {@link Number}, or an ISO-8601 {@link String}, and converts to epoch-milliseconds.
+     * INT/LONG only convert when the conversion is lossless: a fractional or
+     * out-of-range number can never equal a stored integral value, so it is returned
+     * unchanged and simply matches nothing - the same result SQL produces.
      *
-     * <p>For non-TIMESTAMP hints the value is returned unchanged.
+     * <p>A value that cannot be coerced is returned unchanged, never {@code null}ed.
      */
     public static Object normalizeQueryValue(Object value, IndexHint hint) {
-        if (value == null || hint.fieldType() != IndexHint.FieldType.TIMESTAMP) return value;
-        return toEpochMilli(value);
+        if (value == null) return null;
+        switch (hint.fieldType()) {
+            case TIMESTAMP: {
+                Long millis = toEpochMilli(value);
+                return millis != null ? millis : value;
+            }
+            case INT: {
+                if (value instanceof Integer) return value;
+                Long integral = toIntegralOrNull(value);
+                return integral != null && integral >= Integer.MIN_VALUE && integral <= Integer.MAX_VALUE
+                    ? Integer.valueOf(integral.intValue()) : value;
+            }
+            case LONG: {
+                if (value instanceof Long) return value;
+                Long integral = toIntegralOrNull(value);
+                return integral != null ? integral : value;
+            }
+            case DOUBLE: {
+                if (value instanceof Double) return value;
+                if (value instanceof Number) return ((Number) value).doubleValue();
+                if (value instanceof String) {
+                    Double parsed = tryParseDouble((String) value);
+                    return parsed != null ? parsed : value;
+                }
+                return value;
+            }
+            case BOOLEAN: {
+                if (value instanceof Boolean) return value;
+                if (value instanceof String) {
+                    String s = (String) value;
+                    if ("true".equalsIgnoreCase(s))  return Boolean.TRUE;
+                    if ("false".equalsIgnoreCase(s)) return Boolean.FALSE;
+                }
+                return value;
+            }
+            case STRING:
+                return value instanceof String ? value : String.valueOf(value);
+            default:
+                return value;
+        }
+    }
+
+    /**
+     * Returns {@code value} as a {@code Long} when it is an integral number (or a string
+     * of one) with no fractional part; {@code null} when the conversion would lose
+     * information.
+     */
+    private static Long toIntegralOrNull(Object value) {
+        if (value instanceof Long || value instanceof Integer
+                || value instanceof Short || value instanceof Byte) {
+            return ((Number) value).longValue();
+        }
+        if (value instanceof Number) {
+            double d = ((Number) value).doubleValue();
+            return (d == Math.rint(d) && !Double.isInfinite(d)
+                    && d >= Long.MIN_VALUE && d <= Long.MAX_VALUE)
+                ? Long.valueOf((long) d) : null;
+        }
+        if (value instanceof String) return tryParseLong((String) value);
+        return null;
     }
 
     /**
