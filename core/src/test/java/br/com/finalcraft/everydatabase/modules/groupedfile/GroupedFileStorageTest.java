@@ -214,6 +214,54 @@ class GroupedFileStorageTest extends AbstractStorageTest {
     }
 
     @Test
+    @Order(1015)
+    @DisplayName("keys differing only in letter case map to distinct files (case-insensitive file systems)")
+    void caseDifferingKeys_doNotCollide() {
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("case_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        TestPlayer upper = new TestPlayer(UUID.randomUUID(), "Alice", 1);
+        TestPlayer lower = new TestPlayer(UUID.randomUUID(), "alice", 2);
+        stringRepo.save(upper).join();
+        stringRepo.save(lower).join();
+
+        assertEquals(2L, stringRepo.count().join(), "'Alice' and 'alice' must map to two distinct key files");
+        assertEquals(upper, stringRepo.find("Alice").join().orElseThrow(AssertionError::new));
+        assertEquals(lower, stringRepo.find("alice").join().orElseThrow(AssertionError::new));
+
+        assertTrue(stringRepo.delete("Alice").join());
+        assertTrue(stringRepo.find("Alice").join().isEmpty());
+        assertEquals(lower, stringRepo.find("alice").join().orElseThrow(AssertionError::new));
+    }
+
+    @Test
+    @Order(1016)
+    @DisplayName("reserved Windows device names round-trip as regular files")
+    void reservedDeviceNameKeys_roundTrip() {
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("reserved_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        TestPlayer con = new TestPlayer(UUID.randomUUID(), "CON", 1);
+        TestPlayer nul = new TestPlayer(UUID.randomUUID(), "NUL", 2);
+        stringRepo.save(con).join();
+        stringRepo.save(nul).join();
+
+        assertEquals(2L, stringRepo.count().join(), "'CON' and 'NUL' must persist as regular files");
+        assertEquals(con, stringRepo.find("CON").join().orElseThrow(AssertionError::new));
+        assertEquals(nul, stringRepo.find("NUL").join().orElseThrow(AssertionError::new));
+    }
+
+    @Test
     @Order(1014)
     @DisplayName("save leaves no .tmp residue behind (atomic write)")
     void save_leavesNoTmpFiles() throws IOException {

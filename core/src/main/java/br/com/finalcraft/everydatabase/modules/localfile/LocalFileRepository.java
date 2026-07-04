@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.util.FileKeyNames;
 import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
@@ -75,15 +76,9 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     // ------------------------------------------------------------------
 
     private String keyToString(K key) {
-        // sanitise: replace path separators to avoid directory traversal
-        String raw = key.toString();
-        String sanitized = raw.replace("/", "_").replace("\\", "_").replace(":", "_");
-        if (sanitized.equals(raw)) return raw;
-        // Sanitisation changed the name, so distinct keys could now collide on disk
-        // ("a/b" and "a_b" both sanitise to "a_b"). Suffix a short hash of the original
-        // key to keep one file per key. String.hashCode() is specified by the JLS, so
-        // the name is stable across JVM restarts.
-        return sanitized + "_" + String.format("%08x", raw.hashCode());
+        // Path separators, case-differing names (case-insensitive file systems) and reserved
+        // Windows device names all get a stable hash suffix - see FileKeyNames.
+        return FileKeyNames.safeStem(key.toString());
     }
 
     private String fileExtension() {
@@ -98,6 +93,37 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
         return locks.computeIfAbsent(keyToString(key), k -> new ReentrantReadWriteLock());
     }
 
+    /**
+     * Resolves the file to read for {@code key}: the current stem first, then the pre-guard
+     * (legacy) stem, so entities written before the case/reserved-name guards renamed the
+     * stems of affected keys remain readable. Writes always target the current stem, and
+     * {@link #writeFile} removes a leftover legacy file so scans never see the entity twice.
+     */
+    private Path existingPathFor(K key) {
+        Path primary = keyToPath(key);
+        if (Files.exists(primary)) return primary;
+        Path legacy = legacyKeyToPathIfReal(key);
+        return legacy != null ? legacy : primary;
+    }
+
+    /**
+     * The pre-guard file for {@code key}, or {@code null} when no such file exists with that
+     * EXACT name. On case-insensitive file systems the legacy name may resolve to a different
+     * key's file ({@code "Alice.json"} finding {@code "alice.json"}), so the directory entry's
+     * real case is compared before the path is trusted for reads or deletes.
+     */
+    private Path legacyKeyToPathIfReal(K key) {
+        Path legacy = collectionDir.resolve(FileKeyNames.legacyStem(key.toString()) + "." + fileExtension());
+        try {
+            if (!Files.exists(legacy)) return null;
+            Path real = legacy.toRealPath();
+            if (!real.getFileName().toString().equals(legacy.getFileName().toString())) return null;
+            return legacy;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------
     //  Repository impl
     // ------------------------------------------------------------------
@@ -108,7 +134,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             ReadWriteLock lock = lockFor(key);
             lock.readLock().lock();
             try {
-                Path path = keyToPath(key);
+                Path path = existingPathFor(key);
                 if (!Files.exists(path)) return Optional.empty();
                 byte[] data = Files.readAllBytes(path);
                 return Optional.of(descriptor.codec().decode(data));
@@ -195,6 +221,10 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 // Exotic file system without atomic rename: plain replace is the best we can do.
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
             }
+            // Migrate-on-write: drop a pre-guard file for the same key so scans never
+            // count the entity twice (reads prefer the new stem anyway).
+            Path legacy = legacyKeyToPathIfReal(key);
+            if (legacy != null && !legacy.equals(target)) Files.deleteIfExists(legacy);
         } catch (IOException e) {
             throw log.errored(StorageOp.SAVE, descriptor.collection(),
                 new RuntimeException("LocalFile: failed to write key=" + key, e));
@@ -212,12 +242,14 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             ReadWriteLock lock = lockFor(key);
             lock.writeLock().lock();
             try {
-                Path path = keyToPath(key);
-                if (!Files.exists(path)) {
+                Path primary = keyToPath(key);
+                Path legacy  = legacyKeyToPathIfReal(key);
+                boolean existed = Files.deleteIfExists(primary);
+                if (legacy != null && !legacy.equals(primary)) existed |= Files.deleteIfExists(legacy);
+                if (!existed) {
                     log.deleted(descriptor.collection(), key, false);
                     return false;
                 }
-                Files.delete(path);
                 // The lock deliberately stays in the map: removing it here would let another
                 // thread mint a NEW lock for the same key while we still hold the old one,
                 // breaking mutual exclusion. The map is bounded by the number of live keys.
@@ -235,7 +267,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Boolean> exists(K key) {
         return CompletableFuture.supplyAsync(
-            () -> Files.exists(keyToPath(key)),
+            () -> Files.exists(existingPathFor(key)),
             StorageExecutors.get()
         );
     }
@@ -250,7 +282,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 ReadWriteLock lock = lockFor(key);
                 lock.readLock().lock();
                 try {
-                    Path path = keyToPath(key);
+                    Path path = existingPathFor(key);
                     if (!Files.exists(path)) continue;
                     V entity = descriptor.codec().decode(Files.readAllBytes(path));
                     long version = 0L;

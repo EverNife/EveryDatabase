@@ -274,6 +274,90 @@ class LocalFileStorageTest extends AbstractStorageTest {
     }
 
     @Test
+    @Order(1032)
+    @DisplayName("keys differing only in letter case map to distinct files (case-insensitive file systems)")
+    void caseDifferingKeys_doNotCollide() {
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("case_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        TestPlayer upper = new TestPlayer(UUID.randomUUID(), "Alice", 1);
+        TestPlayer lower = new TestPlayer(UUID.randomUUID(), "alice", 2);
+        stringRepo.save(upper).join();
+        stringRepo.save(lower).join();
+
+        assertEquals(2L, stringRepo.count().join(), "'Alice' and 'alice' must map to two distinct files");
+        assertEquals(upper, stringRepo.find("Alice").join().orElseThrow(AssertionError::new));
+        assertEquals(lower, stringRepo.find("alice").join().orElseThrow(AssertionError::new));
+
+        assertTrue(stringRepo.delete("Alice").join());
+        assertTrue(stringRepo.find("Alice").join().isEmpty());
+        assertEquals(lower, stringRepo.find("alice").join().orElseThrow(AssertionError::new));
+    }
+
+    @Test
+    @Order(1033)
+    @DisplayName("reserved Windows device names round-trip as regular files")
+    void reservedDeviceNameKeys_roundTrip() {
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("reserved_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        TestPlayer con = new TestPlayer(UUID.randomUUID(), "CON", 1);
+        TestPlayer nul = new TestPlayer(UUID.randomUUID(), "NUL", 2);
+        stringRepo.save(con).join();
+        stringRepo.save(nul).join();
+
+        assertEquals(2L, stringRepo.count().join(), "'CON' and 'NUL' must persist as regular files");
+        assertEquals(con, stringRepo.find("CON").join().orElseThrow(AssertionError::new));
+        assertEquals(nul, stringRepo.find("NUL").join().orElseThrow(AssertionError::new));
+    }
+
+    @Test
+    @Order(1034)
+    @DisplayName("files written before the case/reserved-name guards stay readable and migrate on write")
+    void legacyStemFiles_remainReadable() throws IOException {
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("legacy_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        // Write through the repository, then rename the file to the pre-guard verbatim stem
+        // to simulate data produced before the case/reserved-name guards existed.
+        TestPlayer alice = new TestPlayer(UUID.randomUUID(), "Alice", 7);
+        stringRepo.save(alice).join();
+        Path dir = tempDir.resolve("legacy_keyed");
+        Path current;
+        try (var files = Files.list(dir)) {
+            current = files.filter(p -> p.toString().endsWith(".json"))
+                .findFirst().orElseThrow(AssertionError::new);
+        }
+        Path legacy = dir.resolve("Alice.json");
+        Files.move(current, legacy);
+
+        assertEquals(alice, stringRepo.find("Alice").join().orElseThrow(AssertionError::new),
+            "legacy file must be readable through the fallback");
+        assertTrue(stringRepo.exists("Alice").join());
+
+        // A re-save migrates to the new stem and removes the legacy file.
+        stringRepo.save(alice).join();
+        assertFalse(Files.exists(legacy), "migrate-on-write must remove the pre-guard file");
+        assertEquals(alice, stringRepo.find("Alice").join().orElseThrow(AssertionError::new));
+        assertEquals(1L, stringRepo.count().join());
+    }
+
+    @Test
     @Order(1031)
     @DisplayName("save leaves no .tmp residue behind (atomic write)")
     void save_leavesNoTmpFiles() throws IOException {

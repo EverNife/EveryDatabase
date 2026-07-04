@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.groupedfile;
 
+import br.com.finalcraft.everydatabase.util.FileKeyNames;
+
 import br.com.finalcraft.everydatabase.codec.Codec;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -107,19 +109,16 @@ final class KeyFileStore {
     }
 
     /**
-     * Sanitises a key into a safe file-name stem. Mirrors LocalFile's key sanitisation: path
-     * separators become {@code _}, and when sanitisation changes the name a stable hash suffix keeps
-     * distinct keys from colliding on disk. {@link String#hashCode()} is specified by the JLS, so the
-     * stem is stable across JVM restarts.
+     * Sanitises a key into a safe file-name stem via {@link FileKeyNames} (the same rules
+     * LocalFile uses): path separators, case-differing names on case-insensitive file systems
+     * and reserved Windows device names all get a stable hash suffix - so the file AND its
+     * per-key lock always collide-or-not together.
      *
      * <p>Must be a pure function of the key so that every repository sharing this store resolves the
      * <em>same</em> file and the <em>same</em> lock for a given key.
      */
     static String sanitize(Object key) {
-        String raw = key.toString();
-        String sanitized = raw.replace("/", "_").replace("\\", "_").replace(":", "_");
-        if (sanitized.equals(raw)) return raw;
-        return sanitized + "_" + String.format("%08x", raw.hashCode());
+        return FileKeyNames.safeStem(key.toString());
     }
 
     Path keyFile(String sanitizedKey) {
