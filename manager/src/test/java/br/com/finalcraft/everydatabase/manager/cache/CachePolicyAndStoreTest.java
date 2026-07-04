@@ -29,6 +29,15 @@ class CachePolicyAndStoreTest {
     }
 
     @Test
+    void ttl_boundary_is_precise() {
+        // The injected Instant age maps deterministically to the cell's monotonic load time, so the
+        // boundary is testable without waiting: 29s old is fresh under a 30s TTL, 31s old is stale.
+        CachePolicy policy = CachePolicy.ttl(Duration.ofSeconds(30));
+        assertTrue(policy.isFresh(new CacheEntry<>("v", Instant.now().minusSeconds(29))));
+        assertFalse(policy.isFresh(new CacheEntry<>("v", Instant.now().minusSeconds(31))));
+    }
+
+    @Test
     void ttl_respects_manual_invalidation_even_when_young() {
         CacheEntry<String> entry = new CacheEntry<>("v", Instant.now());
         entry.markStale();

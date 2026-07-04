@@ -1,7 +1,6 @@
 package br.com.finalcraft.everydatabase.manager.cache;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Locale;
 
 /**
@@ -90,8 +89,12 @@ public interface CachePolicy {
 
         @Override
         public boolean isFresh(CacheEntry<?> entry) {
-            return !entry.isStale()
-                    && Instant.now().isBefore(entry.getLoadedAt().plus(ttl));
+            if (entry.isStale()) {
+                return false;
+            }
+            // Monotonic age (nanoTime), so a wall-clock jump (NTP step, suspend/resume) can never
+            // make a cell look fresher or staler than it really is.
+            return (System.nanoTime() - entry.loadedNanos()) < ttl.toNanos();
         }
 
         @Override

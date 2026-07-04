@@ -1,5 +1,6 @@
 package br.com.finalcraft.everydatabase.manager.cache;
 
+import java.time.Duration;
 import java.time.Instant;
 
 /**
@@ -23,24 +24,40 @@ public class CacheEntry<S> {
 
     protected volatile S value;
     protected volatile Instant loadedAt;
+    /**
+     * Monotonic load time ({@link System#nanoTime()}) - the basis for TTL freshness, so a wall-clock
+     * jump (NTP step, suspend/resume) can never make a cell look fresher or staler than it is. The
+     * {@link Instant} {@link #loadedAt} is kept only for observability ({@link #getLoadedAt()}).
+     */
+    protected volatile long loadedNanos;
     protected volatile boolean stale = false;
     protected volatile boolean evicted = false;
     protected volatile boolean deleted = false;
     protected volatile long stamp = 0L;
 
     public CacheEntry(S value) {
-        this(value, Instant.now());
+        this.value = value;
+        this.loadedAt = Instant.now();
+        this.loadedNanos = System.nanoTime();
     }
 
+    /**
+     * Creates a cell whose observable load instant is {@code loadedAt}. The monotonic TTL basis is
+     * derived from how long ago {@code loadedAt} is relative to now, so passing a past instant makes
+     * the cell that old for freshness purposes (used by tests to simulate age); the wall clock is read
+     * only here at construction - thereafter freshness is purely monotonic.
+     */
     public CacheEntry(S value, Instant loadedAt) {
         this.value = value;
         this.loadedAt = loadedAt;
+        this.loadedNanos = System.nanoTime() - Duration.between(loadedAt, Instant.now()).toNanos();
     }
 
     /** Internal: a cell carrying its publication stamp from the start. */
     public CacheEntry(S value, long stamp) {
         this.value = value;
         this.loadedAt = Instant.now();
+        this.loadedNanos = System.nanoTime();
         this.stamp = stamp;
     }
 
@@ -50,6 +67,11 @@ public class CacheEntry<S> {
 
     public Instant getLoadedAt() {
         return loadedAt;
+    }
+
+    /** Internal: the monotonic load time ({@link System#nanoTime()} basis) used for TTL freshness. */
+    public long loadedNanos() {
+        return loadedNanos;
     }
 
     /** Manual invalidation: the next read that consults a policy reloads from the backend. */
@@ -98,6 +120,7 @@ public class CacheEntry<S> {
         }
         this.value = newValue;
         this.loadedAt = Instant.now();
+        this.loadedNanos = System.nanoTime();
         this.stale = false;
         this.deleted = false;
         this.stamp = newStamp;
@@ -118,6 +141,7 @@ public class CacheEntry<S> {
         this.deleted = true;
         this.stale = false;
         this.loadedAt = Instant.now();
+        this.loadedNanos = System.nanoTime();
         this.stamp = newStamp;
         return true;
     }
