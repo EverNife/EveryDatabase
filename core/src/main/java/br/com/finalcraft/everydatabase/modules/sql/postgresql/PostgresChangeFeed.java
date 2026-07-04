@@ -122,7 +122,9 @@ final class PostgresChangeFeed {
     }
 
     private void dispatch(String payload) {
-        ChangeEvent event = PgChangePayload.decode(mapper, payload);
+        ChangeEvent event = PgChangePayload.decode(mapper, payload, reason ->
+            log.emit(StorageOp.HEALTH, StorageLogLevel.WARN, b -> b
+                .detail("dropped a malformed change-feed NOTIFY payload (channel collision?): " + reason)));
         if (event != null) {
             feed.emit(event);
         }

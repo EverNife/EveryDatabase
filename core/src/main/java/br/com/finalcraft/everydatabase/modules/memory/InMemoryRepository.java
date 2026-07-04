@@ -396,9 +396,6 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     /** The entity's optimistic-lock version, or {@code -1} when the descriptor is not versioned. */
     private long versionOf(V entity) {
-        Function<V, Long> getter = descriptor.versionGetter();
-        if (getter == null) return ChangeEvent.UNKNOWN_VERSION;
-        Long v = getter.apply(entity);
-        return v != null ? v : 0L;
+        return ChangeEvent.versionFor(descriptor.versionGetter(), entity);
     }
 }

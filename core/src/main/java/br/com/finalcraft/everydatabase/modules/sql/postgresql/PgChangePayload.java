@@ -5,6 +5,8 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.changefeed.ChangePayload;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.function.Consumer;
+
 /**
  * PostgreSQL change-feed binding: just the {@code NOTIFY}/{@code LISTEN} channel name. The payload
  * format itself is the backend-neutral {@link ChangePayload}, to which encode/decode delegate.
@@ -24,5 +26,10 @@ final class PgChangePayload {
     /** Parses a payload back to a {@link ChangeEvent}, or {@code null} if it is malformed. */
     static ChangeEvent decode(ObjectMapper mapper, String payload) {
         return ChangePayload.decode(mapper, payload);
+    }
+
+    /** {@link #decode(ObjectMapper, String)} that reports a dropped payload's reason to {@code onInvalid}. */
+    static ChangeEvent decode(ObjectMapper mapper, String payload, Consumer<String> onInvalid) {
+        return ChangePayload.decode(mapper, payload, onInvalid);
     }
 }

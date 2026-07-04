@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.changefeed;
 
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * An immutable notification that an entity changed in a backend - the unit a
@@ -15,9 +16,12 @@ import java.util.Objects;
  *       cross-backend key contract already guarantees this is the canonical string form. A
  *       consumer parses it back to the typed key.</li>
  *   <li>{@link #op()} - {@link ChangeOp#SAVE} or {@link ChangeOp#DELETE}.</li>
- *   <li>{@link #version()} - the optimistic-lock version after the change, or {@code -1} when
- *       unknown / the entity is not versioned. Informational only - a reload reads authoritative
- *       state regardless.</li>
+ *   <li>{@link #version()} - the optimistic-lock version after the change, or {@link #UNKNOWN_VERSION}
+ *       ({@code -1}) when unknown / the entity is not versioned. A {@link ChangeOp#DELETE} always
+ *       carries {@code UNKNOWN_VERSION} (there is no post-delete version). {@code -1} is the only
+ *       negative value ever exposed - any other negative is normalised to it in the constructor, so a
+ *       stray negative from a custom version getter cannot masquerade as a real version. Informational
+ *       only - a reload reads authoritative state regardless.</li>
  *   <li>{@link #originId()} - the {@link ChangeFeedStorage#originId()} of the instance that
  *       produced the change, or {@code null}/empty when the source cannot attribute it (a Mongo
  *       oplog event, a database trigger). Lets a consumer skip its own writes.</li>
@@ -41,8 +45,22 @@ public final class ChangeEvent {
         this.collection = Objects.requireNonNull(collection, "collection");
         this.key        = Objects.requireNonNull(key, "key");
         this.op         = Objects.requireNonNull(op, "op");
-        this.version    = version;
+        // Collapse any negative version to the single UNKNOWN sentinel, so -1 is the only negative a
+        // consumer ever sees and can reliably test with `version >= 0` for "real version present".
+        this.version    = version < UNKNOWN_VERSION ? UNKNOWN_VERSION : version;
         this.originId   = originId;
+    }
+
+    /**
+     * The version to stamp on a change event for {@code entity}: {@link #UNKNOWN_VERSION} when the
+     * descriptor is not versioned ({@code versionGetter == null}), otherwise the entity's version -
+     * a never-persisted entity whose {@code Long} version is still {@code null} reads as {@code 0}.
+     * Shared by the backends so they all attribute the same version to a change.
+     */
+    public static <V> long versionFor(Function<V, Long> versionGetter, V entity) {
+        if (versionGetter == null) return UNKNOWN_VERSION;
+        Long v = versionGetter.apply(entity);
+        return v != null ? v : 0L;
     }
 
     /** A {@link ChangeOp#SAVE} event with an unknown version and no origin. */

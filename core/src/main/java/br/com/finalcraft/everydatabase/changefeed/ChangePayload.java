@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.util.function.Consumer;
+
 /**
  * Compact JSON wire format for a {@link ChangeEvent}, shared by every change-feed transport (a
  * PostgreSQL {@code NOTIFY} payload, a Redis/Valkey pub/sub message, ...). It carries only the
@@ -43,12 +45,23 @@ public final class ChangePayload {
 
     /** Parses a payload back to a {@link ChangeEvent}, or {@code null} if it is malformed. */
     public static ChangeEvent decode(ObjectMapper mapper, String payload) {
+        return decode(mapper, payload, null);
+    }
+
+    /**
+     * Parses a payload back to a {@link ChangeEvent}, or {@code null} if it is malformed. When
+     * {@code onInvalid} is non-null it receives a short reason for a dropped payload, so a transport
+     * can log it - a silent drop hides a channel collision with another application publishing to the
+     * same channel/{@code NOTIFY}.
+     */
+    public static ChangeEvent decode(ObjectMapper mapper, String payload, Consumer<String> onInvalid) {
         try {
             JsonNode node = mapper.readTree(payload);
             String collection = node.path("c").asText(null);
             String key        = node.path("k").asText(null);
             String opName     = node.path("op").asText(null);
             if (collection == null || key == null || opName == null) {
+                if (onInvalid != null) onInvalid.accept("missing a required field (c/k/op)");
                 return null;
             }
             ChangeOp op = ChangeOp.valueOf(opName);
@@ -56,6 +69,10 @@ public final class ChangePayload {
             String origin = node.path("o").asText(null);
             return new ChangeEvent(collection, key, op, version, origin);
         } catch (Exception e) {
+            if (onInvalid != null) {
+                onInvalid.accept(e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? ": " + e.getMessage() : ""));
+            }
             return null;
         }
     }

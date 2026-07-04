@@ -13,6 +13,14 @@ import java.util.function.Consumer;
  * <p>Thread-safe via a {@link CopyOnWriteArrayList}. A listener that throws never breaks the source:
  * each callback is isolated, and the failure is handed to the optional error sink (so a storage can
  * route it to its log) rather than propagating.
+ *
+ * <p><b>Delivery is serial and synchronous on the source thread.</b> {@link #emit(ChangeEvent)}
+ * invokes each listener in turn on the calling thread (the change-stream / NOTIFY / writer thread),
+ * so a slow listener delays the others <em>and</em> stalls the source's read loop - on Postgres, a
+ * consumer that blocks long enough can cause missed notifications if the LISTEN connection drops in
+ * the gap. Keep {@link ChangeListener#onChange} cheap and non-blocking (invalidate a cache cell, drop
+ * a work item on a queue); do the heavy lifting elsewhere. The feed is unordered and at-least-once, so
+ * offloading to your own worker is safe.
  */
 public final class ChangeFeedSupport {
 

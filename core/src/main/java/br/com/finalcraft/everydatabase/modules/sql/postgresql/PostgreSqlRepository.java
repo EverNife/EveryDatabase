@@ -132,13 +132,13 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
         }
     }
 
-    /** The entity's optimistic-lock version after the write, or {@code -1} when not versioned. */
+    /**
+     * The entity's optimistic-lock version after the write, or {@code -1} when not versioned. Shared
+     * with the other backends via {@link ChangeEvent#versionFor} (a never-persisted, still-{@code null}
+     * version reads as {@code 0}).
+     */
     private long versionOf(V entity) {
-        if (!descriptor.isVersioned()) {
-            return ChangeEvent.UNKNOWN_VERSION;
-        }
-        Long v = descriptor.versionGetter().apply(entity);
-        return v != null ? v : ChangeEvent.UNKNOWN_VERSION;
+        return ChangeEvent.versionFor(descriptor.versionGetter(), entity);
     }
 
     @Override
