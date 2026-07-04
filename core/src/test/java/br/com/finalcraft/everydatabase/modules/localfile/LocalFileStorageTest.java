@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -370,5 +371,24 @@ class LocalFileStorageTest extends AbstractStorageTest {
                 .collect(Collectors.toList());
             assertTrue(leftovers.isEmpty(), "no .tmp files may remain after save: " + leftovers);
         }
+    }
+
+    @Test
+    @Order(1036)
+    @DisplayName("count() and all() both skip a corrupted file with the codec extension")
+    void corruptedFile_skippedConsistentlyByCountAndAll() throws IOException {
+        repo.save(alice()).join();
+        repo.save(bob()).join();
+
+        // Drop a file with the codec's extension but invalid content into the collection dir.
+        Path collectionDir = tempDir.resolve(DESCRIPTOR.collection());
+        Files.write(collectionDir.resolve("corrupt.json"),
+            "{ this is not valid json".getBytes(StandardCharsets.UTF_8));
+
+        long count = repo.count().join();
+        long streamed = repo.all().join().count();
+        assertEquals(2L, count, "count() must skip the corrupted file (Alice + Bob only)");
+        assertEquals(2L, streamed, "all() must skip the corrupted file (Alice + Bob only)");
+        assertEquals(count, streamed, "count() and all() must agree in the presence of a corrupted file");
     }
 }

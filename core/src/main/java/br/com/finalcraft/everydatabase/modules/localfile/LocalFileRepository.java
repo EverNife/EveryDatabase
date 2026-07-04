@@ -299,11 +299,24 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             try {
                 if (!Files.exists(collectionDir)) return 0L;
                 String ext = "." + fileExtension();
+                List<Path> files;
                 try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                    return paths
+                    files = paths
                         .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
-                        .count();
+                        .collect(Collectors.toList());
                 }
+                long valid = 0L;
+                for (Path path : files) {
+                    try {
+                        // Decode to stay consistent with all(): a corrupted file is skipped-and-logged
+                        // there, so it must not inflate the count here (count() == all().count()).
+                        descriptor.codec().decode(Files.readAllBytes(path));
+                        valid++;
+                    } catch (Exception e) {
+                        log.skippedCorruptedRow(descriptor.collection(), path.getFileName().toString(), e);
+                    }
+                }
+                return valid;
             } catch (IOException e) {
                 throw log.errored(StorageOp.COUNT, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to count entities", e));

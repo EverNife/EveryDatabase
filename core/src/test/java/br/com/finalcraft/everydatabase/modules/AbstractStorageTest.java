@@ -274,6 +274,17 @@ public abstract class AbstractStorageTest {
         assertFalse(longKeyRepo.exists(tooLong).join(), "the oversized key must not exist");
     }
 
+    @Test
+    @Order(23)
+    @DisplayName("[base] save() with a null key -> failed future, nothing persisted")
+    void save_nullKey_failsFastAndPersistsNothing() {
+        TestPlayer noKey = new TestPlayer(null, "Nobody", 1);
+        CompletionException ex = assertThrows(CompletionException.class, () -> repo.save(noKey).join());
+        assertTrue(ex.getCause() instanceof IllegalArgumentException,
+            "a null key must fail with IllegalArgumentException, got: " + ex.getCause());
+        assertEquals(0L, repo.count().join(), "nothing may be persisted for a null key");
+    }
+
     // ------------------------------------------------------------------
     //  exists + count
     // ------------------------------------------------------------------

@@ -17,13 +17,16 @@ import java.util.Optional;
  * if ACID semantics are required.
  *
  * <pre>{@code
- * // Simple - pretty-print enabled, no periodic fsync
  * Storage storage = Storages.create(new LocalFileConfig(Path.of("data")));
- *
- * // Full control
- * Storage storage = Storages.create(
- *     new LocalFileConfig(Path.of("data"), false, Optional.of(Duration.ofSeconds(30))));
  * }</pre>
+ *
+ * <p><b>{@code prettyPrint} and {@code fsyncEvery} are advisory and currently not applied.</b>
+ * LocalFile treats each entity's serialized form as opaque bytes, so the <em>codec</em> owns
+ * formatting: for human-readable files use {@code JacksonYamlCodec} or
+ * {@code JacksonJsonCodec.pretty(Type.class)} on the descriptor rather than {@code prettyPrint}.
+ * Durability comes from the atomic {@code .tmp} + {@code ATOMIC_MOVE} replace on every write, not from
+ * a periodic fsync loop. The two fields are kept for source and forward compatibility; do not rely on
+ * them to change on-disk behavior today.
  */
 public final class LocalFileConfig implements StorageConfig {
 

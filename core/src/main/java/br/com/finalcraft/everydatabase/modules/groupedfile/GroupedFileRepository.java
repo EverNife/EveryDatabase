@@ -36,6 +36,14 @@ import java.util.stream.Stream;
  * collections of the same key never lose each other's update; the atomic {@code .tmp}+move keeps the
  * file from ever being truncated.
  *
+ * <p><b>Scan consistency.</b> The scans ({@code count}, {@code all}, {@code query}) read key files
+ * without taking the per-key write lock. On the atomic {@code ATOMIC_MOVE} write path this is safe (a
+ * reader sees either the old or the new file, never a partial one). On the {@code REPLACE_EXISTING}
+ * fallback (filesystems that cannot move atomically) a scan racing a concurrent write of the same key
+ * may read a truncated file; such a file is skipped-and-logged, so the effect is a transient
+ * undercount, never a crash. Take a maintenance window (or use an atomic-move filesystem) for scans
+ * that must be exact under concurrent writes.
+ *
  * <p>Entities are (de)serialized through the descriptor's {@code Codec}: the codec's bytes are parsed
  * into a sub-node with the storage's format-matched mapper, embedded in the aggregate document, and
  * re-emitted on read. The codec also decides the container format (JSON vs YAML) for the whole storage
@@ -171,10 +179,15 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 long n = 0;
                 for (Path file : store.keyFiles()) {
                     try {
-                        // count() never materialises entities - parse the envelope and test presence.
+                        // Decode the sub-node to stay consistent with all(): a corrupt key file (or a
+                        // present-but-undecodable sub-node) is skipped-and-logged there and by catching
+                        // Exception here, so it never fails the whole count nor inflates it.
                         ObjectNode root = readRoot(file);
-                        if (root != null && root.has(collection)) n++;
-                    } catch (IOException e) {
+                        if (root != null && root.has(collection)) {
+                            descriptor.codec().decode(store.mapper().writeValueAsBytes(root.get(collection)));
+                            n++;
+                        }
+                    } catch (Exception e) {
                         log.skippedCorruptedRow(collection, file.getFileName().toString(), e);
                     }
                 }

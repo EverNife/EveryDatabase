@@ -40,18 +40,30 @@ public final class StorageKeys {
     public static final int MAX_KEY_LENGTH = 255;
 
     /**
-     * Returns {@code null} when {@code key}'s {@code toString()} is within {@link #MAX_KEY_LENGTH},
-     * or an <b>already-failed</b> future carrying a clear {@link IllegalArgumentException} otherwise.
+     * Validates a key against the cross-backend contract: returns {@code null} when the key is
+     * non-null and its {@code toString()} is within {@link #MAX_KEY_LENGTH}, or an
+     * <b>already-failed</b> future carrying a clear {@link IllegalArgumentException} when the key is
+     * {@code null} or oversized.
      *
      * <p>Backends call this at the start of {@code save}/{@code saveAll} and short-circuit on a
-     * non-null result, so an oversized key surfaces as an exceptional future (the library's
-     * error-propagation contract) rather than a synchronous throw - and never reaches storage.
+     * non-null result, so an invalid key surfaces as an exceptional future (the library's
+     * error-propagation contract) rather than an opaque {@link NullPointerException} (a {@code null}
+     * key hitting {@code key.toString()} or a map lookup) or a truncation collision later - and never
+     * reaches storage.
      *
-     * @param key        the entity key (its {@code toString()} is what gets persisted)
+     * @param key        the entity key (its {@code toString()} is what gets persisted); must be non-null
      * @param collection the collection name, for a helpful message
      */
     public static CompletableFuture<Void> rejectIfTooLong(Object key, String collection) {
-        int length = String.valueOf(key).length();
+        if (key == null) {
+            CompletableFuture<Void> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalArgumentException(
+                "Storage key for collection '" + collection + "' is null: the entity's keyExtractor "
+                + "returned null. Every entity must have a non-null key "
+                + "(see the key contract in StorageKeys / EntityDescriptor)."));
+            return failed;
+        }
+        int length = key.toString().length();
         if (length <= MAX_KEY_LENGTH) {
             return null;
         }
