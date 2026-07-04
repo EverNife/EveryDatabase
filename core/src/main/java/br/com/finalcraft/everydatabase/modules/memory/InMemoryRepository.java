@@ -54,7 +54,9 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     /**
      * indexes[fieldPath] -> indexValue -> set of keys.
-     * Synchronised on the outer map for cross-field consistency between save and query.
+     * Guarded by {@code synchronized(this)} together with {@link #store}: writes update
+     * both under the lock, and index reads (query/count) take the same lock so they never
+     * observe the store and a bucket in disagreeing states.
      */
     private final Map<String, Map<Object, Set<K>>> indexes;
 
@@ -174,21 +176,26 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         if (query.conditions().isEmpty()) {
             return CompletableFuture.completedFuture((long) store.size());
         }
-        Set<K> candidates = null;
-        for (Query.Condition condition : query.conditions()) {
-            IndexHint hint = hintsByPath.get(condition.fieldPath());
-            if (hint == null) {
-                throw new IllegalArgumentException(
-                    "InMemory: field '" + condition.fieldPath() + "' is not indexed. "
-                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
-            }
-            Set<K> hits = evaluateCondition(condition, hint);
-            candidates = (candidates == null) ? new LinkedHashSet<>(hits) : intersect(candidates, hits);
-            if (candidates.isEmpty()) break;
-        }
         long n = 0;
-        if (candidates != null) {
-            for (K k : candidates) if (store.get(k) != null) n++;
+        // Same lock as save/delete: the store and the index buckets mutate together under
+        // it, so an unlocked read could observe a half-applied save (key removed from the
+        // old bucket but not yet added to the new one).
+        synchronized (this) {
+            Set<K> candidates = null;
+            for (Query.Condition condition : query.conditions()) {
+                IndexHint hint = hintsByPath.get(condition.fieldPath());
+                if (hint == null) {
+                    throw new IllegalArgumentException(
+                        "InMemory: field '" + condition.fieldPath() + "' is not indexed. "
+                        + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+                }
+                Set<K> hits = evaluateCondition(condition, hint);
+                candidates = (candidates == null) ? new LinkedHashSet<>(hits) : intersect(candidates, hits);
+                if (candidates.isEmpty()) break;
+            }
+            if (candidates != null) {
+                for (K k : candidates) if (store.get(k) != null) n++;
+            }
         }
         return CompletableFuture.completedFuture(n);
     }
@@ -253,30 +260,36 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         // Intersect candidate-key sets across all conditions.
         long startMs = System.currentTimeMillis();
 
-        Set<K> candidates = null;
-        for (Query.Condition condition : query.conditions()) {
-            IndexHint hint = hintsByPath.get(condition.fieldPath());
-            if (hint == null) {
-                throw new IllegalArgumentException(
-                    "InMemory: field '" + condition.fieldPath() + "' is not indexed. "
-                    + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
-            }
-            Set<K> hits = evaluateCondition(condition, hint);
-            candidates = (candidates == null) ? new LinkedHashSet<>(hits)
-                                              : intersect(candidates, hits);
-            if (candidates.isEmpty()) break; // short-circuit
-        }
         QueryResultOrdering.validateOrderField(options, hintsByPath, "InMemory");
 
-        List<V> result = new ArrayList<>(query.conditions().isEmpty() ? store.size() : (candidates == null ? 0 : candidates.size()));
-        if (query.conditions().isEmpty()) {
-            for (V v : store.values()) {
-                if (v != null) result.add(deepCopy(v));
+        List<V> result;
+        // Same lock as save/delete: candidate evaluation plus row materialisation must see
+        // the store and every index bucket in one consistent state.
+        synchronized (this) {
+            Set<K> candidates = null;
+            for (Query.Condition condition : query.conditions()) {
+                IndexHint hint = hintsByPath.get(condition.fieldPath());
+                if (hint == null) {
+                    throw new IllegalArgumentException(
+                        "InMemory: field '" + condition.fieldPath() + "' is not indexed. "
+                        + "Declare it on the EntityDescriptor with .index(IndexHint.<type>(\"...\")).");
+                }
+                Set<K> hits = evaluateCondition(condition, hint);
+                candidates = (candidates == null) ? new LinkedHashSet<>(hits)
+                                                  : intersect(candidates, hits);
+                if (candidates.isEmpty()) break; // short-circuit
             }
-        } else if (candidates != null) {
-            for (K k : candidates) {
-                V v = store.get(k);
-                if (v != null) result.add(deepCopy(v));
+
+            result = new ArrayList<>(query.conditions().isEmpty() ? store.size() : (candidates == null ? 0 : candidates.size()));
+            if (query.conditions().isEmpty()) {
+                for (V v : store.values()) {
+                    if (v != null) result.add(deepCopy(v));
+                }
+            } else if (candidates != null) {
+                for (K k : candidates) {
+                    V v = store.get(k);
+                    if (v != null) result.add(deepCopy(v));
+                }
             }
         }
         result = QueryResultOrdering.apply(result, options, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
