@@ -569,25 +569,54 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         T execute(Connection conn) throws SQLException, CodecException;
     }
 
-    <T> CompletableFuture<T> withConnection(SqlWork<T> work) {
+    /**
+     * Runs {@code work} on a connection - the shared transaction connection when inside an
+     * {@link SqlStorage#inTransaction} scope (synchronously), otherwise a pooled connection on the
+     * async executor. A failure is wrapped and raised on the ERROR log floor for {@code op} via
+     * {@link #reportSqlFailure}, so a CRUD failure is always visible even when its READ/WRITE topic
+     * is muted - matching the other backends. An {@link OptimisticLockException} is expected control
+     * flow (already WARN-logged at the conflict site) and is passed through without an ERROR event.
+     */
+    <T> CompletableFuture<T> withConnection(StorageOp op, SqlWork<T> work) {
         Connection tx = txConnection.get();
         if (tx != null) {
             try {
                 return CompletableFuture.completedFuture(work.execute(tx));
             } catch (Exception e) {
                 CompletableFuture<T> f = new CompletableFuture<>();
-                f.completeExceptionally(e instanceof RuntimeException ? e
-                    : new RuntimeException("SQL operation failed (tx)", e));
+                f.completeExceptionally(reportSqlFailure(op, e, " (tx)"));
                 return f;
             }
         }
         return CompletableFuture.supplyAsync(() -> {
             try (Connection conn = dataSource.getConnection()) {
                 return work.execute(conn);
-            } catch (SQLException | CodecException e) {
-                throw new RuntimeException("SQL operation failed", e);
+            } catch (Exception e) {
+                throw reportSqlFailure(op, e, "");
             }
         }, StorageExecutors.get());
+    }
+
+    /**
+     * Wraps a SQL failure into a {@link RuntimeException} (preserving one that is already unchecked)
+     * and raises the ERROR-floor event for {@code op}. An {@link OptimisticLockException} anywhere in
+     * the cause chain is returned untouched - it is expected control flow and is not an ERROR.
+     */
+    private RuntimeException reportSqlFailure(StorageOp op, Exception e, String context) {
+        RuntimeException wrapped = e instanceof RuntimeException
+            ? (RuntimeException) e
+            : new RuntimeException("SQL operation failed" + context, e);
+        if (isOptimisticLock(wrapped)) {
+            return wrapped;
+        }
+        return log.errored(op, tableName(), wrapped);
+    }
+
+    private static boolean isOptimisticLock(Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            if (cause instanceof OptimisticLockException) return true;
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -598,7 +627,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Optional<V>> find(K key) {
         String sql = "SELECT " + q(COL_DATA) + " FROM " + q(tableName())
             + " WHERE " + q(COL_KEY) + " = ?";
-        return withConnection(conn -> {
+        return withConnection(StorageOp.FIND, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, key.toString());
                 try (ResultSet rs = ps.executeQuery()) {
@@ -617,7 +646,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         String placeholders = repeat("?", keyList.size(), ",");
         String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName())
             + " WHERE " + q(COL_KEY) + " IN (" + placeholders + ")";
-        return withConnection(conn -> {
+        return withConnection(StorageOp.FIND_MANY, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (int i = 0; i < keyList.size(); i++) ps.setString(i + 1, keyList.get(i).toString());
                 return readEntities(ps);
@@ -635,7 +664,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         String placeholders = repeat("?", keyList.size(), ",");
         String sql = "SELECT " + q(COL_KEY) + ", " + versionExpr + " FROM " + q(tableName())
             + " WHERE " + q(COL_KEY) + " IN (" + placeholders + ")";
-        return withConnection(conn -> {
+        return withConnection(StorageOp.FIND_MANY, conn -> {
             Map<String, K> byString = new HashMap<>();
             for (K k : keyList) byString.put(k.toString(), k);
             Map<K, Long> result = new HashMap<>();
@@ -660,7 +689,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         if (versioningActive()) {
             return saveVersioned(entity);
         }
-        return withConnection(conn -> {
+        return withConnection(StorageOp.SAVE, conn -> {
             byte[] data = descriptor.codec().encode(entity);
             try (PreparedStatement ps = conn.prepareStatement(upsertSql())) {
                 bindUpsertParameters(ps, key, entity, data);
@@ -683,7 +712,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     private CompletableFuture<Void> saveVersioned(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
         long incomingVersion = descriptor.versionGetter().apply(entity);
-        return withConnection(conn -> {
+        return withConnection(StorageOp.SAVE, conn -> {
             boolean autoCommit = conn.getAutoCommit();
             if (autoCommit) conn.setAutoCommit(false);
             try {
@@ -827,7 +856,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         if (versioningActive()) {
             // For versioned descriptors: loop save() per entity within a single connection
             // to ensure each entity's optimistic lock check is atomic.
-            return withConnection(conn -> {
+            return withConnection(StorageOp.SAVE_BATCH, conn -> {
                 boolean autoCommit = conn.getAutoCommit();
                 if (autoCommit) conn.setAutoCommit(false);
                 try {
@@ -847,7 +876,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
         long startMs = System.currentTimeMillis();
         long count = entities.size();
-        return withConnection(conn -> {
+        return withConnection(StorageOp.SAVE_BATCH, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(upsertSql())) {
                 for (V entity : entities) {
                     K key = descriptor.keyExtractor().apply(entity);
@@ -914,7 +943,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Boolean> delete(K key) {
         String sql = "DELETE FROM " + q(tableName()) + " WHERE " + q(COL_KEY) + " = ?";
-        return withConnection(conn -> {
+        return withConnection(StorageOp.DELETE, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, key.toString());
                 boolean existed = ps.executeUpdate() > 0;
@@ -928,7 +957,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Boolean> exists(K key) {
         String sql = "SELECT 1 FROM " + q(tableName())
             + " WHERE " + q(COL_KEY) + " = ? LIMIT 1";
-        return withConnection(conn -> {
+        return withConnection(StorageOp.EXISTS, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, key.toString());
                 try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
@@ -939,7 +968,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Long> count() {
         String sql = "SELECT COUNT(*) FROM " + q(tableName());
-        return withConnection(conn -> {
+        return withConnection(StorageOp.COUNT, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql);
                  ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
@@ -967,7 +996,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         }
         StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM ").append(q(tableName()));
         if (where.length() > 0) sql.append(" WHERE ").append(where);
-        return withConnection(conn -> {
+        return withConnection(StorageOp.COUNT, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
                 for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
                 try (ResultSet rs = ps.executeQuery()) {
@@ -980,7 +1009,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Stream<V>> all() {
         String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName());
-        return withConnection(conn -> {
+        return withConnection(StorageOp.SCAN_ALL, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 return readEntities(ps).stream();
             }
@@ -1032,7 +1061,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         applyQueryOptions(sql, params, options);
         long startMs = System.currentTimeMillis();
 
-        return withConnection(conn -> {
+        return withConnection(StorageOp.QUERY, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
                 for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
                 List<V> result = readEntities(ps);
@@ -1110,7 +1139,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             .append(", ").append(q(COL_KEY)).append(" ASC LIMIT ?");
         params.add(limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1);   // probe one extra for hasNext
         long startMs = System.currentTimeMillis();
-        return withConnection(conn -> {
+        return withConnection(StorageOp.QUERY, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
                 for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
                 List<V> rows = readEntities(ps);

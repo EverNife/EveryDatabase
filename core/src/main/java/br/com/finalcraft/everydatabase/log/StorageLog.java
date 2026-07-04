@@ -36,6 +36,14 @@ import java.util.function.Supplier;
  *
  * <p>Sink failures are always swallowed internally so that a broken logger never
  * disrupts a storage operation.
+ *
+ * <p><b>Privacy.</b> Emitted <em>events</em> never carry entity keys or content by default: keys are
+ * opt-in via {@code includeKeys} (values via {@code includeValues}, query literals via
+ * {@code includeQueryValues}). This is the channel operators point at their logging framework, so it
+ * stays content-free unless explicitly opted in. Exception <em>messages</em> are a separate channel:
+ * the {@link RuntimeException} that {@link #errored} returns (and the ones the backends throw for a
+ * failed per-key operation) may name the key, because it is handed back to the immediate caller who
+ * already supplied it - not broadcast to the log sink.
  */
 public final class StorageLog {
 
@@ -353,10 +361,14 @@ public final class StorageLog {
      * Level: {@link StorageLogLevel#WARN} (the exception still propagates after this).
      */
     public void optimisticLockConflict(String collection, Object key, long incomingVersion, long actualVersion) {
-        emit(StorageOp.SAVE, StorageLogLevel.WARN, b -> b
-            .collection(collection)
-            .detail("optimistic-lock conflict key=" + key
-                + " incomingVersion=" + incomingVersion + " actualVersion=" + actualVersion));
+        StorageLogConfig c = cfg.get();
+        emit(StorageOp.SAVE, StorageLogLevel.WARN, b -> {
+            // Version numbers are metadata, not entity content; the key is opt-in like every other event.
+            String detail = "optimistic-lock conflict incomingVersion=" + incomingVersion
+                + " actualVersion=" + actualVersion;
+            if (c.includeKeys()) detail += " key=" + key;
+            b.collection(collection).detail(detail);
+        });
     }
 
     /**
@@ -421,10 +433,12 @@ public final class StorageLog {
      * @param cause      the decode/IO exception that caused the skip
      */
     public void skippedCorruptedRow(String collection, String keyOrFile, Throwable cause) {
+        StorageLogConfig c = cfg.get();
         emit(StorageOp.SCAN_ALL, StorageLogLevel.WARN, b -> {
             b.collection(collection).error(cause);
             String detail = "skipped corrupted row";
-            if (keyOrFile != null) detail += " key=" + keyOrFile;
+            // The row identifier (key or file name) is opt-in, like every other event's key.
+            if (keyOrFile != null && c.includeKeys()) detail += " key=" + keyOrFile;
             b.detail(detail);
         });
     }
