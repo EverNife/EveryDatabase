@@ -70,6 +70,14 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     protected static final String COL_DATA    = "storage_data";
     protected static final String COL_VERSION = "lock_version";
 
+    /**
+     * Maximum number of bind parameters per {@code IN (...)} statement. {@code findMany}/{@code versions}
+     * split larger key sets into chunks so a big cache-invalidation batch never trips PostgreSQL's
+     * 65535-parameter cap or MySQL's {@code max_allowed_packet}. The common case (fewer keys) stays a
+     * single statement.
+     */
+    private static final int MAX_IN_PARAMS = 1000;
+
     protected final EntityDescriptor<K, V> descriptor;
     protected final DataSource dataSource;
     /** Non-null on the transaction thread when inside an {@link SqlStorage#inTransaction} scope. */
@@ -281,8 +289,14 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             stmt.execute("ALTER TABLE " + q(tableName())
                 + " ADD COLUMN " + q(hint.indexColumnName())
                 + " " + sqlTypeFor(hint));
+            return true;
+        } catch (SQLException e) {
+            // Two instances starting up together both see the column absent and both ALTER (there is
+            // no portable ADD COLUMN IF NOT EXISTS on MySQL). If it is now present, the other instance
+            // won the race - absorb it and let that instance own the backfill; otherwise it is a real error.
+            if (columnExists(conn, hint.indexColumnName())) return false;
+            throw e;
         }
-        return true;
     }
 
     /**
@@ -293,9 +307,16 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      * internal catalog) as well as on case-preserving databases like PostgreSQL and MariaDB.
      */
     private boolean indexColumnExists(Connection conn, IndexHint hint) throws SQLException {
-        DatabaseMetaData meta = conn.getMetaData();
-        String colName = hint.indexColumnName();
+        return columnExists(conn, hint.indexColumnName());
+    }
 
+    /**
+     * Portable existence check for a column by name, tolerant of identifier-case rules (tries the
+     * original and the upper-case table name, and compares column names case-insensitively). Used both
+     * before an {@code ADD COLUMN} and to absorb a concurrent-startup ALTER race.
+     */
+    private boolean columnExists(Connection conn, String colName) throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
         // Try original name first, then upper-case (H2 default-mode stores identifiers in UPPER).
         for (String tbl : new String[]{tableName(), tableName().toUpperCase(Locale.ROOT)}) {
             try (ResultSet rs = meta.getColumns(null, null, tbl, null)) {
@@ -353,8 +374,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             if (!declared.contains(column.toLowerCase(Locale.ROOT))) {
                 try (Statement stmt = conn.createStatement()) {
                     stmt.execute("ALTER TABLE " + q(tableName()) + " DROP COLUMN " + q(column));
+                    droppedColumns.add(column);
+                } catch (SQLException e) {
+                    // A concurrent instance may have dropped the same orphan column first; if it is
+                    // already gone, absorb the race - otherwise the failure is real.
+                    if (columnExists(conn, column)) throw e;
                 }
-                droppedColumns.add(column);
             }
         }
         return droppedColumns;
@@ -643,14 +668,18 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<List<V>> findMany(Collection<K> keys) {
         if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyList());
         List<K> keyList = new ArrayList<>(keys);
-        String placeholders = repeat("?", keyList.size(), ",");
-        String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName())
-            + " WHERE " + q(COL_KEY) + " IN (" + placeholders + ")";
         return withConnection(StorageOp.FIND_MANY, conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                for (int i = 0; i < keyList.size(); i++) ps.setString(i + 1, keyList.get(i).toString());
-                return readEntities(ps);
+            List<V> result = new ArrayList<>(keyList.size());
+            for (int start = 0; start < keyList.size(); start += MAX_IN_PARAMS) {
+                List<K> chunk = keyList.subList(start, Math.min(start + MAX_IN_PARAMS, keyList.size()));
+                String sql = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName())
+                    + " WHERE " + q(COL_KEY) + " IN (" + repeat("?", chunk.size(), ",") + ")";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (int i = 0; i < chunk.size(); i++) ps.setString(i + 1, chunk.get(i).toString());
+                    result.addAll(readEntities(ps));
+                }
             }
+            return result;
         });
     }
 
@@ -661,19 +690,21 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         // H2 (and non-versioned descriptors) have no lock_version column - SELECT a literal 0 so the
         // result still reports existence (deletes detectable) even though updates are not.
         String versionExpr = versioningActive() ? q(COL_VERSION) : "0";
-        String placeholders = repeat("?", keyList.size(), ",");
-        String sql = "SELECT " + q(COL_KEY) + ", " + versionExpr + " FROM " + q(tableName())
-            + " WHERE " + q(COL_KEY) + " IN (" + placeholders + ")";
         return withConnection(StorageOp.FIND_MANY, conn -> {
             Map<String, K> byString = new HashMap<>();
             for (K k : keyList) byString.put(k.toString(), k);
             Map<K, Long> result = new HashMap<>();
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                for (int i = 0; i < keyList.size(); i++) ps.setString(i + 1, keyList.get(i).toString());
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        K key = byString.get(rs.getString(1));
-                        if (key != null) result.put(key, rs.getLong(2));
+            for (int start = 0; start < keyList.size(); start += MAX_IN_PARAMS) {
+                List<K> chunk = keyList.subList(start, Math.min(start + MAX_IN_PARAMS, keyList.size()));
+                String sql = "SELECT " + q(COL_KEY) + ", " + versionExpr + " FROM " + q(tableName())
+                    + " WHERE " + q(COL_KEY) + " IN (" + repeat("?", chunk.size(), ",") + ")";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (int i = 0; i < chunk.size(); i++) ps.setString(i + 1, chunk.get(i).toString());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            K key = byString.get(rs.getString(1));
+                            if (key != null) result.put(key, rs.getLong(2));
+                        }
                     }
                 }
             }

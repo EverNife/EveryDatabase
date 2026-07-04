@@ -313,6 +313,27 @@ public abstract class AbstractStorageTest {
             "an empty key collection must produce an empty result");
     }
 
+    @Test
+    @Order(33)
+    @DisplayName("[base] findMany()/versions() with more keys than the SQL IN-chunk size return them all")
+    void findMany_largeKeySet_spansChunksAndReturnsAll() {
+        int n = 1200;   // > the SQL IN-parameter chunk size, to exercise the multi-chunk fetch path
+        List<TestPlayer> players = new ArrayList<>(n);
+        List<UUID> ids = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            UUID id = UUID.randomUUID();
+            ids.add(id);
+            players.add(new TestPlayer(id, "P" + i, i));
+        }
+        repo.saveAll(players).join();
+
+        List<TestPlayer> found = repo.findMany(ids).join();
+        assertEquals(n, found.size(), "findMany must return every key across IN-chunk boundaries");
+
+        Map<UUID, Long> versions = repo.versions(ids).join();
+        assertEquals(n, versions.size(), "versions must report every existing key across chunks");
+    }
+
     // ------------------------------------------------------------------
     //  delete
     // ------------------------------------------------------------------
