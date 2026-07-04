@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Internal implementation of {@link StorageTransfer}.
@@ -219,8 +220,13 @@ final class StorageTransferImpl implements StorageTransfer {
             return errorPolicy == ErrorPolicy.FAIL_FAST;
         }
 
-        // Read all entities from source into memory (materialised, not streamed, so batching is simple)
-        List<V> all = sourceRepo.all().join().collect(Collectors.toList());
+        // Read all entities from source into memory (materialised, not streamed, so batching is simple).
+        // Close the stream defensively: today every backend materialises before returning it, but the
+        // contract allows a future cursor-backed stream that holds a resource.
+        List<V> all;
+        try (Stream<V> src = sourceRepo.all().join()) {
+            all = src.collect(Collectors.toList());
+        }
 
         boolean aborted = false;
 

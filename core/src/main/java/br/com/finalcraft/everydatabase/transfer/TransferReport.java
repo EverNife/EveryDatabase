@@ -36,13 +36,15 @@ public final class TransferReport {
     private final long durationMs;
     private final Map<String, CollectionStats> collections;
     private final List<TransferError> errors;
+    private final long suppressedErrors;
 
     private TransferReport(Builder b) {
-        this.success       = b.success;
-        this.totalEntities = b.totalEntities;
-        this.durationMs    = b.durationMs;
-        this.collections   = Collections.unmodifiableMap(new LinkedHashMap<>(b.collections));
-        this.errors        = Collections.unmodifiableList(new ArrayList<>(b.errors));
+        this.success          = b.success;
+        this.totalEntities    = b.totalEntities;
+        this.durationMs       = b.durationMs;
+        this.collections      = Collections.unmodifiableMap(new LinkedHashMap<>(b.collections));
+        this.errors           = Collections.unmodifiableList(new ArrayList<>(b.errors));
+        this.suppressedErrors = b.suppressedErrors;
     }
 
     /**
@@ -71,8 +73,19 @@ public final class TransferReport {
      * All errors recorded during the transfer.
      * Empty when {@link #success()} is {@code true}.
      * With {@link ErrorPolicy#FAIL_FAST} this list has at most one entry.
+     *
+     * <p>Bounded: at most {@value Builder#MAX_RETAINED_ERRORS} errors are retained so a huge
+     * {@link ErrorPolicy#CONTINUE} run over a failing collection cannot exhaust memory with stack
+     * traces. Any beyond that are counted in {@link #suppressedErrors()} but not stored.
      */
     public List<TransferError> errors() { return errors; }
+
+    /**
+     * Number of errors that occurred beyond the retention cap and were therefore counted but not
+     * kept in {@link #errors()}. {@code 0} in the normal case; positive only on a pathological run
+     * with more than {@value Builder#MAX_RETAINED_ERRORS} failures.
+     */
+    public long suppressedErrors() { return suppressedErrors; }
 
     @Override
     public String toString() {
@@ -80,6 +93,7 @@ public final class TransferReport {
             + ", totalEntities=" + totalEntities
             + ", collections=" + collections.size()
             + ", errors=" + errors.size()
+            + (suppressedErrors > 0 ? " (+" + suppressedErrors + " suppressed)" : "")
             + ", " + durationMs + "ms}";
     }
 
@@ -93,10 +107,14 @@ public final class TransferReport {
 
     static final class Builder {
 
+        /** Cap on retained {@link TransferError}s; extras are counted in {@code suppressedErrors}. */
+        static final int MAX_RETAINED_ERRORS = 1000;
+
         private final long startMs;
         boolean success = true;
         long totalEntities = 0L;
         long durationMs = 0L;
+        long suppressedErrors = 0L;
         final Map<String, CollectionStats> collections = new LinkedHashMap<>();
         final List<TransferError> errors = new ArrayList<>();
 
@@ -111,7 +129,11 @@ public final class TransferReport {
         }
 
         Builder addError(TransferError error) {
-            errors.add(error);
+            if (errors.size() < MAX_RETAINED_ERRORS) {
+                errors.add(error);
+            } else {
+                suppressedErrors++;   // bound memory on a pathological CONTINUE run
+            }
             this.success = false;
             return this;
         }
