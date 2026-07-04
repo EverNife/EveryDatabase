@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.modules.mongo;
 
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.modules.AbstractStorageTest;
+import br.com.finalcraft.everydatabase.modules.AbstractTransactionalStorageTest;
 import br.com.finalcraft.everydatabase.schema.Migration;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
@@ -55,14 +56,13 @@ import static org.junit.jupiter.api.Assertions.*;
  * All created databases are dropped in {@link #cleanupDatabases()}.
  *
  * <h3>Transactions</h3>
- * <p>Multi-document transactions in MongoDB require a replica set (MongoDB 4.0+).
- * A standalone single-node server does not support them. Transaction-specific tests are
- * therefore omitted here; they belong in an integration test against a replica-set cluster.
- * The {@link TransactionalStorage} capability assertion still verifies that the interface
- * is declared without exercising it.
+ * <p>Multi-document transactions in MongoDB require a replica set (MongoDB 4.0+). The
+ * docker-compose test server is a 1-node replica set, so this suite extends
+ * {@link AbstractTransactionalStorageTest} and runs the full shared {@code [tx]}
+ * commit/rollback/lifecycle contract like every SQL dialect.
  */
-@DisplayName("MongoStorage (requires MongoDB 4.2+)")
-class MongoStorageTest extends AbstractStorageTest {
+@DisplayName("MongoStorage (requires MongoDB 4.2+ replica set)")
+class MongoStorageTest extends AbstractTransactionalStorageTest {
 
     // ------------------------------------------------------------------
     //  Connection coordinates - env vars with fallback defaults
@@ -80,6 +80,9 @@ class MongoStorageTest extends AbstractStorageTest {
 
     private static final ThrowawayDatabaseSupport DBS = ThrowawayDatabaseSupport.mongo(MONGO_URL, "mg");
 
+    /** Database of the storage under test, so the extra storage can attach to the same data. */
+    private String currentTestDbName;
+
     @BeforeAll
     static void assumeMongoAvailable() {
         DBS.assumeAvailable("MongoStorageTest");
@@ -91,12 +94,18 @@ class MongoStorageTest extends AbstractStorageTest {
     }
 
     // ------------------------------------------------------------------
-    //  AbstractStorageTest contract
+    //  AbstractStorageTest / AbstractTransactionalStorageTest contract
     // ------------------------------------------------------------------
 
     @Override
     protected Storage createStorage(String testMethodName) {
-        return new MongoStorage(new MongoConfig(MONGO_URL, DBS.newDatabase(testMethodName)));
+        currentTestDbName = DBS.newDatabase(testMethodName);
+        return new MongoStorage(new MongoConfig(MONGO_URL, currentTestDbName));
+    }
+
+    @Override
+    protected Storage openExtraStorageOnSameDatabase() {
+        return new MongoStorage(new MongoConfig(MONGO_URL, currentTestDbName));
     }
 
     // ------------------------------------------------------------------
