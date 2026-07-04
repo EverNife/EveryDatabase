@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.versioned;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.AnnotatedVersionedTestPlayer;
+import br.com.finalcraft.everydatabase.data.TestPlayer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +46,20 @@ class OptimisticLockAnnotationTest {
             "@OptimisticLock alone must activate optimistic locking");
         assertNotNull(descriptor.versionGetter());
         assertNotNull(descriptor.versionSetter());
+    }
+
+    @Test
+    @DisplayName(".versioned() on a type that does not implement Versioned throws at build(), not on first write")
+    void versionedInterface_onNonVersionedType_throwsEagerlyAtBuild() {
+        IllegalStateException ex = assertThrows(IllegalStateException.class, () ->
+            EntityDescriptor.builder(UUID.class, TestPlayer.class)     // TestPlayer does not implement Versioned
+                .collection("annotation_test")
+                .keyExtractor(TestPlayer::getUuid)
+                .codec(new JacksonJsonCodec<>(TestPlayer.class))
+                .versioned()
+                .build());
+        assertTrue(ex.getMessage().contains("Versioned"),
+            "the eager error must name the Versioned interface: " + ex.getMessage());
     }
 
     @Test

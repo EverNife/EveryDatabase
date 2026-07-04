@@ -38,6 +38,17 @@ public interface TransactionalStorage extends Storage {
      *       called, the transaction is <strong>rolled back</strong>.</li>
      * </ul>
      *
+     * <p><b>No nesting.</b> Calling {@code inTransaction} again from inside the {@code work} lambda
+     * fails with an {@link IllegalStateException} (delivered as the exceptional completion of the
+     * nested future). A nested call would run on a separate connection/session and commit
+     * independently of the outer transaction, so it is rejected rather than silently split.
+     *
+     * <p><b>Stay on the transaction thread.</b> The scope's repositories are bound to the transaction
+     * via a per-thread handle. Composing with the <em>non</em>-async continuations
+     * ({@code thenApply}/{@code thenCompose}) keeps the work on the transaction thread; dispatching to
+     * another thread inside the lambda ({@code thenApplyAsync}, a manual {@code supplyAsync}, a raw
+     * {@code new Thread}) escapes the transaction silently - those operations run outside it.
+     *
      * @param <R>  the result type produced by {@code work}
      * @param work the unit of work; receives a {@link TransactionScope} that provides
      *             repositories bound to the current transaction

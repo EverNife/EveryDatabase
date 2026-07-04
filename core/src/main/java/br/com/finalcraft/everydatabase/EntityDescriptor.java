@@ -143,6 +143,8 @@ public final class EntityDescriptor<K, V> {
         private final List<IndexHint> indexes = new ArrayList<>();
         private Function<V, Long>    versionGetter;
         private BiConsumer<V, Long>  versionSetter;
+        /** Set by {@link #versioned()} so build() can validate the type implements Versioned eagerly. */
+        private boolean versionedByInterface = false;
 
         private Builder(Class<K> keyType, Class<V> type) {
             this.keyType = keyType;
@@ -218,14 +220,16 @@ public final class EntityDescriptor<K, V> {
          *          (v, ver) -> ((Versioned) v).setLockVersion(ver))
          * </pre>
          *
-         * <p>The descriptor's entity type {@code V} must implement {@link Versioned} at
-         * runtime; a {@link ClassCastException} will be thrown by the lambdas otherwise.
+         * <p>The descriptor's entity type {@code V} must implement {@link Versioned}; this is
+         * validated eagerly in {@link #build()} (an {@link IllegalStateException} with a clear
+         * message), not deferred to a {@link ClassCastException} on the first write.
          *
          * @return this builder
          */
         public Builder<K, V> versioned() {
             this.versionGetter = v -> ((Versioned) v).getLockVersion();
             this.versionSetter = (v, ver) -> ((Versioned) v).setLockVersion(ver);
+            this.versionedByInterface = true;
             return this;
         }
 
@@ -284,6 +288,15 @@ public final class EntityDescriptor<K, V> {
                         + "(Check both manual .index() calls and @Indexed annotations on "
                         + type.getSimpleName() + ".)");
                 }
+            }
+
+            // .versioned() promises the entity implements Versioned; validate it here rather than
+            // letting the accessor lambdas throw a bare ClassCastException on the first write.
+            if (versionedByInterface && !Versioned.class.isAssignableFrom(type)) {
+                throw new IllegalStateException(
+                    "EntityDescriptor: .versioned() requires the entity type " + type.getSimpleName()
+                    + " to implement " + Versioned.class.getSimpleName() + ", but it does not. "
+                    + "Implement Versioned, or wire the version accessors with .version(getter, setter).");
             }
 
             // Resolve the version accessors: manual .version(...)/.versioned() wiring, or the

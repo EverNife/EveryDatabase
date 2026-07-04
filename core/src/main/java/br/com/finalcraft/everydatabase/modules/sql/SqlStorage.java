@@ -295,6 +295,18 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
 
     @Override
     public <R> CompletableFuture<R> inTransaction(Function<TransactionScope, CompletableFuture<R>> work) {
+        // Nesting check runs on the CALLER thread: a nested call is issued from inside the outer
+        // work lambda, which runs on the pooled thread that holds the outer's txConnection. A nested
+        // transaction would run on a different pooled connection and commit independently of the outer
+        // one, so we reject it instead of letting that surprise through.
+        if (txConnection.get() != null) {
+            CompletableFuture<R> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalStateException(
+                "Nested inTransaction() is not supported: this thread is already inside a transaction. "
+                + "A nested call would run on a separate pooled connection and commit independently of "
+                + "the outer transaction. Do all the work inside one transaction scope."));
+            return failed;
+        }
         return CompletableFuture.supplyAsync(() -> {
             Connection conn;
             try {

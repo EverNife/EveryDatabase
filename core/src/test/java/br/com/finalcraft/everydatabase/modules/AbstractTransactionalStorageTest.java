@@ -18,6 +18,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
@@ -91,6 +92,27 @@ public abstract class AbstractTransactionalStorageTest extends AbstractStorageTe
             "using the scope after the transaction ended must fail fast, not silently escape the tx");
         assertThrows(IllegalStateException.class, () -> leaked[0].rollback(),
             "rollback() after the transaction ended must fail fast");
+    }
+
+    @Test
+    @Order(1004)
+    @DisplayName("[tx] nested inTransaction() is rejected with IllegalStateException")
+    void nestedInTransaction_isRejected() {
+        TransactionalStorage tx = (TransactionalStorage) storage;
+        CompletionException ex = assertThrows(CompletionException.class, () ->
+            tx.inTransaction(outer ->
+                tx.inTransaction(inner -> CompletableFuture.completedFuture((Void) null))
+            ).join());
+
+        boolean hasIllegalState = false;
+        for (Throwable c = ex; c != null; c = c.getCause()) {
+            if (c instanceof IllegalStateException) { hasIllegalState = true; break; }
+        }
+        assertTrue(hasIllegalState,
+            "a nested inTransaction() must fail with IllegalStateException in the cause chain, got: " + ex);
+
+        // The outer transaction rolled back cleanly: nothing leaked.
+        assertEquals(0L, repo.count().join(), "a rejected nested transaction must leave no data behind");
     }
 
     // ------------------------------------------------------------------

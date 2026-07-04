@@ -42,8 +42,16 @@ package br.com.finalcraft.everydatabase.schema;
 public interface Migration {
 
     /**
-     * A lexicographically sortable version identifier, e.g. {@code "001"}, {@code "2024-01-15"}.
-     * Must be unique across all migrations for a given storage.
+     * A version identifier, e.g. {@code "001"}, {@code "2024-01-15"}. Must be unique across all
+     * migrations for a given storage (a duplicate is rejected at {@code register()}).
+     *
+     * <p><b>Ordering is by {@link String} comparison</b>, not numeric: migrations run in ascending
+     * lexicographic order and {@code currentVersion()} reports the lexicographically greatest applied
+     * one. So the identifier must be <em>lexicographically sortable in the intended order</em> - use
+     * a fixed-width, zero-padded number ({@code "001"}, {@code "002"}, ... {@code "010"}) or an
+     * ISO-8601 date ({@code "2024-01-15"}). A ragged scheme like {@code "1"}, {@code "2"}, {@code "10"}
+     * misorders ({@code "10"} sorts before {@code "9"}); this is not validated, because a non-numeric
+     * but correctly-sorting scheme is also allowed.
      */
     String version();
 

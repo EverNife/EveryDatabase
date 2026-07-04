@@ -68,6 +68,12 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     /** Registered migrations, sorted by version. Mutated only before migrate() is called. */
     private final List<Migration> registeredMigrations = new ArrayList<>();
 
+    /**
+     * Marks the calling thread as inside an active {@link #inTransaction} scope, so a nested call is
+     * rejected (a nested transaction would open a second session and commit independently).
+     */
+    private final ThreadLocal<Boolean> inTransactionOnThread = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     // ------------------------------------------------------------------
     //  Logging
     // ------------------------------------------------------------------
@@ -253,7 +259,19 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
 
     @Override
     public <R> CompletableFuture<R> inTransaction(Function<TransactionScope, CompletableFuture<R>> work) {
+        // Nesting check on the CALLER thread: a nested call comes from inside the outer work lambda,
+        // which runs on the pooled thread that set this marker. A nested transaction would open a
+        // second session and commit independently of the outer one, so reject it.
+        if (inTransactionOnThread.get()) {
+            CompletableFuture<R> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalStateException(
+                "Nested inTransaction() is not supported: this thread is already inside a transaction. "
+                + "A nested call would open a separate session and commit independently of the outer "
+                + "transaction. Do all the work inside one transaction scope."));
+            return failed;
+        }
         return CompletableFuture.supplyAsync(() -> {
+            inTransactionOnThread.set(Boolean.TRUE);
             ClientSession session = mongoClient.startSession();
             long startMs = System.currentTimeMillis();
             // The scope constructor does not touch the session, so it is safe outside the try; this
@@ -285,6 +303,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             } finally {
                 scope.markEnded();   // any retained-scope use after this fails fast instead of touching a closed session
                 session.close();
+                inTransactionOnThread.remove();
             }
         }, StorageExecutors.get());
     }

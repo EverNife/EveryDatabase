@@ -21,6 +21,7 @@ import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
@@ -158,8 +159,13 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
         try {
             return work.apply(scope)
                 .exceptionally(ex -> {
-                    if (ex instanceof RuntimeException) throw (RuntimeException) ex;
-                    throw new RuntimeException(ex);
+                    // Unwrap the CompletionException the pipeline adds, so a caller's join() sees the
+                    // same cause chain the SQL/Mongo backends produce (the original exception, not a
+                    // doubly-wrapped one).
+                    Throwable cause = (ex instanceof CompletionException && ex.getCause() != null)
+                        ? ex.getCause() : ex;
+                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                    throw new RuntimeException(cause);
                 });
         } catch (Exception e) {
             CompletableFuture<R> failed = new CompletableFuture<>();
