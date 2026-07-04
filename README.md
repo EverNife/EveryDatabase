@@ -4,7 +4,7 @@
 
 ### One async API. Every database. Zero lock-in.
 
-A backend-agnostic persistence layer for the JVM. Write your data-access code **once** against a small, typed, `CompletableFuture`-based API — then run it on **MySQL/MariaDB, PostgreSQL, H2, MongoDB, local files, or in-memory** without changing a line. Migrate data between any two of them with a single builder.
+A backend-agnostic persistence layer for the JVM. Write your data-access code **once** against a small, typed, `CompletableFuture`-based API — then run it on **MySQL/MariaDB, PostgreSQL, H2, MongoDB, local files, grouped files, or in-memory** without changing a line. Migrate data between any two of them with a single builder.
 
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
@@ -137,13 +137,13 @@ The library with everything declared as a **normal POM dependency**: it works ou
 
 | Included by default | Version | POM scope |
 |---|---|---|
-| `com.fasterxml.jackson.core:jackson-databind` | 2.15.4 | compile |
-| `org.mongodb:mongodb-driver-sync` | 4.11.2 | compile |
-| `com.fasterxml.jackson.dataformat:jackson-dataformat-yaml` | 2.15.4 | runtime |
+| `com.fasterxml.jackson.core:jackson-databind` | 2.22.0 | compile |
+| `org.mongodb:mongodb-driver-sync` | 5.8.0 | compile |
+| `com.fasterxml.jackson.dataformat:jackson-dataformat-yaml` | 2.22.0 | runtime |
 | `com.zaxxer:HikariCP` (4.x = last Java 8 line; on 11+ feel free to override to 5.x) | 4.0.3 | runtime |
 | `com.h2database:h2` (1.4.200 = last Java 8 release — see note below before overriding) | 1.4.200 | runtime |
-| `com.mysql:mysql-connector-j` (protobuf excluded — only the removed X DevAPI needs it) | 9.4.0 | runtime |
-| `org.postgresql:postgresql` | 42.7.7 | runtime |
+| `com.mysql:mysql-connector-j` (protobuf excluded — only the removed X DevAPI needs it) | 9.7.0 | runtime |
+| `org.postgresql:postgresql` | 42.7.12 | runtime |
 
 > **H2 version note:** H2 1.x and 2.x use **incompatible database file formats** and slightly different SQL dialects. The default stays on 1.4.200 so Java 8 hosts work out of the box; if you run on Java 11+ and want H2 2.x, override it (`implementation 'com.h2database:h2:2.3.232'`) — but don't switch versions over an existing embedded-file database.
 
@@ -235,7 +235,7 @@ Storage storage = Storages.createMongo(new MongoConfig("mongodb://localhost:2701
 | **`Storage`** | Owns the connection/pool lifecycle (`init` / `close` / `health`) and is a factory for repositories. |
 | **`Repository<K, V>`** | Typed CRUD for one collection. Every method returns a `CompletableFuture`. |
 | **`EntityDescriptor<K, V>`** | Immutable metadata: collection name, key extractor, codec, indexes, optional versioning. Built with a fluent builder. |
-| **`Codec<V>`** | Serialisation strategy. `JacksonJsonCodec` (everywhere) and `JacksonYamlCodec` (local files only). |
+| **`Codec<V>`** | Serialisation strategy. `JacksonJsonCodec` (everywhere) and `JacksonYamlCodec` (file backends only — local files and grouped files). |
 | **`Storages`** | Static factory — typed builders per backend, plus a generic `create(StorageConfig)`. |
 
 **Optional capability interfaces** — a `Storage` may also implement any of:
@@ -323,7 +323,19 @@ import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 LocalFileStorage file = Storages.createLocalFile(new LocalFileConfig(Paths.get("data")));
 file.init().join();
 ```
-This is the **only** backend that accepts a non-JSON codec — pair it with `JacksonYamlCodec` to get human-friendly `.yml` files.
+Along with grouped files, this is a **file backend** that accepts a non-JSON codec — pair it with `JacksonYamlCodec` to get human-friendly `.yml` files. (LocalFile treats the payload as opaque bytes, so any codec works; grouped files embed each value into a shared aggregate document, so they accept JSON or YAML but not an arbitrary binary codec.)
+</details>
+
+<details>
+<summary><b>Grouped files (one file per key, all collections)</b></summary>
+
+```java
+import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileConfig;
+
+GroupedFileStorage grouped = Storages.createGroupedFile(new GroupedFileConfig(Paths.get("playerdata")));
+grouped.init().join();
+```
+Where local files store one file **per entity**, grouped files invert the layout: one file **per key**, holding every collection that shares that key — ideal for "everything about one player in one file". The container format (JSON or YAML) follows the descriptor's codec, and all collections under one base directory must agree on it.
 </details>
 
 <details>
@@ -339,8 +351,8 @@ mem.init().join();
 <summary><b>Runtime-selected backend (from config)</b></summary>
 
 ```java
-StorageConfig config = loadFromYaml();          // returns SqlConfig / MongoConfig / LocalFileConfig / InMemoryConfig
-Storage storage = Storages.create(config);      // dispatches on the config type
+StorageConfig config = loadFromYaml();          // SqlConfig / MongoConfig / LocalFileConfig / GroupedFileConfig / InMemoryConfig
+Storage storage = Storages.create(config);      // dispatches on the config type (SqlConfig always picks the MySQL/MariaDB dialect)
 storage.init().join();
 ```
 </details>
@@ -590,7 +602,7 @@ if (storage instanceof TransactionalStorage) {
 
 ## Schema migrations
 
-Backends implementing `SchemaAwareStorage` — SQL (all dialects), MongoDB and local files — track applied migrations (a `_schema_migrations` table/collection/file) and apply pending ones in version order, exactly once. Migrations are **forward-only**.
+Backends implementing `SchemaAwareStorage` — SQL (all dialects), MongoDB, local files, grouped files and in-memory — track applied migrations (a `_schema_migrations` table/collection/file) and apply pending ones in version order, exactly once. Migrations are **forward-only**. (In-memory's ledger is ephemeral — it dies with the instance and re-applies on the next startup, which is correct because its data resets too; the point there is data-seeding/transform migrations, not DDL.)
 
 ```java
 public final class V001_CreateAuditLog extends SqlMigration {
@@ -607,7 +619,7 @@ sql.init().join();
 sql.register(new V001_CreateAuditLog()).migrate().join();
 ```
 
-Each backend ships a convenience base class: `SqlMigration` (return `upScript()`), `MongoMigration` (override `executeOnDatabase(MongoDatabase)`), `LocalFileMigration` (override `executeOnStorage(LocalFileStorage)`). For full control, implement `Migration.execute(MigrationContext)` and pull the native client via `context.getNativeClient(...)`.
+Each backend ships a convenience base class: `SqlMigration` (return `upScript()`), `MongoMigration` (override `executeOnDatabase(MongoDatabase)`), `LocalFileMigration` / `GroupedFileMigration` / `InMemoryMigration` (override `executeOnStorage(...)`). For full control, implement `Migration.execute(MigrationContext)` and pull the native client via `context.getNativeClient(...)`.
 
 > Auto-create and migrations are complementary: entity tables/collections are created automatically on first `repository(...)`; migrations cover everything else (backfills, auxiliary tables, indexes you manage yourself). Write SQL migrations to be **idempotent** — DDL implicitly commits on MySQL/MariaDB.
 
@@ -671,7 +683,7 @@ Other presets: `StorageLogConfig.silent()` (only the ERROR floor), `verbose()` (
 StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()));
 ```
 
-**Privacy by default.** Log lines carry counts, durations, collection names and index/migration metadata — never entity content. `includeKeys(true)`, `includeValues(true)` (truncated `toString()`, single-entity saves only) and `includeQueryValues(true)` are explicit opt-ins for local debugging.
+**Privacy by default.** Emitted log events carry counts, durations, collection names and index/migration metadata — never entity keys or content. `includeKeys(true)`, `includeValues(true)` (truncated `toString()`, single-entity saves only) and `includeQueryValues(true)` are explicit opt-ins for local debugging. (An *exception message* handed back to the caller may name the offending key — but that key was supplied by the caller in the first place.)
 
 **Quick verbosity for tests/CI** — no code changes needed:
 
@@ -819,7 +831,7 @@ EveryDatabase/
 │   │   ├── schema/                      # SchemaAwareStorage, Migration, MigrationContext
 │   │   ├── log/                         # StorageLogConfig, topics/levels/sinks (see Logging & diagnostics)
 │   │   ├── transfer/                    # StorageTransfer, TransferReport, ErrorPolicy
-│   │   └── modules/                     # sql (+ postgresql, h2), mongo, localfile, memory
+│   │   └── modules/                     # sql (+ postgresql, h2), mongo, localfile, groupedfile, memory
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
 ├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
 ├── manager/                             # OPTIONAL add-on (everydatabase-manager) — typed refs + caching (see the wiki: Caching & References)
@@ -838,11 +850,11 @@ EveryDatabase/
 | Component | Default version | Minimum Java |
 |---|---|:---:|
 | EveryDatabase classes themselves | — | **8** (compiled with `--release 8`) |
-| Jackson codecs (JSON/YAML) | 2.15.4 | 8 |
-| MongoDB backend (`mongodb-driver-sync`) | 4.11.2 | 8 |
+| Jackson codecs (JSON/YAML) | 2.22.0 | 8 |
+| MongoDB backend (`mongodb-driver-sync`) | 5.8.0 | 8 |
 | SQL pooling (`HikariCP`) | 4.0.3 — last Java 8 line | 8 |
 | H2 backend (`com.h2database:h2`) | 1.4.200 — last Java 8 release | 8 |
-| MySQL / PostgreSQL JDBC drivers | 9.4.0 / 42.7.7 | 8 |
+| MySQL / PostgreSQL JDBC drivers | 9.7.0 / 42.7.12 | 8 |
 | Local files / In-memory backends | (no external deps) | 8 |
 
 Running on **Java 11+** and want the newer majors? With the `core` flavor just override them — the library's code paths work with both lines:
