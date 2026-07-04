@@ -298,6 +298,12 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                     session.abortTransaction();
                     log.txRollback(null, System.currentTimeMillis() - startMs, e);
                 } catch (Exception ignored) {}
+                if (looksLikeStandaloneTransactionError(e)) {
+                    throw new IllegalStateException(
+                        "inTransaction() requires a MongoDB replica set (or a mongos). This looks like a "
+                        + "standalone deployment, which does not support multi-document transactions - "
+                        + "run even a single-node replica set to enable them.", e);
+                }
                 if (e instanceof RuntimeException) throw (RuntimeException) e;
                 throw new RuntimeException("Mongo transaction failed", e);
             } finally {
@@ -326,6 +332,20 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 if (!retryable || attempt >= 3) throw e;
             }
         }
+    }
+
+    /**
+     * Best-effort detection of the "this is a standalone server" transaction failure, so
+     * {@link #inTransaction} can rewrap it with an actionable hint. Message-based, because the driver
+     * surfaces this condition under a few different codes across versions.
+     */
+    private static boolean looksLikeStandaloneTransactionError(Throwable e) {
+        String msg = e.getMessage();
+        if (msg == null) return false;
+        String lower = msg.toLowerCase(Locale.ROOT);
+        return lower.contains("replica set")
+            || lower.contains("transaction numbers")
+            || lower.contains("sessions are not supported");
     }
 
     // ------------------------------------------------------------------

@@ -48,6 +48,12 @@ public final class CacheStats {
         return total == 0 ? 1.0 : (double) hitCount / total;
     }
 
+    /** Fraction of reads that missed the cache, in {@code [0,1]} (0.0 when there were no reads). */
+    public double missRate() {
+        long total = requestCount();
+        return total == 0 ? 0.0 : (double) missCount / total;
+    }
+
     /** Fraction of loads that failed with an exception, in {@code [0,1]} (0.0 when there were no loads). */
     public double loadFailureRate() {
         long loads = loadSuccessCount + loadFailureCount;

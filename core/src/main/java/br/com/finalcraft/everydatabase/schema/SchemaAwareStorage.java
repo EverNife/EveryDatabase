@@ -61,6 +61,10 @@ public interface SchemaAwareStorage extends Storage {
      * Migrations are sorted by {@link Migration#version()} automatically.
      * Calling {@code register()} multiple times accumulates migrations.
      *
+     * <p><b>Not thread-safe with {@code migrate()}.</b> Complete all registration on one thread before
+     * calling {@link #migrate()} (the normal fluent {@code register(...).migrate()} pattern already
+     * does this). Registering concurrently with an in-flight migrate is undefined.
+     *
      * @param migrations the migrations to register
      * @return {@code this} for fluent chaining
      */

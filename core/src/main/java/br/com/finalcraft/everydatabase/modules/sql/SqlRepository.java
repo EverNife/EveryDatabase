@@ -769,9 +769,19 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                         // Another writer updated between our SELECT and UPDATE; undo setter.
                         descriptor.versionSetter().accept(entity, incomingVersion);
                         if (autoCommit) conn.rollback();
-                        log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
+                        // Report the version the racing writer actually left, not our pre-race
+                        // expectation (which equalled incomingVersion). After the rollback, a fresh
+                        // SELECT on the autocommit path reads the committed value; -1 means the row was
+                        // deleted in the race. Inside an outer transaction we can only report the
+                        // pre-race value (the tx snapshot may not see the other writer's commit).
+                        long actualVersion = dbVersion;
+                        if (autoCommit) {
+                            Long current = selectVersion(conn, key);
+                            actualVersion = current != null ? current : -1L;
+                        }
+                        log.optimisticLockConflict(tableName(), key, incomingVersion, actualVersion);
                         throw new OptimisticLockException(
-                            descriptor.type(), key, incomingVersion, dbVersion);
+                            descriptor.type(), key, incomingVersion, actualVersion);
                     }
                 } else {
                     // In-memory version differs from DB version before we even try to write.

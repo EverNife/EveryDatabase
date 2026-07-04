@@ -82,8 +82,16 @@ final class MongoChangeFeed {
 
     // ------------------------------------------------------------------
 
+    /**
+     * Consecutive open/resume failures after which the resume token is discarded and the stream is
+     * reopened from "now". Prevents an infinite retry loop on a token that fell outside the oplog
+     * window (or a stream that was invalidated), which would otherwise never recover.
+     */
+    private static final int MAX_RESUME_FAILURES = 5;
+
     private void run() {
         BsonDocument resumeToken = null;
+        int consecutiveFailures = 0;
         while (running) {
             try {
                 ChangeStreamIterable<Document> stream = database.watch()
@@ -92,6 +100,7 @@ final class MongoChangeFeed {
                     stream = stream.resumeAfter(resumeToken);
                 }
                 cursor = stream.cursor();
+                consecutiveFailures = 0;   // opened successfully: transient read errors below won't accumulate
                 while (running) {
                     ChangeStreamDocument<Document> change = cursor.tryNext();
                     if (change == null) {
@@ -104,8 +113,21 @@ final class MongoChangeFeed {
                 if (!running) {
                     return;   // expected: the storage is closing
                 }
-                log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
-                        b -> b.detail("change stream interrupted, resuming").error(e));
+                consecutiveFailures++;
+                if (resumeToken != null && consecutiveFailures >= MAX_RESUME_FAILURES) {
+                    // The token cannot be resumed (stale / stream invalidated); retrying it forever would
+                    // loop. Drop it and reopen from now, accepting a possible gap - a TTL cache policy and
+                    // the cell stamp model self-heal missed events.
+                    resumeToken = null;
+                    consecutiveFailures = 0;
+                    log.emit(StorageOp.HEALTH, StorageLogLevel.WARN, b -> b.detail(
+                        "change stream could not resume after " + MAX_RESUME_FAILURES
+                        + " attempts; reopening from now (events in the gap are missed - a TTL policy self-heals)")
+                        .error(e));
+                } else {
+                    log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+                            b -> b.detail("change stream interrupted, resuming").error(e));
+                }
                 sleepBeforeResume();
             } finally {
                 closeCursorQuietly();
