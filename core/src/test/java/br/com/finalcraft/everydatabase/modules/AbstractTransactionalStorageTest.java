@@ -8,6 +8,7 @@ import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.tx.TransactionScope;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Order;
@@ -58,6 +59,38 @@ public abstract class AbstractTransactionalStorageTest extends AbstractStorageTe
     void storage_implementsTransactionalStorage() {
         assertInstanceOf(TransactionalStorage.class, storage,
             storage.getClass().getSimpleName() + " must implement TransactionalStorage");
+    }
+
+    @Test
+    @Order(1002)
+    @DisplayName("[tx] repository() before init() throws IllegalStateException")
+    void repository_beforeInit_throwsIllegalState() {
+        // The connection-backed backends (SQL dialects, Mongo) must fail fast, not NPE, when a
+        // repository is requested before the pool/client exists.
+        Storage fresh = createStorage("repo_before_init");
+        try {
+            assertThrows(IllegalStateException.class, () -> fresh.repository(DESCRIPTOR),
+                "repository() before init() must throw IllegalStateException");
+        } finally {
+            fresh.close().join();
+        }
+    }
+
+    @Test
+    @Order(1003)
+    @DisplayName("[tx] TransactionScope used after the lambda throws IllegalStateException")
+    void transactionScope_afterLambda_throwsIllegalState() {
+        TransactionalStorage tx = (TransactionalStorage) storage;
+        TransactionScope[] leaked = new TransactionScope[1];
+        tx.inTransaction(scope -> {
+            leaked[0] = scope;
+            return CompletableFuture.completedFuture((Void) null);
+        }).join();
+
+        assertThrows(IllegalStateException.class, () -> leaked[0].repository(DESCRIPTOR),
+            "using the scope after the transaction ended must fail fast, not silently escape the tx");
+        assertThrows(IllegalStateException.class, () -> leaked[0].rollback(),
+            "rollback() after the transaction ended must fail fast");
     }
 
     // ------------------------------------------------------------------

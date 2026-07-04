@@ -260,11 +260,17 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     @Override
     @SuppressWarnings("unchecked")
     public <K, V> Repository<K, V> repository(EntityDescriptor<K, V> descriptor) {
+        if (dataSource == null || dataSource.isClosed()) {
+            throw new IllegalStateException(
+                "SqlStorage.repository() called before init() (or after close()); call init() first. "
+                + "Requested collection: '" + descriptor.collection() + "'.");
+        }
         if (!descriptor.codec().isJsonCodec()) {
             throw new IllegalArgumentException(
                 "SqlStorage requires a JSON codec (e.g. JacksonJsonCodec), but descriptor '"
                 + descriptor.collection() + "' uses '" + descriptor.codec().contentType() + "'. "
-                + "YAML and other non-JSON codecs are only supported by LocalFileStorage.");
+                + "YAML and other non-JSON codecs are only supported by the file backends "
+                + "(LocalFileStorage and GroupedFileStorage).");
         }
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
@@ -300,7 +306,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             }
 
             txConnection.set(conn);
-            SqlTransactionScope scope = new SqlTransactionScope(this, conn);
+            SqlTransactionScope scope = new SqlTransactionScope(this);
             long startMs = System.currentTimeMillis();
             log.txBegin(null);
 
@@ -324,6 +330,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 if (e instanceof RuntimeException) throw (RuntimeException) e;
                 throw new RuntimeException("SQL transaction failed", e);
             } finally {
+                scope.markEnded();   // any retained-scope use after this fails fast instead of escaping the tx
                 txConnection.remove();
                 try { conn.setAutoCommit(true); conn.close(); } catch (SQLException ignored) {}
             }

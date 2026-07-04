@@ -40,7 +40,19 @@ public interface Storage {
     /**
      * Returns a typed repository for the entity described by the given descriptor.
      *
-     * @throws UnsupportedOperationException if the backend cannot model this entity
+     * <p>Call this only after {@link #init()} and before {@link #close()}. The connection-backed
+     * backends (SQL, MongoDB) throw {@link IllegalStateException} when called before init or after
+     * close, so the misuse fails fast rather than surfacing a raw {@code NullPointerException} deep
+     * in a later operation; the file and in-memory backends need no live connection and may return a
+     * repository without an init, but that is not a guarantee to rely on.
+     *
+     * <p>Repositories are cached per collection name: calling this twice with descriptors that share
+     * a collection name returns the <em>first</em> descriptor's repository (the collection name is the
+     * identity), so register one descriptor per collection.
+     *
+     * @throws IllegalStateException if the backend requires a live connection and has not been
+     *         initialised (or has been closed)
+     * @throws IllegalArgumentException if the descriptor's codec is incompatible with the backend
      */
     <K, V> Repository<K, V> repository(EntityDescriptor<K, V> descriptor);
 

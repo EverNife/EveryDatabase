@@ -220,11 +220,17 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     @Override
     @SuppressWarnings("unchecked")
     public <K, V> Repository<K, V> repository(EntityDescriptor<K, V> descriptor) {
+        if (database == null) {
+            throw new IllegalStateException(
+                "MongoStorage.repository() called before init() (or after close()); call init() first. "
+                + "Requested collection: '" + descriptor.collection() + "'.");
+        }
         if (!descriptor.codec().isJsonCodec()) {
             throw new IllegalArgumentException(
                 "MongoStorage requires a JSON codec (e.g. JacksonJsonCodec), but descriptor '"
                 + descriptor.collection() + "' uses '" + descriptor.codec().contentType() + "'. "
-                + "YAML and other non-JSON codecs are only supported by LocalFileStorage.");
+                + "YAML and other non-JSON codecs are only supported by the file backends "
+                + "(LocalFileStorage and GroupedFileStorage).");
         }
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
@@ -250,12 +256,12 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
         return CompletableFuture.supplyAsync(() -> {
             ClientSession session = mongoClient.startSession();
             long startMs = System.currentTimeMillis();
-
-            // Everything after startSession() lives inside the try so the session is closed
-            // even when startTransaction() itself fails (e.g. standalone deployment).
+            // The scope constructor does not touch the session, so it is safe outside the try; this
+            // lets the finally mark it ended. Everything that can fail (startTransaction) is inside the
+            // try so the session is still closed even when startTransaction() fails (e.g. standalone).
+            MongoTransactionScope scope = new MongoTransactionScope(database, session, log);
             try {
                 session.startTransaction();
-                MongoTransactionScope scope = new MongoTransactionScope(database, session, log);
                 log.txBegin(null);
 
                 R result = work.apply(scope).join();
@@ -277,6 +283,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 if (e instanceof RuntimeException) throw (RuntimeException) e;
                 throw new RuntimeException("Mongo transaction failed", e);
             } finally {
+                scope.markEnded();   // any retained-scope use after this fails fast instead of touching a closed session
                 session.close();
             }
         }, StorageExecutors.get());
