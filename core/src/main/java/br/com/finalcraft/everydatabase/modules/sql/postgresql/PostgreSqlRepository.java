@@ -8,6 +8,7 @@ import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.modules.sql.SqlRepository;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
@@ -182,6 +183,21 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
         // PostgreSQL native timestamp with timezone (8 bytes, UTC-normalised).
         if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) return "TIMESTAMPTZ";
         return super.sqlTypeFor(hint);
+    }
+
+    /**
+     * PostgreSQL uses {@code TIMESTAMPTZ} (an absolute instant), so bind a {@link java.sql.Timestamp}
+     * - the driver stores the instant tz-safely and there is no wall-clock ambiguity. (The MySQL/H2
+     * base binds a UTC {@code LocalDateTime} because their columns carry no timezone.)
+     */
+    @Override
+    protected Object toJdbcValue(Object value, IndexHint hint) {
+        if (value == null) return null;
+        if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) {
+            Long epoch = IndexValueExtractor.toEpochMilli(value);
+            return epoch != null ? new java.sql.Timestamp(epoch) : null;
+        }
+        return value;
     }
 
     @Override

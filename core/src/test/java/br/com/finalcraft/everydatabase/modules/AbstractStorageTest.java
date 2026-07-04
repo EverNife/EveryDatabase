@@ -563,6 +563,31 @@ public abstract class AbstractStorageTest {
     }
 
     @Test
+    @Order(97)
+    @DisplayName("[base] timestamp storage is timezone-independent (write in one tz, query in another)")
+    void query_timestamp_isTimezoneIndependent() {
+        long whenMillis = 1_700_000_000_000L;   // a fixed instant; the exact value doesn't matter
+        TimeZone original = TimeZone.getDefault();
+        try {
+            UUID id = UUID.randomUUID();
+            // Write while the JVM default timezone is +14:00 ...
+            TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Kiritimati"));
+            repo.save(new TestPlayer(id, "TZ", 1, "world", true, whenMillis)).join();
+
+            // ... then query while it is -10:00 (simulating a second process in another zone).
+            TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Honolulu"));
+            List<TestPlayer> found = repo.query(
+                Query.range("createdAt", whenMillis - 60_000L, whenMillis + 60_000L)).join();
+
+            assertTrue(found.stream().anyMatch(x -> x.getUuid().equals(id)),
+                "a timestamp written in one JVM timezone must match a range query run in another "
+                + "(SQL columns must store UTC, not a JVM-shifted wall-clock)");
+        } finally {
+            TimeZone.setDefault(original);
+        }
+    }
+
+    @Test
     @Order(98)
     @DisplayName("[base] query on undeclared field -> throws IllegalArgumentException")
     void query_undeclaredField_throwsIllegalArgument() {

@@ -21,6 +21,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
@@ -172,16 +175,23 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     /**
-     * Converts a value to the correct JDBC type for a given {@link IndexHint}.
-     * For {@link IndexHint.FieldType#TIMESTAMP}: epoch-millis ({@code Long}) or
-     * {@code Instant}/{@code LocalDateTime} → {@link java.sql.Timestamp}.
-     * For all other types the value is returned as-is.
+     * Converts a value to the correct JDBC bind type for a given {@link IndexHint}.
+     *
+     * <p>For {@link IndexHint.FieldType#TIMESTAMP} (MySQL/MariaDB {@code DATETIME(3)}, H2
+     * {@code TIMESTAMP(3)} - neither carries a timezone) the epoch-millis are bound as a <b>UTC</b>
+     * {@link LocalDateTime}. A {@code LocalDateTime} is written as a literal wall-clock with no
+     * driver timezone conversion, so the stored value is always the UTC wall-clock regardless of the
+     * JVM's default timezone - two processes in different zones then agree on range comparisons and
+     * the column reads as human-readable UTC. (PostgreSQL uses {@code TIMESTAMPTZ} and overrides this
+     * to bind an absolute {@link java.sql.Timestamp}.) All other types are returned as-is.
      */
     protected Object toJdbcValue(Object value, IndexHint hint) {
         if (value == null) return null;
         if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) {
             Long epoch = IndexValueExtractor.toEpochMilli(value);
-            return epoch != null ? new java.sql.Timestamp(epoch) : null;
+            return epoch != null
+                ? LocalDateTime.ofInstant(Instant.ofEpochMilli(epoch), ZoneOffset.UTC)
+                : null;
         }
         return value;
     }
