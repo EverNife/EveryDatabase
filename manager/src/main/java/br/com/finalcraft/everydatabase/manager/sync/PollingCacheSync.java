@@ -145,7 +145,11 @@ public final class PollingCacheSync implements AutoCloseable {
             this.manager = manager;
         }
 
-        void poll() {
+        // synchronized so the scheduled poll and a concurrent pollOnce() (public, used by tests) never
+        // interleave their read-modify-write of lastSeen and corrupt the HashMap. The whole cycle is a
+        // compound operation (iterate + put/remove + retainAll), so a ConcurrentHashMap alone would not
+        // suffice - the per-Bound lock serializes entire cycles.
+        synchronized void poll() {
             Set<K> keys = manager.cachedKeys();
             if (keys.isEmpty()) {
                 lastSeen.clear();

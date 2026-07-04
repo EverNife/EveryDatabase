@@ -80,9 +80,17 @@ public final class RefDeserializer extends JsonDeserializer<Ref> implements Cont
     }
 
     @Override
-    public Ref getNullValue(DeserializationContext ctxt) {
+    public Ref getNullValue(DeserializationContext ctxt) throws JsonMappingException {
+        if (valueType == null) {
+            // Same contract as deserialize(): a raw/wildcard Ref is unsupported. Returning a bare
+            // null here would make the caller NPE on .isPresent()/.resolve() instead of failing clearly.
+            throw JsonMappingException.from(ctxt,
+                "Ref can only be deserialized where its generic types are known - a typed field, or a "
+                + "typed collection/map element (e.g. List<Ref<UUID, Guild>>). "
+                + "A raw or wildcard Ref is unsupported.");
+        }
         // A JSON null round-trips to an empty Ref (never a bare null), so callers never NPE.
-        return valueType != null ? Ref.empty(valueType.getRawClass(), registry) : null;
+        return Ref.empty(valueType.getRawClass(), registry);
     }
 
     /**

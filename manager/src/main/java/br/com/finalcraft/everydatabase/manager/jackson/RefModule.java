@@ -15,6 +15,12 @@ import com.fasterxml.jackson.databind.module.SimpleModule;
  * ObjectMapper mapper = new ObjectMapper().registerModule(new RefModule(registry));
  * Codec<Player> codec = new JacksonJsonCodec<>(Player.class, mapper);
  * }</pre>
+ *
+ * <p><b>A {@code Ref} is supported only as a value</b> - a field, or an element of a typed
+ * {@code List}/{@code Set}/{@code Map} <em>value</em> ({@code Map<String, Ref<UUID, Guild>>}). It is
+ * <b>not</b> supported as a {@code Map} <em>key</em> ({@code Map<Ref<UUID, Guild>, X>}): Jackson would
+ * serialize it via the default key serializer (its {@code toString()}) and could not read it back.
+ * Use the raw key type as the map key instead ({@code Map<UUID, X>}) and wrap in a {@code Ref} on read.
  */
 public final class RefModule extends SimpleModule {
 

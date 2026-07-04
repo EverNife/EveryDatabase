@@ -233,13 +233,22 @@ public final class CacheSync implements AutoCloseable {
                 return this;
             }
             started = true;
-            if (transport != null) {
-                // One explicit transport is the push source for every manager, in attach AND auto mode.
-                setupTransport(new ArrayList<>(bindings));
-            } else {
-                for (Map.Entry<Storage, List<Binding<?>>> group : groupBindings().entrySet()) {
-                    setupGroup(group.getKey(), group.getValue());
+            try {
+                if (transport != null) {
+                    // One explicit transport is the push source for every manager, in attach AND auto mode.
+                    setupTransport(new ArrayList<>(bindings));
+                } else {
+                    for (Map.Entry<Storage, List<Binding<?>>> group : groupBindings().entrySet()) {
+                        setupGroup(group.getKey(), group.getValue());
+                    }
                 }
+            } catch (RuntimeException e) {
+                // Setup failed partway (e.g. a duplicate collection): tear down whatever was already
+                // registered - the fallback poller, the connectivity listener, any subscription - so the
+                // caller that only sees the exception is not left with a leak, and start() can be retried
+                // after the cause is fixed (close() resets started).
+                close();
+                throw e;
             }
         }
         return this;
@@ -309,7 +318,16 @@ public final class CacheSync implements AutoCloseable {
         return entered >= 0 ? acc + (System.currentTimeMillis() - entered) : acc;
     }
 
-    /** An immutable snapshot of the sync's mode, connectivity, fallback time, and routing counters. */
+    /**
+     * An immutable snapshot of the sync's mode, connectivity, fallback time, and routing counters.
+     *
+     * <p><b>The signal counters cover the PUSH path only.</b> When a manager is invalidated by the
+     * <em>poll</em> path - a backend without a change feed, or the standby poller while a transport is
+     * disconnected - those invalidations do not increment {@code signalsReceived}/{@code signalsApplied}
+     * here. So a zero here does not mean "nothing is syncing": check {@link #mode()} to see whether the
+     * mechanism is push or poll, and each {@code CachingManager}'s own {@code stats()} for the resulting
+     * invalidation/eviction counts. (Dedicated poll counters are a deferred observability item.)
+     */
     public CacheSyncStats stats() {
         return new CacheSyncStats(mode(), transportConnected, timeInFallbackMillis(),
                 signalsReceived.sum(), signalsApplied.sum(), signalsSkippedOwnOrigin.sum(),
