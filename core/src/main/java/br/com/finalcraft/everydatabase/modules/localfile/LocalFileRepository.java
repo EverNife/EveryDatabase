@@ -275,24 +275,16 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Map<K, Long>> versions(Collection<K> keys) {
         if (keys.isEmpty()) return CompletableFuture.completedFuture(Collections.emptyMap());
-        Function<V, Long> getter = descriptor.versionGetter();
         return CompletableFuture.supplyAsync(() -> {
             Map<K, Long> result = new HashMap<>();
             for (K key : keys) {
                 ReadWriteLock lock = lockFor(key);
                 lock.readLock().lock();
                 try {
-                    Path path = existingPathFor(key);
-                    if (!Files.exists(path)) continue;
-                    V entity = descriptor.codec().decode(Files.readAllBytes(path));
-                    long version = 0L;
-                    if (getter != null) {
-                        Long got = getter.apply(entity);
-                        version = got != null ? got : 0L;
-                    }
-                    result.put(key, version);
-                } catch (IOException | CodecException e) {
-                    // skip unreadable/corrupt entries (consistent with the skip-corrupted contract)
+                    // LocalFile does not enforce optimistic locking, so existing keys always
+                    // report version 0 - matching H2 and keeping the polling substrate uniform
+                    // across non-enforcing backends (and skipping a full decode per key).
+                    if (Files.exists(existingPathFor(key))) result.put(key, 0L);
                 } finally {
                     lock.readLock().unlock();
                 }

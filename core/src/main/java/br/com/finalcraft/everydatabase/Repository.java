@@ -74,14 +74,17 @@ public interface Repository<K, V> {
      * Returns the current optimistic-lock version of each given key that exists in storage; absent
      * keys are omitted from the result.
      *
-     * <p>For a versioned descriptor the value is the stored {@code lock_version}. For a non-versioned
-     * descriptor - or a backend that does not enforce versioning (H2) - it is {@code 0} for every
-     * existing key, so a poller can still detect <em>deletions</em> (a cached key missing from the
-     * result) but not in-place <em>updates</em>.
+     * <p>For a versioned descriptor on an enforcing backend (MySQL/MariaDB, PostgreSQL, MongoDB)
+     * the value is the stored {@code lock_version}. Backends that do not enforce versioning -
+     * H2, local files, grouped files - report {@code 0} for every existing key, as does any
+     * non-versioned descriptor: a poller can still detect <em>deletions</em> (a cached key
+     * missing from the result) but not in-place <em>updates</em>. The in-memory backend reports
+     * whatever version value is stored on the entity (handy for driving the poller in tests).
      *
-     * <p>This is a cheap, content-free read (key + version only, never the entity body), used by the
-     * manager's {@code PollingCacheSync} to invalidate caches on backends without a native change
-     * feed (MySQL/MariaDB). On backends that do have a change feed it still works, but the push feed
+     * <p>Cost: a key+version-only read on SQL/Mongo (never the entity body); the file backends
+     * only probe file/sub-document existence - also content-free. Used by the manager's
+     * {@code PollingCacheSync} to invalidate caches on backends without a native change feed
+     * (MySQL/MariaDB). On backends that do have a change feed it still works, but the push feed
      * is preferred.
      */
     CompletableFuture<Map<K, Long>> versions(Collection<K> keys);

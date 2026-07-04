@@ -136,6 +136,11 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     @Override
     public CompletableFuture<Void> init() {
         return CompletableFuture.supplyAsync(() -> {
+            if (dataSource != null && !dataSource.isClosed()) {
+                // Idempotent: a second init() without an intervening close() must not build a
+                // new pool over the live one (the old pool's threads/connections would leak).
+                return null;
+            }
             HikariConfig hc = new HikariConfig();
             hc.setJdbcUrl(config.jdbcUrl());
             hc.setUsername(config.username());

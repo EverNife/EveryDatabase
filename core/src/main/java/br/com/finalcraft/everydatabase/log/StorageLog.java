@@ -81,7 +81,8 @@ public final class StorageLog {
      * {@code level}. The {@link Consumer} is invoked only when the event will actually be
      * emitted, avoiding unnecessary object allocation.
      *
-     * <p>Sink failures are silently caught - a broken sink never propagates to the caller.
+     * <p>Fill and sink failures are silently caught - a broken logger (whether the event
+     * builder lambda or the sink itself) never propagates to the caller.
      *
      * @param op    the storage operation
      * @param level the event severity
@@ -92,12 +93,11 @@ public final class StorageLog {
         if (!level.passes(c.effectiveLevel(op.topic()))) return;
 
         StorageLogEvent.Builder b = StorageLogEvent.builder(backend, op, level);
-        fill.accept(b);
-
         try {
+            fill.accept(b);
             c.sink().accept(b.build());
         } catch (Throwable ignored) {
-            // Sink failures must never crash a storage operation.
+            // Neither a broken fill lambda nor a broken sink may crash a storage operation.
         }
     }
 

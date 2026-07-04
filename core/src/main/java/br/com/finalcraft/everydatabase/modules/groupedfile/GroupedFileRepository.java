@@ -143,7 +143,6 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             return CompletableFuture.completedFuture(Collections.emptyMap());
         }
 
-        Function<V, Long> getter = descriptor.versionGetter();
         return CompletableFuture.supplyAsync(() -> {
             Map<K, Long> result = new HashMap<>();
             for (K key : keys) {
@@ -151,16 +150,11 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 lock.readLock().lock();
                 try {
                     ObjectNode root = readRoot(fileFor(key));
-                    if (root == null || !root.has(collection)) continue;
-                    byte[] bytes = store.mapper().writeValueAsBytes(root.get(collection));
-                    V entity = descriptor.codec().decode(bytes);
-                    long version = 0L;
-                    if (getter != null) {
-                        Long got = getter.apply(entity);
-                        version = got != null ? got : 0L;
-                    }
-                    result.put(key, version);
-                } catch (IOException | CodecException e) {
+                    // GroupedFile does not enforce optimistic locking, so existing keys always
+                    // report version 0 - matching H2 and keeping the polling substrate uniform
+                    // across non-enforcing backends (and skipping a decode of the aggregate).
+                    if (root != null && root.has(collection)) result.put(key, 0L);
+                } catch (IOException e) {
                     // skip unreadable/corrupt entries
                 } finally {
                     lock.readLock().unlock();

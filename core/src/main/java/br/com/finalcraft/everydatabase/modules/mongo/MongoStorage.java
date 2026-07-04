@@ -111,6 +111,11 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     @Override
     public CompletableFuture<Void> init() {
         return CompletableFuture.supplyAsync(() -> {
+            if (mongoClient != null && database != null) {
+                // Idempotent: a second init() without an intervening close() must not build a
+                // new client over the live one (the old client's connections would leak).
+                return null;
+            }
             MongoClientSettings.Builder builder = MongoClientSettings.builder()
                 .applyConnectionString(new ConnectionString(config.connectionString()));
 
