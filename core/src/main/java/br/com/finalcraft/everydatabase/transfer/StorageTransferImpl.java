@@ -230,12 +230,18 @@ final class StorageTransferImpl implements StorageTransfer {
             try {
                 switch (errorPolicy) {
                     case SKIP_EXISTING:
-                        // Write entity-by-entity; skip keys already present in target
+                        // Write entity-by-entity; skip keys already present in target.
+                        // Errors are recorded per entity (with its key) so one bad row
+                        // never silently drops the rest of its chunk.
                         for (V entity : chunk) {
                             K key = pair.source.keyExtractor().apply(entity);
-                            if (!targetRepo.exists(key).join()) {
-                                targetRepo.save(entity).join();
-                                entitiesWritten++;
+                            try {
+                                if (!targetRepo.exists(key).join()) {
+                                    targetRepo.save(entity).join();
+                                    entitiesWritten++;
+                                }
+                            } catch (Exception e) {
+                                report.addError(new TransferError(srcCollection, key, e));
                             }
                         }
                         break;
@@ -258,8 +264,15 @@ final class StorageTransferImpl implements StorageTransfer {
             if (!aborted) {
                 long elapsed = System.currentTimeMillis() - startMs;
                 if (progressListener != null) {
-                    progressListener.accept(
-                        new TransferProgress(srcCollection, entitiesWritten, sourceCount, elapsed));
+                    try {
+                        progressListener.accept(
+                            new TransferProgress(srcCollection, entitiesWritten, sourceCount, elapsed));
+                    } catch (Exception e) {
+                        // A misbehaving listener must never abort the transfer; surface it
+                        // in the report once per batch instead.
+                        report.addError(new TransferError(srcCollection, null,
+                            new RuntimeException("progressListener threw; transfer continued", e)));
+                    }
                 }
                 // Mirror the same milestone to the log sink (TRANSFER topic, DEBUG).
                 long writtenSoFar = entitiesWritten;
@@ -308,6 +321,18 @@ final class StorageTransferImpl implements StorageTransfer {
             if (!ok) {
                 String msg = "Count mismatch for collection '" + stats.sourceCollection()
                     + "': expected=" + expected + " entities written, actual=" + written;
+                report.addError(new TransferError(stats.sourceCollection(), null,
+                    new RuntimeException(msg)));
+            }
+
+            // Physical check against what the target actually reports: when the collection
+            // started empty, every acknowledged write must be visible as a stored entity.
+            // (With a pre-populated target upserts may overwrite instead of add, so the
+            // relation between the delta and the written count is unknowable - skipped.)
+            if (stats.targetCountBefore() == 0 && stats.targetCountAfter() != written) {
+                String msg = "Target count mismatch for collection '" + stats.sourceCollection()
+                    + "': " + written + " entities were written into an empty collection, but the"
+                    + " target now reports " + stats.targetCountAfter();
                 report.addError(new TransferError(stats.sourceCollection(), null,
                     new RuntimeException(msg)));
             }

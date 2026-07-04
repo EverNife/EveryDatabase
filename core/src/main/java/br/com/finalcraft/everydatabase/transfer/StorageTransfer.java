@@ -52,6 +52,13 @@ import java.util.function.Consumer;
  *       in both source and target are left untouched.</li>
  * </ul>
  *
+ * <h3>Memory</h3>
+ * <p>Each collection is fully materialised in memory before being written out
+ * ({@code batchSize} controls write round-trips, <em>not</em> read memory). Peak usage is
+ * therefore O(largest collection). That is the right trade-off for the maintenance-window
+ * use case this is designed for; for collections that do not fit in the heap, transfer in
+ * key ranges via separate descriptors or raise the heap for the migration run.
+ *
  * @see Builder
  * @see TransferReport
  * @see ErrorPolicy
@@ -146,7 +153,8 @@ public interface StorageTransfer {
 
         /**
          * Number of entities passed to {@code targetRepo.saveAll()} per batch.
-         * Higher values reduce round-trips but consume more memory.
+         * Higher values reduce write round-trips; it does <em>not</em> bound read memory -
+         * the source collection is materialised in full regardless (see the class javadoc).
          * Default: {@code 500}.
          */
         public Builder batchSize(int batchSize) {
