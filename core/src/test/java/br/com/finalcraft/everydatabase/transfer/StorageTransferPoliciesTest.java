@@ -513,6 +513,31 @@ class StorageTransferPoliciesTest {
             "3 entities written (1 batch failed, 3 batches succeeded)");
     }
 
+    @Test @Order(62)
+    @DisplayName("FAIL_FAST + verifyCounts(true) default: a mid-collection abort yields exactly one error")
+    void failFast_verifyCountsDefault_yieldsExactlyOneError() {
+        // 4 entities, batchSize=1 -> the 2nd batch (bob) fails and FAIL_FAST aborts after writing alice.
+        List<TestPlayer> players = Arrays.asList(alice(), bob(), carol(),
+            new TestPlayer(new UUID(0, 4), "Dave", 300));
+        source.repository(DESCRIPTOR).saveAll(players).join();
+
+        Storage failingTarget = throwingOnNthSaveAll(target, 2);
+
+        TransferReport report = StorageTransfer.builder()
+            .from(source).to(failingTarget)
+            .descriptor(DESCRIPTOR)
+            .errorPolicy(ErrorPolicy.FAIL_FAST)
+            .verifyCounts(true)   // the DEFAULT - the aborted collection must NOT also raise a count mismatch
+            .batchSize(1)
+            .build()
+            .execute().join();
+
+        assertFalse(report.success());
+        assertEquals(1, report.errors().size(),
+            "FAIL_FAST guarantees exactly one error even with verifyCounts=true: the write failure, "
+            + "not a redundant count-mismatch for the collection it aborted mid-way");
+    }
+
     @Test @Order(61)
     @DisplayName("CONTINUE: multi-collection, first collection partially fails, second fully succeeds")
     void continuePolicy_firstCollectionFails_secondSucceeds() {

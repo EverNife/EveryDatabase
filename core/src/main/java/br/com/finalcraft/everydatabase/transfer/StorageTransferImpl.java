@@ -116,14 +116,20 @@ final class StorageTransferImpl implements StorageTransfer {
                 }
 
                 // 3. Transfer each collection pair in registration order
+                String abortedCollection = null;
                 for (DescriptorPair pair : descriptors) {
                     boolean abort = transferCollectionRaw(pair, report);
-                    if (abort) break;
+                    if (abort) {
+                        abortedCollection = pair.source.collection();
+                        break;
+                    }
                 }
 
-                // 4. Verify counts across all collections
+                // 4. Verify counts across all collections (except the one FAIL_FAST aborted mid-way:
+                //    its write failure is already reported, and a count-mismatch there would be a
+                //    redundant second error, breaking FAIL_FAST's documented "exactly one error").
                 if (verifyCounts) {
-                    verifyAllCounts(report);
+                    verifyAllCounts(report, abortedCollection);
                 }
 
             } catch (Exception e) {
@@ -313,8 +319,13 @@ final class StorageTransferImpl implements StorageTransfer {
     //  Count verification
     // ------------------------------------------------------------------
 
-    private void verifyAllCounts(TransferReport.Builder report) {
+    private void verifyAllCounts(TransferReport.Builder report, String abortedCollection) {
         for (CollectionStats stats : report.collections.values()) {
+            // The collection FAIL_FAST aborted mid-way already carries its write-failure error; a
+            // partial-count mismatch here would be a redundant second error for the same collection.
+            if (stats.sourceCollection().equals(abortedCollection)) {
+                continue;
+            }
             long written  = stats.entitiesWritten();
             long expected = stats.sourceCount();
 
