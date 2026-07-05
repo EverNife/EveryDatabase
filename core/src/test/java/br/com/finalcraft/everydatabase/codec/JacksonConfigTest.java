@@ -247,6 +247,33 @@ class JacksonConfigTest {
         }
     }
 
+    /** A key type that is deliberately NOT Comparable; serialises as its toString(). */
+    static class NonComparableKey {
+        final String v;
+        NonComparableKey(String v) { this.v = v; }
+        @Override public String toString() { return v; }
+    }
+
+    static class NonComparableMapHolder {
+        public Map<NonComparableKey, Integer> m;
+    }
+
+    @Test
+    @DisplayName("a Map with a non-Comparable key type serialises (ordering skipped, not a hard failure)")
+    void nonComparableMapKey_serialisesWithoutFailing() throws Exception {
+        NonComparableMapHolder h = new NonComparableMapHolder();
+        h.m = new LinkedHashMap<>();
+        h.m.put(new NonComparableKey("b"), 1);
+        h.m.put(new NonComparableKey("a"), 2);
+
+        // With ORDER_MAP_ENTRIES_BY_KEYS on and FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY still enabled this
+        // would throw InvalidDefinitionException ("Cannot order Map entries by key of incomparable type"),
+        // which encode() surfaces as a CodecException on save. It must serialise instead (unordered).
+        String json = JacksonConfig.storageSafe(new JsonMapper()).writeValueAsString(h);
+        assertTrue(json.contains("\"a\":2") && json.contains("\"b\":1"),
+            "both entries must be present (order not asserted): " + json);
+    }
+
     @Test
     @DisplayName("unknown properties are tolerated on read (schema evolution)")
     void unknownProperties_tolerated() throws Exception {

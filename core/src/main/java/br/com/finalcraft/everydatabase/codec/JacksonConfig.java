@@ -22,9 +22,12 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  *       ({@link JavaTimeModule}) and {@code Optional} ({@link Jdk8Module}) datatype
  *       modules, plus tolerance of unknown properties; and</li>
  *   <li>canonical <b>map ordering</b> ({@link SerializationFeature#ORDER_MAP_ENTRIES_BY_KEYS}):
- *       map entries are always emitted sorted by key, so the same logical content
- *       produces identical bytes regardless of the {@code Map} implementation or
- *       insertion order (deterministic, diff-friendly output on every profile).</li>
+ *       map entries with a {@link Comparable} key type are emitted sorted by key, so the
+ *       same logical content produces identical bytes regardless of the {@code Map}
+ *       implementation or insertion order (deterministic, diff-friendly output on every
+ *       profile). A map whose key type is <em>not</em> {@code Comparable} is emitted
+ *       unordered rather than failing the write ({@code FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY}
+ *       is disabled), so such an entity still serialises.</li>
  * </ul>
  *
  * <p>Because the read contract is fixed - and the date module reads <em>both</em> the
@@ -70,6 +73,11 @@ public final class JacksonConfig {
         mapper.registerModule(new Jdk8Module());
         mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         mapper.enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
+        // Canonical ordering only sorts when the map's key type is Comparable. Without disabling this
+        // fail-fast, an entity carrying a Map with a non-Comparable key type throws
+        // InvalidDefinitionException at encode() time (surfaced as a CodecException on save). Degrade
+        // gracefully instead: Comparable keys are still ordered, incomparable ones just skip ordering.
+        mapper.disable(SerializationFeature.FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY);
         return mapper;
     }
 
