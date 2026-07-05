@@ -117,6 +117,10 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     @Override
     public CompletableFuture<Void> init() {
         return CompletableFuture.supplyAsync(() -> {
+            // Serialize the lifecycle transition: without the lock, two concurrent init() calls both
+            // observe mongoClient==null, build two clients, and one assignment orphans a live
+            // MongoClient (connection pool) that is never closed.
+            synchronized (this) {
             if (mongoClient != null && database != null) {
                 // Idempotent: a second init() without an intervening close() must not build a
                 // new client over the live one (the old client's connections would leak).
@@ -141,26 +145,29 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             }
             log.initialized("db=" + config.database() + " uri=" + config.connectionString());
             return null;
+            }
         }, StorageExecutors.get());
     }
 
     @Override
     public CompletableFuture<Void> close() {
         return CompletableFuture.supplyAsync(() -> {
-            MongoChangeFeed source = changeFeedSource;
-            if (source != null) {
-                source.stop();   // stop the change-stream thread before the client goes away
-                changeFeedSource = null;
+            synchronized (this) {   // mutually exclusive with init()'s transition
+                MongoChangeFeed source = changeFeedSource;
+                if (source != null) {
+                    source.stop();   // stop the change-stream thread before the client goes away
+                    changeFeedSource = null;
+                }
+                changeFeed.closeAll();
+                if (mongoClient != null) {
+                    mongoClient.close();
+                    mongoClient = null;
+                    database    = null;
+                }
+                repositories.clear();
+                log.closed();
+                return null;
             }
-            changeFeed.closeAll();
-            if (mongoClient != null) {
-                mongoClient.close();
-                mongoClient = null;
-                database    = null;
-            }
-            repositories.clear();
-            log.closed();
-            return null;
         }, StorageExecutors.get());
     }
 

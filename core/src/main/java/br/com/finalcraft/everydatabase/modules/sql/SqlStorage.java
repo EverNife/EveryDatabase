@@ -136,6 +136,10 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     @Override
     public CompletableFuture<Void> init() {
         return CompletableFuture.supplyAsync(() -> {
+            // Serialize the lifecycle transition: without the lock, two concurrent init() calls both
+            // observe dataSource==null, build two pools, and one assignment orphans a live
+            // HikariDataSource (background threads + JDBC connections) that is never closed.
+            synchronized (this) {
             if (dataSource != null && !dataSource.isClosed()) {
                 // Idempotent: a second init() without an intervening close() must not build a
                 // new pool over the live one (the old pool's threads/connections would leak).
@@ -168,18 +172,21 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             }
             log.initialized("pool=" + hc.getPoolName() + " url=" + config.jdbcUrl());
             return null;
+            }
         }, StorageExecutors.get());
     }
 
     @Override
     public CompletableFuture<Void> close() {
         return CompletableFuture.supplyAsync(() -> {
-            if (dataSource != null && !dataSource.isClosed()) dataSource.close();
-            // Drop cached repositories: each captured the now-closed dataSource at construction, so a
-            // later init() must rebuild them against the fresh pool.
-            repositories.clear();
-            log.closed();
-            return null;
+            synchronized (this) {   // mutually exclusive with init()'s transition
+                if (dataSource != null && !dataSource.isClosed()) dataSource.close();
+                // Drop cached repositories: each captured the now-closed dataSource at construction, so
+                // a later init() must rebuild them against the fresh pool.
+                repositories.clear();
+                log.closed();
+                return null;
+            }
         }, StorageExecutors.get());
     }
 
