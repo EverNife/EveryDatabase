@@ -1,6 +1,10 @@
 package br.com.finalcraft.everydatabase.modules.mongo;
 
+import br.com.finalcraft.everydatabase.EntityDescriptor;
+import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
+import br.com.finalcraft.everydatabase.data.VersionedTestPlayer;
 import br.com.finalcraft.everydatabase.modules.AbstractStorageTest;
 import br.com.finalcraft.everydatabase.modules.AbstractTransactionalStorageTest;
 import br.com.finalcraft.everydatabase.schema.Migration;
@@ -12,7 +16,9 @@ import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
 import com.mongodb.client.MongoDatabase;
 import org.junit.jupiter.api.*;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -214,6 +220,59 @@ class MongoStorageTest extends AbstractTransactionalStorageTest {
             "pending() must remain empty after a repeated migrate()");
         assertEquals("001", sas.currentVersion().join().version(),
             "currentVersion() must not be duplicated or corrupted");
+    }
+
+    // ------------------------------------------------------------------
+    //  Mongo-specific: versioned saveAll inside a transaction
+    // ------------------------------------------------------------------
+
+    /** Versioned descriptor for the transactional saveAll test - optimistic locking active. */
+    private static final EntityDescriptor<UUID, VersionedTestPlayer> TX_VERSIONED_DESCRIPTOR =
+        EntityDescriptor.builder(UUID.class, VersionedTestPlayer.class)
+            .collection("tx_versioned_players")
+            .keyExtractor(VersionedTestPlayer::getUuid)
+            .codec(new JacksonJsonCodec<>(VersionedTestPlayer.class))
+            .versioned()
+            .build();
+
+    /**
+     * A versioned {@code saveAll()} run inside a Mongo transaction must insert every entity at
+     * version 0 and make them all visible after the transaction commits. This exercises the
+     * per-entity optimistic-lock check-then-act on a shared transactional {@code ClientSession}
+     * (the chained, non-fan-out branch of {@link MongoRepository#saveAll}).
+     */
+    @Test
+    @Order(1030)
+    @DisplayName("inTransaction() - versioned saveAll() lands every entity at version 0 and commits")
+    void inTransaction_versionedSaveAll_landsAtVersionZeroAndCommits() {
+        TransactionalStorage tx = (TransactionalStorage) storage;
+        Repository<UUID, VersionedTestPlayer> vRepo = storage.repository(TX_VERSIONED_DESCRIPTOR);
+
+        UUID uuidA = UUID.fromString("11111111-0000-0000-0000-000000000001");
+        UUID uuidB = UUID.fromString("11111111-0000-0000-0000-000000000002");
+        UUID uuidC = UUID.fromString("11111111-0000-0000-0000-000000000003");
+        List<VersionedTestPlayer> players = Arrays.asList(
+            new VersionedTestPlayer(uuidA, "Alpha", 10),
+            new VersionedTestPlayer(uuidB, "Beta",  20),
+            new VersionedTestPlayer(uuidC, "Gamma", 30));
+
+        tx.inTransaction(scope ->
+            scope.repository(TX_VERSIONED_DESCRIPTOR).saveAll(players)
+        ).join();
+
+        // Every entity is a fresh insert, so it must land at version 0.
+        for (VersionedTestPlayer p : players) {
+            assertEquals(0L, p.getLockVersion(),
+                "A fresh versioned insert must land at version 0, key=" + p.getUuid());
+        }
+
+        // All three must be visible through the normal (non-tx) repo after commit.
+        assertEquals(3L, vRepo.count().join(), "All entities must be visible after commit");
+        for (VersionedTestPlayer p : players) {
+            VersionedTestPlayer loaded = vRepo.find(p.getUuid()).join()
+                .orElseThrow(() -> new AssertionError("Missing after commit: " + p.getUuid()));
+            assertEquals(0L, loaded.getLockVersion(), "Stored version must be 0 for a fresh insert");
+        }
     }
 
     // ------------------------------------------------------------------
