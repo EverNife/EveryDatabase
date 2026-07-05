@@ -18,8 +18,9 @@ import java.nio.file.Path;
  * }</pre>
  *
  * <p>Formatting is the codec's job: pair the descriptor with {@code JacksonYamlCodec} or
- * {@code JacksonJsonCodec.pretty(Type.class)} for human-readable files. Durability comes from the
- * atomic {@code .tmp} + {@code ATOMIC_MOVE} replace on every write.
+ * {@code JacksonJsonCodec.pretty(Type.class)} for human-readable files. The atomic {@code .tmp} +
+ * {@code ATOMIC_MOVE} replace on every write gives crash-atomicity (no torn files); the last write
+ * may still be lost on power loss unless the OS has flushed it to disk.
  */
 public final class LocalFileConfig implements StorageConfig {
 

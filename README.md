@@ -59,8 +59,8 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 | **PostgreSQL** | `Storages.createPostgreSQL` | ✅ | ✅ | ✅ native column + B-tree | ✅ | Durable |
 | **H2** (mem / file / tcp) | `Storages.createH2` | ✅ | ✅ | ✅ native column + B-tree | ❌ *(by design)* | Durable / ephemeral |
 | **MongoDB** | `Storages.createMongo` | ✅ *(replica set)* | ✅ | ✅ native index | ✅ | Durable |
-| **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Durable (one file per entity) |
-| **Grouped files** | `Storages.createGroupedFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Durable (one file per key, all collections) |
+| **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Crash-atomic (no torn files; last write may be lost on power loss) — one file per entity |
+| **Grouped files** | `Storages.createGroupedFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Crash-atomic (no torn files; last write may be lost on power loss) — one file per key, all collections |
 | **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ❌ | ✅ in-memory map | ❌ | Ephemeral |
 
 > MySQL/MariaDB and PostgreSQL store the entity in a **native `JSON` column**, and MongoDB as a **native BSON sub-document** — not an escaped string — so the data stays queryable and readable in standard DB tools. (H2 stores it as plain `TEXT`.)
