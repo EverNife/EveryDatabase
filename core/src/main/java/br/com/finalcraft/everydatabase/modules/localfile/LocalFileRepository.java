@@ -167,7 +167,12 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
-        K key = descriptor.keyExtractor().apply(entity);
+        K key;
+        try {
+            key = descriptor.keyExtractor().apply(entity);
+        } catch (RuntimeException e) {
+            return StorageKeys.failedFuture(e);
+        }
         CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
         if (reject != null) return reject;
         return CompletableFuture.supplyAsync(() -> {
@@ -180,7 +185,13 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         for (V entity : entities) {
-            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), descriptor.collection());
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
             if (reject != null) return reject;
         }
         long startMs = System.currentTimeMillis();

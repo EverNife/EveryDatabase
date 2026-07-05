@@ -247,7 +247,12 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
-        K key = descriptor.keyExtractor().apply(entity);
+        K key;
+        try {
+            key = descriptor.keyExtractor().apply(entity);
+        } catch (RuntimeException e) {
+            return StorageKeys.failedFuture(e);
+        }
         CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
         if (reject != null) return reject;
         if (descriptor.isVersioned()) {
@@ -324,7 +329,8 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      */
     private CompletableFuture<Void> saveVersioned(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
-        long incomingVersion = descriptor.versionGetter().apply(entity);
+        Long boxedVersion = descriptor.versionGetter().apply(entity);
+        long incomingVersion = boxedVersion != null ? boxedVersion : 0L;
         return CompletableFuture.supplyAsync(() -> {
             try {
                 // Determine the new version upfront so we can embed it in the JSON blob.
@@ -439,7 +445,13 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
 
         for (V entity : entities) {
-            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), descriptor.collection());
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
             if (reject != null) return reject;
         }
 

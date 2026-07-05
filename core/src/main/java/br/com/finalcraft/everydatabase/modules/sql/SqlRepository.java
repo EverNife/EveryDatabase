@@ -724,7 +724,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> save(V entity) {
-        K key = descriptor.keyExtractor().apply(entity);
+        K key;
+        try {
+            key = descriptor.keyExtractor().apply(entity);
+        } catch (RuntimeException e) {
+            return StorageKeys.failedFuture(e);
+        }
         CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, tableName());
         if (reject != null) return reject;
         if (versioningActive()) {
@@ -752,7 +757,8 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      */
     private CompletableFuture<Void> saveVersioned(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
-        long incomingVersion = descriptor.versionGetter().apply(entity);
+        Long boxedVersion = descriptor.versionGetter().apply(entity);
+        long incomingVersion = boxedVersion != null ? boxedVersion : 0L;
         return withConnection(StorageOp.SAVE, conn -> {
             boolean autoCommit = conn.getAutoCommit();
             if (autoCommit) conn.setAutoCommit(false);
@@ -900,7 +906,13 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
 
         for (V entity : entities) {
-            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(descriptor.keyExtractor().apply(entity), tableName());
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, tableName());
             if (reject != null) return reject;
         }
 
@@ -950,7 +962,8 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      */
     private void saveVersionedOnConn(Connection conn, V entity) throws SQLException, CodecException {
         K key = descriptor.keyExtractor().apply(entity);
-        long incomingVersion = descriptor.versionGetter().apply(entity);
+        Long boxedVersion = descriptor.versionGetter().apply(entity);
+        long incomingVersion = boxedVersion != null ? boxedVersion : 0L;   // a never-persisted Long reads as version 0
         Long dbVersion = selectVersion(conn, key);
 
         if (dbVersion == null) {

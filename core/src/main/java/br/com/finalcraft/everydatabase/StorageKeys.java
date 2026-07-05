@@ -75,4 +75,17 @@ public final class StorageKeys {
             + "(see the key contract in StorageKeys / EntityDescriptor)."));
         return failed;
     }
+
+    /**
+     * An already-failed future carrying {@code error}. Backends use it to surface a <b>synchronous</b>
+     * failure in the pre-dispatch prelude of {@code save}/{@code saveAll} - most importantly a
+     * {@code keyExtractor} that throws (a null entity or a null intermediate on the key path) - as an
+     * exceptional completion, honouring the "errors propagate as failed futures, never a sync throw"
+     * contract instead of throwing on the caller's thread.
+     */
+    public static <T> CompletableFuture<T> failedFuture(Throwable error) {
+        CompletableFuture<T> failed = new CompletableFuture<>();
+        failed.completeExceptionally(error);
+        return failed;
+    }
 }

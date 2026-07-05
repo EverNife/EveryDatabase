@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
@@ -243,5 +244,33 @@ class InMemoryStorageTest extends AbstractStorageTest {
         List<TestPlayer> all = repo.all().join().collect(Collectors.toList());
         assertEquals(3, all.size());
         assertTrue(all.containsAll(players));
+    }
+
+    // ------------------------------------------------------------------
+    //  InMemory-specific: a throwing keyExtractor fails the future, not the caller thread
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(1070)
+    @DisplayName("save() - a keyExtractor that throws yields a failed future, not a sync throw")
+    void save_keyExtractorThrows_returnsFailedFuture() {
+        RuntimeException boom = new RuntimeException("boom");
+        EntityDescriptor<UUID, TestPlayer> throwingDescriptor =
+            EntityDescriptor.builder(UUID.class, TestPlayer.class)
+                .collection("throwing_players")
+                .keyExtractor(p -> { throw boom; })
+                .codec(new JacksonJsonCodec<>(TestPlayer.class))
+                .build();
+        Repository<UUID, TestPlayer> throwingRepo = storage.repository(throwingDescriptor);
+
+        // save() must NOT throw synchronously - the extractor failure surfaces as a failed future.
+        CompletableFuture<Void> future = assertDoesNotThrow(() -> throwingRepo.save(alice()));
+        CompletionException ex = assertThrows(CompletionException.class, future::join);
+        assertSame(boom, ex.getCause(), "The extractor's exception must be the failed future's cause");
+
+        // saveAll() must behave the same way.
+        CompletableFuture<Void> batch = assertDoesNotThrow(() -> throwingRepo.saveAll(Arrays.asList(alice(), bob())));
+        CompletionException batchEx = assertThrows(CompletionException.class, batch::join);
+        assertSame(boom, batchEx.getCause(), "saveAll's extractor exception must be the failed future's cause");
     }
 }
