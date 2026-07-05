@@ -32,7 +32,7 @@ import java.util.List;
  * still pull them individually via {@link #loadMySqlDriver(DependencyManager)}
  * and {@link #loadPostgresDriver(DependencyManager)}.</p>
  *
- * <p>Libby 1.2.0 does not resolve transitive dependencies, so the lists below
+ * <p>Libby does not resolve transitive dependencies, so the lists below
  * enumerate the full flat dependency tree of {@code everydatabase-core}.</p>
  */
 public final class EveryDatabaseDependencies {
