@@ -356,4 +356,39 @@ class InMemorySchemaAwareTest {
             other.close().join();
         }
     }
+
+    @Test
+    @Order(91)
+    @DisplayName("close() resets the ledger together with the data; a reused instance re-applies")
+    void ledger_resetOnClose_sameInstanceReApplies() {
+        storage.register(V000_PopulateTestPlayers.INSTANCE).migrate().join();
+        assertEquals("000", storage.currentVersion().join().version());
+        assertEquals(20L, repo().count().join());
+
+        // Reuse the SAME instance. close() must reset the ephemeral ledger with the data it tracks,
+        // otherwise currentVersion() would still report 000 and migrate() would skip everything while
+        // the seeded data is gone. Registrations persist on the instance, so migrate() re-applies.
+        storage.close().join();
+        storage.init().join();
+
+        assertEquals(SchemaVersion.none().version(), storage.currentVersion().join().version(),
+            "a reused instance must start at none() (ledger reset with the data)");
+        assertEquals(0L, repo().count().join(), "close() dropped the tracked data too");
+
+        storage.migrate().join();
+        assertEquals(20L, repo().count().join(), "the still-registered migration re-applies on reuse");
+    }
+
+    @Test
+    @Order(92)
+    @DisplayName("currentVersion() reports the greatest applied version, not the last applied")
+    void currentVersion_outOfOrder_reportsGreatest() {
+        storage.register(V004_SeedCarol.INSTANCE).migrate().join();   // ledger: [004]
+        assertEquals("004", storage.currentVersion().join().version());
+
+        storage.register(V001_SeedAlice.INSTANCE).migrate().join();   // ledger append order: [004, 001]
+        assertEquals("004", storage.currentVersion().join().version(),
+            "currentVersion() must report the lexicographically greatest applied version (004), "
+            + "not the last one applied (001)");
+    }
 }

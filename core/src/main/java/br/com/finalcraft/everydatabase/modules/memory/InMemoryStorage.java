@@ -104,6 +104,12 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
     @Override
     public CompletableFuture<Void> close() {
         repositories.clear();
+        // Reset the ephemeral migration ledger together with the data it tracks: without this a
+        // reused instance (close() then init()) reports the old currentVersion() and migrate() skips
+        // every migration, yet the data those migrations produced is gone - a storage that claims to
+        // be migrated with none of the effects. The documented invariant is "data and ledger reset
+        // together"; that must hold on the SAME instance, not only a freshly constructed one.
+        appliedLedger.clear();
         changeFeed.closeAll();
         initialized = false;
         log.closed();
@@ -188,11 +194,13 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
 
     @Override
     public CompletableFuture<SchemaVersion> currentVersion() {
-        if (appliedLedger.isEmpty()) {
-            return CompletableFuture.completedFuture(SchemaVersion.none());
-        }
-        AppliedEntry latest = appliedLedger.get(appliedLedger.size() - 1);
-        return CompletableFuture.completedFuture(new SchemaVersion(latest.version, latest.appliedAt));
+        // The lexicographically greatest applied version, not the last appended: matches SQL's
+        // ORDER BY version DESC / Mongo's sort and the Migration contract when versions are applied
+        // out of order.
+        return CompletableFuture.completedFuture(appliedLedger.stream()
+                .max(Comparator.comparing(e -> e.version))
+                .map(e -> new SchemaVersion(e.version, e.appliedAt))
+                .orElseGet(SchemaVersion::none));
     }
 
     @Override

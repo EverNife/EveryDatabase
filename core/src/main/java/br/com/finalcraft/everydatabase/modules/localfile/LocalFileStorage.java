@@ -184,9 +184,13 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     public CompletableFuture<SchemaVersion> currentVersion() {
         return CompletableFuture.supplyAsync(() -> {
             List<AppliedEntry> entries = loadTrackingFile();
-            if (entries.isEmpty()) return SchemaVersion.none();
-            AppliedEntry latest = entries.get(entries.size() - 1);
-            return new SchemaVersion(latest.version, latest.applied_at);
+            // The lexicographically greatest applied version, not the last one appended: a lower
+            // version registered and applied after a higher one must not regress currentVersion(),
+            // matching SQL's ORDER BY version DESC / Mongo's sort and the Migration contract.
+            return entries.stream()
+                    .max(Comparator.comparing(e -> e.version))
+                    .map(e -> new SchemaVersion(e.version, e.applied_at))
+                    .orElseGet(SchemaVersion::none);
         }, StorageExecutors.get());
     }
 
