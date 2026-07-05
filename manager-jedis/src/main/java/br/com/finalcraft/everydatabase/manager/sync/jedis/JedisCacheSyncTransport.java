@@ -233,7 +233,11 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
     }
 
     private void dispatch(String payload) {
-        ChangeEvent event = ChangePayload.decode(mapper, payload);
+        // Route a malformed/foreign payload to the error handler instead of dropping it silently: a
+        // pub/sub channel is global per server (not scoped by DB index), so an undecodable message is
+        // usually a channel collision with another application - worth surfacing. Mirrors PostgresChangeFeed.
+        ChangeEvent event = ChangePayload.decode(mapper, payload, reason -> reportError(
+                new IllegalStateException("dropped a malformed cache-sync payload (channel collision?): " + reason)));
         if (event != null) {
             feed.emit(event);
         }
