@@ -226,7 +226,14 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                 statLoadSuccess.increment();
                 if (cacheable) {
                     // Update the cell in place (refreshes a stale entry; creates one if absent).
-                    result.add(updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet()).getValue());
+                    CacheEntry<V> cell = updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet());
+                    // A concurrent deleteAndEvict may have tombstoned this cell with a newer stamp, so
+                    // publish was rejected and getValue() would be null. Skip it - a key deleted under
+                    // the load is legitimately absent from the batch (mirrors resolveCell's guard) -
+                    // rather than adding a null element to the returned list.
+                    if (!cell.isDeleted()) {
+                        result.add(cell.getValue());
+                    }
                 } else {
                     result.add(value);
                 }
