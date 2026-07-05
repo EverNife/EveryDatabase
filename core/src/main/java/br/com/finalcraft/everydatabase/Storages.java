@@ -133,6 +133,7 @@ public final class Storages {
      * @throws IllegalArgumentException if the config type is not recognised
      */
     public static Storage create(StorageConfig config) {
+        if (config == null) throw new IllegalArgumentException("StorageConfig must not be null");
         if (config instanceof SqlConfig){
             return createSQL((SqlConfig) config);
         }
