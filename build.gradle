@@ -111,10 +111,10 @@ configure([project(':core'), project(':libby'), project(':manager'), project(':m
 //                                    in the READMEs to the current project version
 //    ./gradlew verifyDocsVersions  - fail if any is stale (wired into `check`)
 //
-//  Only the everydatabase-{core,libby,manager} version is stamped (the value that
-//  changes every release) in the root README. Dependency versions
-//  live in the catalog and, for the runtime-download flavor, flow into Libby through
-//  the generated DependencyVersions class - see libby/build.gradle.
+//  The everydatabase-{core,libby,manager} version (the value that changes every release)
+//  AND the third-party dependency versions in the README Install table are both stamped
+//  from the catalog, so neither can silently drift. Dependency versions also flow into
+//  Libby through the generated DependencyVersions class - see libby/build.gradle.
 // ======================================================================
 def versionedDocs = [file('README.md')]
 
@@ -130,16 +130,48 @@ def stampEveryDatabaseVersion = { String text, String ver ->
         .replaceAll(/(badge\/version-)[^)]+(-[a-z0-9]+(?:\?[^)]*)?\))/) { all, pre, post -> "${pre}${ver}${post}" }
 }
 
+// Third-party dependency versions come from the same catalog. The README's Install table lists them
+// per coordinate; keep those cells in sync too, so a catalog bump can't silently leave the docs stale.
+// Versions are read straight from the [versions] block (a simple `key = "value"` line), so this needs
+// no version-catalog accessor.
+def catalogVersions = { ->
+    def toml = rootProject.file('gradle/libs.versions.toml').getText('UTF-8')
+    def out = [:]
+    (toml =~ /(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*"([^"]+)"\s*$/).each { all, k, v -> out[k] = v }
+    out
+}()
+// README Install-table coordinate -> its catalog version.
+def dependencyDocVersions = [
+    'com.fasterxml.jackson.core:jackson-databind'             : catalogVersions.jackson,
+    'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml': catalogVersions.jackson,
+    'org.mongodb:mongodb-driver-sync'                         : catalogVersions.mongodb,
+    'com.zaxxer:HikariCP'                                     : catalogVersions.hikaricp,
+    'com.h2database:h2'                                       : catalogVersions.h2,
+    'com.mysql:mysql-connector-j'                             : catalogVersions.mysql,
+    'org.postgresql:postgresql'                               : catalogVersions.postgresql,
+]
+// Rewrites the version cell of each Install-table row, keyed by its coordinate:
+//   | `<coordinate>`<optional note> | <version> | <scope> |
+def stampDependencyVersions = { String text ->
+    def out = text
+    dependencyDocVersions.each { coord, ver ->
+        def rowPattern = '(\\|\\s*`' + java.util.regex.Pattern.quote(coord) + '`[^|\\n]*\\|\\s*)([^|\\s]+)(\\s*\\|)'
+        out = out.replaceAll(rowPattern) { all, pre, old, post -> "${pre}${ver}${post}" }
+    }
+    out
+}
+
 tasks.register('stampDocsVersions') {
     description = 'Rewrites README artifact coordinates to the current project version.'
     group = 'documentation'
     def ver = everydatabaseVersion
     def docs = versionedDocs
     def stamp = stampEveryDatabaseVersion
+    def stampDeps = stampDependencyVersions
     doLast {
         docs.findAll { it.exists() }.each { f ->
             def original = f.getText('UTF-8')
-            def stamped = stamp(original, ver)
+            def stamped = stampDeps(stamp(original, ver))
             if (stamped != original) {
                 f.write(stamped, 'UTF-8')
                 logger.lifecycle("stampDocsVersions: updated ${rootProject.relativePath(f)} -> ${ver}")
@@ -154,13 +186,14 @@ tasks.register('verifyDocsVersions') {
     def ver = everydatabaseVersion
     def docs = versionedDocs
     def stamp = stampEveryDatabaseVersion
+    def stampDeps = stampDependencyVersions
     doLast {
         def stale = docs.findAll { it.exists() }
-                        .findAll { def t = it.getText('UTF-8'); stamp(t, ver) != t }
+                        .findAll { def t = it.getText('UTF-8'); stampDeps(stamp(t, ver)) != t }
                         .collect { rootProject.relativePath(it) }
         if (!stale.isEmpty()) {
             throw new GradleException(
-                "README coordinates are out of sync with project version ${ver}: ${stale.join(', ')}. " +
+                "README versions are out of sync with the catalog / project version ${ver}: ${stale.join(', ')}. " +
                 "Run './gradlew stampDocsVersions' to fix.")
         }
     }

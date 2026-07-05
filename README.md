@@ -847,15 +847,17 @@ EveryDatabase/
 
 **Everything runs on Java 8** — the library is compiled with `--release 8`, and the default dependency versions were deliberately chosen as the **last Java-8-compatible lines** of each library:
 
-| Component | Default version | Minimum Java |
-|---|---|:---:|
-| EveryDatabase classes themselves | — | **8** (compiled with `--release 8`) |
-| Jackson codecs (JSON/YAML) | 2.22.0 | 8 |
-| MongoDB backend (`mongodb-driver-sync`) | 5.8.0 | 8 |
-| SQL pooling (`HikariCP`) | 4.0.3 — last Java 8 line | 8 |
-| H2 backend (`com.h2database:h2`) | 1.4.200 — last Java 8 release | 8 |
-| MySQL / PostgreSQL JDBC drivers | 9.7.0 / 42.7.12 | 8 |
-| Local files / In-memory backends | (no external deps) | 8 |
+(Exact default versions are in the [Install](#install) `everydatabase-core` table — the single, catalog-stamped source; not repeated here to avoid drift.)
+
+| Component | Minimum Java |
+|---|:---:|
+| EveryDatabase classes themselves | **8** (compiled with `--release 8`) |
+| Jackson codecs (JSON/YAML) | 8 |
+| MongoDB backend (`mongodb-driver-sync`) | 8 |
+| SQL pooling (`HikariCP` — pinned to the last Java 8 line) | 8 |
+| H2 backend (`com.h2database:h2` — pinned to the last Java 8 release) | 8 |
+| MySQL / PostgreSQL JDBC drivers | 8 |
+| Local files / In-memory backends (no external deps) | 8 |
 
 Running on **Java 11+** and want the newer majors? With the `core` flavor just override them — the library's code paths work with both lines:
 
