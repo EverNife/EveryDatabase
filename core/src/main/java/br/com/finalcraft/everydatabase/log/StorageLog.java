@@ -104,8 +104,10 @@ public final class StorageLog {
         try {
             fill.accept(b);
             c.sink().accept(b.build());
-        } catch (Throwable ignored) {
-            // Neither a broken fill lambda nor a broken sink may crash a storage operation.
+        } catch (Throwable t) {
+            // Neither a broken fill lambda nor a broken sink may crash a storage operation - but a
+            // fatal Error (OOM, StackOverflow) must not be masked either.
+            if (t instanceof Error) throw (Error) t;
         }
     }
 
