@@ -36,8 +36,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *     ...
  * </pre>
  *
- * <p>Each collection is a sub-directory; each entity is a file whose name is
- * {@code key.toString()} (with path-separator characters sanitised to {@code _}).
+ * <p>Each collection is a sub-directory; each entity is a file whose name is derived from
+ * {@code key.toString()} via {@link br.com.finalcraft.everydatabase.util.FileKeyNames#safeStem}
+ * (path separators sanitised, and unsafe/over-long keys hash-suffixed so distinct keys never
+ * collide on one file).
  *
  * <p>Does <em>not</em> implement {@link TransactionalStorage}.
  * Implements {@link SchemaAwareStorage}.

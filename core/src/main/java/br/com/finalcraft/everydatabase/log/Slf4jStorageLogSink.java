@@ -6,7 +6,7 @@ import org.slf4j.LoggerFactory;
 /**
  * {@link StorageLogSink} that routes events to SLF4J loggers.
  *
- * <p><b>This is the only class in {@code common-storage} that directly imports
+ * <p><b>This is the only class in the core module that directly imports
  * {@code org.slf4j.*}.</b> It is referenced solely from {@link StorageLogSinks.Slf4jHolder},
  * whose lazy class-loading isolates the reference: the holder probes for
  * {@code org.slf4j.LoggerFactory} reflectively and only instantiates this sink when SLF4J

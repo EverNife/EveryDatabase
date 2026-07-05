@@ -21,8 +21,10 @@ import java.util.concurrent.CompletableFuture;
  *   <li>{@code PostgreSqlStorage} / {@code H2SqlStorage} - inherit from {@code SqlStorage}.</li>
  *   <li>{@code MongoStorage} - tracks in a {@code _schema_migrations} collection;
  *       migration authors use {@code MongoMigration}.</li>
- *   <li>{@code LocalFileStorage} - tracks in a metadata file;
+ *   <li>{@code LocalFileStorage} - tracks in a {@code _schema_migrations.json} metadata file;
  *       migration authors use {@code LocalFileMigration}.</li>
+ *   <li>{@code GroupedFileStorage} - tracks in a metadata file;
+ *       migration authors use {@code GroupedFileMigration}.</li>
  *   <li>{@code InMemoryStorage} - tracks in an ephemeral in-memory ledger that dies with
  *       the instance, so a fresh instance re-applies every migration; migration authors use
  *       {@code InMemoryMigration}. There is no schema to alter, so data-only migrations
@@ -82,8 +84,11 @@ public interface SchemaAwareStorage extends Storage {
     }
 
     /**
-     * Returns the version of the latest applied migration,
+     * Returns the lexicographically greatest applied migration version,
      * or {@link SchemaVersion#none()} if no migrations have been applied.
+     *
+     * <p>This is the greatest {@link Migration#version()} string among applied migrations, not the
+     * most recently applied one - a lower version applied after a higher one does not regress it.
      */
     CompletableFuture<SchemaVersion> currentVersion();
 

@@ -11,7 +11,7 @@ import java.util.Locale;
  * capacity is shared by the whole store and cannot be overridden per reference.
  *
  * <p>Built via the static factories and evaluated by a {@code CachingManager} (or a single
- * {@link Ref} via {@code @RefPolicy}) on each {@code peek}/{@code resolve}.
+ * {@code Ref} via {@code @RefPolicy}) on each {@code peek}/{@code resolve}.
  */
 public interface CachePolicy {
 

@@ -33,16 +33,16 @@ import java.util.stream.Stream;
  * with optional sibling columns ({@code _idx_<field>}) for declared
  * {@link IndexHint}s.
  *
- * <p>Table structure per collection:
+ * <p>Table structure per collection (MySQL/MariaDB default dialect):
  * <pre>
  * CREATE TABLE `{collection}` (
  *   `storage_key`  VARCHAR(255) NOT NULL,
  *   `storage_data` JSON         NOT NULL,
- *   `_idx_type`    VARCHAR(255),         -- one per IndexHint
+ *   `_idx_type`    TEXT,                       -- one per IndexHint (column type per FieldType)
  *   ...
- *   PRIMARY KEY (`storage_key`),
- *   INDEX        (`_idx_type`)            -- one per IndexHint
+ *   PRIMARY KEY (`storage_key`)
  * );
+ * CREATE INDEX ... ON `{collection}` (`_idx_type`(191));  -- one per IndexHint
  * </pre>
  *
  * <p>The key is {@code K.toString()}. The data column holds the codec output as UTF-8.

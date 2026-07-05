@@ -19,8 +19,8 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Inherits all lifecycle management and transaction handling from {@link SqlStorage};
  * the only difference is that {@link #createRepository} returns a {@link PostgreSqlRepository}
- * that uses PostgreSQL-compatible SQL dialect (double-quote identifiers, {@code TEXT} column
- * type, {@code INSERT ... ON CONFLICT DO UPDATE} upsert).
+ * that uses PostgreSQL-compatible SQL dialect (double-quote identifiers, {@code JSON} data
+ * column, {@code INSERT ... ON CONFLICT DO UPDATE} upsert).
  *
  * <p>For integration tests without a real PostgreSQL server, point this at an H2 in-memory
  * database configured with {@code MODE=PostgreSQL} and use {@code H2SqlStorage} instead:

@@ -18,7 +18,7 @@ public final class SchemaVersion {
         return new SchemaVersion("0", 0L);
     }
 
-    /** The version identifier of the last applied migration. */
+    /** The lexicographically greatest applied migration version identifier. */
     public String version()  { return version; }
 
     /** Unix epoch millis when the migration was applied. */

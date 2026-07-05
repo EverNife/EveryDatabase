@@ -5,20 +5,24 @@ import br.com.finalcraft.everydatabase.StorageConfig;
 /**
  * Configuration for the SQL (JDBC + HikariCP) storage backend.
  *
- * <p>Pass a full JDBC URL - the driver and dialect are inferred from the URL prefix:
+ * <p>Pass a full JDBC URL; the JDBC driver is resolved from the URL prefix:
  * <ul>
  *   <li>{@code jdbc:mariadb://host/db} - MariaDB / MySQL</li>
  *   <li>{@code jdbc:postgresql://host/db} - PostgreSQL</li>
  *   <li>{@code jdbc:h2:mem:test} - H2 in-memory (for integration tests)</li>
  * </ul>
  *
+ * <p>The <b>SQL dialect is not inferred from the URL</b> - it is decided by the storage
+ * subclass. {@code Storages.create(SqlConfig)} always builds the MySQL/MariaDB dialect;
+ * call {@code Storages.createPostgreSQL} / {@code Storages.createH2} to select PostgreSQL or H2.
+ *
  * <pre>{@code
- * // Minimal
- * Storage storage = Storages.create(
+ * // Minimal - MySQL/MariaDB dialect
+ * SqlStorage storage = Storages.createSQL(
  *     new SqlConfig("jdbc:mariadb://localhost/mc", "root", "pass"));
  *
  * // Full control
- * Storage storage = Storages.create(new SqlConfig(
+ * SqlStorage storage = Storages.createSQL(new SqlConfig(
  *     "jdbc:mariadb://localhost/mc",
  *     "root", "pass",
  *     PoolTuning.defaults()));

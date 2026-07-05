@@ -51,7 +51,7 @@ public interface Repository<K, V> {
     CompletableFuture<Void> save(V entity);
 
     /**
-     * Batch upsert. Backends should optimise (JDBC batch, Mongo insertMany).
+     * Batch upsert. Backends should optimise (JDBC batch, Mongo bulkWrite).
      */
     CompletableFuture<Void> saveAll(Collection<V> entities);
 

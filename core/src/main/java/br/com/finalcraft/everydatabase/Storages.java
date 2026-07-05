@@ -60,7 +60,7 @@ public final class Storages {
     }
 
     /**
-     * Creates a {@link PostgreSqlStorage} (double-quote identifiers, {@code TEXT},
+     * Creates a {@link PostgreSqlStorage} (double-quote identifiers, {@code JSON} data column,
      * {@code INSERT ... ON CONFLICT DO UPDATE}).
      */
     public static PostgreSqlStorage createPostgreSQL(SqlConfig config) {

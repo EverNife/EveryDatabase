@@ -52,7 +52,7 @@ final class StorageTransferImpl implements StorageTransfer {
     final Consumer<TransferProgress> progressListener;
 
     /**
-     * Mirrors transfer milestones to the log sink (TRANSFER topic, spec 8.7) without touching
+     * Mirrors transfer milestones to the log sink (TRANSFER topic) without touching
      * {@link TransferReport} or the {@code progressListener}. Bound to the <b>target</b>
      * storage's live log config - the target is where the writes land, so its operator is the
      * one who needs the visibility. Enable with e.g.

@@ -123,7 +123,8 @@ public final class EveryDatabaseDependencies {
 
     /**
      * Loads the Jackson JSON stack ({@code jackson-core}, {@code jackson-annotations},
-     * {@code jackson-databind}) - everything {@code JacksonJsonCodec} needs.
+     * {@code jackson-databind}, plus the {@code jsr310} and {@code jdk8} datatype modules
+     * {@code JacksonConfig} registers) - everything {@code JacksonJsonCodec} needs.
      *
      * @param dependencyManager the manager that downloads and injects the jars
      */

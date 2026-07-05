@@ -18,7 +18,7 @@ public enum StorageLogTopic {
 
     /**
      * Storage lifecycle: {@code init}, {@code close}, connection pool opened/closed.
-     * Also covers {@code health()} results.
+     * {@code health()} results have their own {@link #HEALTH} topic.
      */
     LIFECYCLE,
 

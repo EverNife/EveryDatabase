@@ -23,7 +23,7 @@ public class CacheOptions {
         this.maxSize = Math.max(UNBOUNDED, maxSize);
     }
 
-    /** The default freshness policy applied when a {@link Ref} declares no override. */
+    /** The default freshness policy applied when a {@code Ref} declares no override. */
     public CachePolicy policy() {
         return policy;
     }

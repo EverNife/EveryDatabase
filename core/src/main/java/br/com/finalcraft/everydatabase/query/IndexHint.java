@@ -57,7 +57,7 @@ public final class IndexHint {
         INT,
         /** Java {@code long}/{@code Long} → SQL {@code BIGINT}. */
         LONG,
-        /** Java {@code double}/{@code Float} → SQL {@code DOUBLE}. */
+        /** Java {@code float}/{@code Float}/{@code double}/{@code Double} → SQL {@code DOUBLE}. */
         DOUBLE,
         /** Java {@code boolean}/{@code Boolean} → SQL {@code BOOLEAN}. */
         BOOLEAN,

@@ -73,7 +73,8 @@ public final class StorageLogSinks {
 
     /**
      * A sink that prints each event as a single line to {@link System#out}.
-     * Includes the exception class and message for ERROR events (no stack trace).
+     * For ERROR events carrying an exception, its full stack trace is also printed to
+     * {@link System#out}.
      */
     public static StorageLogSink stdout() {
         return event -> {
