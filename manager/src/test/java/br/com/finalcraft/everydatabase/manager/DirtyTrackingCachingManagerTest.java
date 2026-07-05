@@ -249,6 +249,23 @@ class DirtyTrackingCachingManagerTest {
         assertEquals(50, mgr.peek(id).get().getCoins());
     }
 
+    @Test
+    void purgeExpired_preserves_a_dirty_write_back_cell() {
+        CachingManager<UUID, Bank> mgr = manager();
+        UUID id = UUID.randomUUID();
+        Bank account = mgr.seedIfAbsent(id, new Bank(id, 0));
+        account.deposit(50);                                         // unsaved local change -> dirty
+        assertTrue(account.isDirty());
+
+        mgr.invalidate(id);                                          // mark stale under always()
+
+        // A routine purgeExpired() must not drop a stale-but-dirty cell: doing so would silently
+        // lose the unsaved +50 before flushDirty() could persist it.
+        assertEquals(0, mgr.purgeExpired(), "a dirty write-back cell is exempt from purge");
+        assertSame(account, mgr.peek(id).get(), "the dirty cell and its unsaved change survive");
+        assertEquals(50, mgr.peek(id).get().getCoins());
+    }
+
     // ------------------------------------------------------------------
     //  @DirtyFlag annotation form (no IDirtyable interface)
     // ------------------------------------------------------------------

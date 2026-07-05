@@ -599,9 +599,14 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      * an expired-but-untouched entry is not GC-eligible until it is overwritten or evicted. Bound
      * memory with {@link CacheOptions#maxSize()} (evicted entries become collectable), and/or call
      * this periodically to proactively release stale entries.
+     *
+     * <p>A <b>dirty</b> write-back cell (unsaved local changes) is exempt: it is purged only once it
+     * is no longer dirty, mirroring {@link #serveable}. Purging a stale-but-dirty cell would drop the
+     * unsaved edits before {@link #flushDirty()} could persist them - a silent data loss on a routine
+     * maintenance call. Delete tombstones are always purgeable.
      */
     public int purgeExpired() {
-        return store.purge(entry -> entry.isDeleted() || !options.policy().isFresh(entry));
+        return store.purge(entry -> entry.isDeleted() || (!isDirty(entry) && !options.policy().isFresh(entry)));
     }
 
     // ------------------------------------------------------------------
