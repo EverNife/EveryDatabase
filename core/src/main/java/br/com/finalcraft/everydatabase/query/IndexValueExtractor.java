@@ -163,9 +163,12 @@ public final class IndexValueExtractor {
      *
      * <p>TIMESTAMP accepts {@link Instant}, {@link LocalDateTime} (treated as UTC), any
      * {@link Number}, or an ISO-8601 {@link String}, and converts to epoch-milliseconds.
-     * INT/LONG only convert when the conversion is lossless: a fractional or
-     * out-of-range number can never equal a stored integral value, so it is returned
-     * unchanged and simply matches nothing - the same result SQL produces.
+     * INT/LONG only convert when the conversion is lossless: for {@code eq}/{@code in} a
+     * fractional or out-of-range number can never equal a stored integral value, so it is
+     * returned unchanged and simply matches nothing - the same result SQL produces. For
+     * {@code range} the bound is left as-is and compared numerically by {@link #rangeContains}
+     * (so e.g. an upper bound wider than {@code int} still correctly matches every stored
+     * value), mirroring SQL's {@code BETWEEN}.
      *
      * <p>A value that cannot be coerced is returned unchanged, never {@code null}ed.
      */
@@ -210,6 +213,37 @@ public final class IndexValueExtractor {
             default:
                 return value;
         }
+    }
+
+    /**
+     * Inclusive range test used by the scan backends (InMemory, LocalFile, GroupedFile), matching
+     * SQL's numeric {@code BETWEEN}. {@code value} is a stored index-bucket value; {@code from}/{@code to}
+     * are normalised query bounds ({@code null} = open end).
+     *
+     * <p>When a value and a bound are both {@link Number}s of <b>different boxed types</b> - e.g. a
+     * stored {@code Integer} against a {@code Long} bound wider than the {@code int} range - they are
+     * compared <b>numerically</b> instead of through {@code Comparable.compareTo}, which throws a
+     * {@code ClassCastException} on mismatched boxed types (the SQL path never hits this because JDBC
+     * compares numerically). A non-{@link Comparable} value matches nothing.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static boolean rangeContains(Object value, Object from, Object to) {
+        if (!(value instanceof Comparable)) return false;
+        if (from != null && compareForRange(value, from) < 0) return false;
+        if (to   != null && compareForRange(value, to)   > 0) return false;
+        return true;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static int compareForRange(Object value, Object bound) {
+        if (value instanceof Number && bound instanceof Number && value.getClass() != bound.getClass()) {
+            Number a = (Number) value, b = (Number) bound;
+            boolean floating = a instanceof Double || a instanceof Float
+                    || b instanceof Double || b instanceof Float;
+            return floating ? Double.compare(a.doubleValue(), b.doubleValue())
+                            : Long.compare(a.longValue(), b.longValue());
+        }
+        return ((Comparable) value).compareTo(bound);
     }
 
     /**

@@ -402,11 +402,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             case RANGE: {
                 Object from = IndexValueExtractor.normalizeQueryValue(c.rangeFrom(), hint);
                 Object to   = IndexValueExtractor.normalizeQueryValue(c.rangeTo(),   hint);
-                if (!(actual instanceof Comparable)) return false;
-                Comparable cmp = (Comparable) actual;
-                if (from != null && cmp.compareTo(from) < 0) return false;
-                if (to   != null && cmp.compareTo(to)   > 0) return false;
-                return true;
+                return IndexValueExtractor.rangeContains(actual, from, to);
             }
             default:
                 return false;

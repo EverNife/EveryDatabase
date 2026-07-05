@@ -352,22 +352,13 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
                 Object from = IndexValueExtractor.normalizeQueryValue(condition.rangeFrom(), hint);
                 Object to   = IndexValueExtractor.normalizeQueryValue(condition.rangeTo(),   hint);
                 for (Map.Entry<Object, Set<K>> e : byValue.entrySet()) {
-                    if (inRange(e.getKey(), from, to)) union.addAll(e.getValue());
+                    if (IndexValueExtractor.rangeContains(e.getKey(), from, to)) union.addAll(e.getValue());
                 }
                 return union;
             }
             default:
                 return Collections.emptySet();
         }
-    }
-
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private static boolean inRange(Object value, Object from, Object to) {
-        if (!(value instanceof Comparable)) return false;
-        Comparable cmp = (Comparable) value;
-        if (from != null && cmp.compareTo(from) < 0) return false;
-        if (to   != null && cmp.compareTo(to)   > 0) return false;
-        return true;
     }
 
     private Set<K> intersect(Set<K> a, Set<K> b) {
