@@ -7,7 +7,7 @@ base {
     archivesName = 'everydatabase-manager-jedis'
 }
 
-// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Toolchain (Java 25) and the dual-target compileJava override (modern source syntax ->
 // Java 8 bytecode via Jabel) are configured centrally in the root build.gradle,
 // which lists :manager-jedis alongside :core, :libby and :manager.
 

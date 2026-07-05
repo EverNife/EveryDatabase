@@ -2,8 +2,7 @@ plugins {
     alias(libs.plugins.docker.compose)
 }
 
-// Folder is 'core'; the published artifact is 'everydatabase-core'
-// (see specs/SPEC_distribution_modules.md).
+// Folder is 'core'; the published artifact is 'everydatabase-core'.
 base {
     archivesName = 'everydatabase-core'
 }
@@ -56,7 +55,7 @@ test {
     }
 }
 
-// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Toolchain (Java 25) and the dual-target compileJava override (modern source syntax ->
 // Java 8 bytecode via Jabel) are configured centrally in the root build.gradle.
 
 dependencies {
@@ -90,7 +89,7 @@ dependencies {
     }
     runtimeOnly libs.postgresql
 
-    // SLF4J is compileOnly by design decision (specs/SPEC_storage_logging.md, 1.2/2.1):
+    // SLF4J is compileOnly by design decision:
     // the module must be embeddable (shaded) without dragging slf4j into the runtime.
     // slf4j's presence is detected via lazy class-loading in StorageLogSinks.Slf4jHolder;
     // without slf4j on the classpath the auto() sink falls back to no-op, never NoClassDefFoundError.

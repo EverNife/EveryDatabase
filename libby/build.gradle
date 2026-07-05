@@ -1,5 +1,4 @@
-// Folder is 'libby'; the published artifact is 'everydatabase-libby'
-// (see specs/SPEC_distribution_modules.md, section 5).
+// Folder is 'libby'; the published artifact is 'everydatabase-libby'.
 base {
     archivesName = 'everydatabase-libby'
 }
@@ -11,7 +10,7 @@ repositories {
     }
 }
 
-// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Toolchain (Java 25) and the dual-target compileJava override (modern source syntax ->
 // Java 8 bytecode via Jabel) are configured centrally in the root build.gradle.
 
 dependencies {
