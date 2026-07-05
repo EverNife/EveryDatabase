@@ -19,8 +19,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * Optimistic-locking (versioned) tests for the MongoDB backend.
  *
  * <p>Inherits all contract tests from {@link AbstractVersionedStorageTest} and adds a
- * Mongo-specific first-insert race test (duplicate-key on the unique {@code storage_key}
- * index must surface as {@link OptimisticLockException}, never as a raw driver exception).
+ * Mongo-specific first-insert race test (duplicate-key on the automatic unique {@code _id}
+ * index - the entity key IS the document {@code _id} - must surface as
+ * {@link OptimisticLockException}, never as a raw driver exception).
  *
  * <p>Requires a running MongoDB 4.2+ server; skipped automatically otherwise.
  *

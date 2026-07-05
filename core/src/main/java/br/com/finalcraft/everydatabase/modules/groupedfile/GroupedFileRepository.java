@@ -37,12 +37,16 @@ import java.util.stream.Stream;
  * file from ever being truncated.
  *
  * <p><b>Scan consistency.</b> The scans ({@code count}, {@code all}, {@code query}) read key files
- * without taking the per-key write lock. On the atomic {@code ATOMIC_MOVE} write path this is safe (a
- * reader sees either the old or the new file, never a partial one). On the {@code REPLACE_EXISTING}
- * fallback (filesystems that cannot move atomically) a scan racing a concurrent write of the same key
- * may read a truncated file; such a file is skipped-and-logged, so the effect is a transient
- * undercount, never a crash. Take a maintenance window (or use an atomic-move filesystem) for scans
- * that must be exact under concurrent writes.
+ * without taking the per-key write lock. On the atomic {@code ATOMIC_MOVE} write path each individual
+ * file read is safe (a reader sees either the old or the new file, never a partial one). On the
+ * {@code REPLACE_EXISTING} fallback (filesystems that cannot move atomically) a scan racing a
+ * concurrent write of the same key may read a truncated file; such a file is skipped-and-logged, so
+ * the effect is a transient undercount, never a crash. Even on the atomic path, though, a scan lists
+ * the directory and then reads each key file separately, all without the per-key lock: a key
+ * created or deleted between the listing and the read is simply missed or omitted. A scan is
+ * therefore only point-in-time consistent (a key may be transiently missing), never a
+ * guaranteed-consistent snapshot of the whole key-set. Take a maintenance window (or otherwise
+ * quiesce writes) for scans that must be exact under concurrent create/delete.
  *
  * <p>Entities are (de)serialized through the descriptor's {@code Codec}: the codec's bytes are parsed
  * into a sub-node with the storage's format-matched mapper, embedded in the aggregate document, and

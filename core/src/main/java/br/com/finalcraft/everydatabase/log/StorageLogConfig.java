@@ -109,8 +109,9 @@ public final class StorageLogConfig {
 
     /**
      * Minimum wall-clock time between progress ticks, in milliseconds.
-     * Default: {@code 1000ms}. A tick is emitted when BOTH {@code stepPercent} AND
-     * {@code throttleMs} thresholds are met (OR when the operation completes).
+     * Default: {@code 1000ms}. A tick is emitted when EITHER the {@code stepPercent} OR the
+     * {@code throttleMs} threshold is crossed (and also when the operation completes) - the
+     * two thresholds are a "report at least this often" guarantee, not a joint gate.
      */
     private volatile long progressThrottleMs = 1000;
 

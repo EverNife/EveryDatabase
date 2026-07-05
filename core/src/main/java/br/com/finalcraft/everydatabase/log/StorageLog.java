@@ -541,8 +541,9 @@ public final class StorageLog {
         }
 
         /**
-         * Reports progress. Emits a {@link StorageLogLevel#DEBUG} event when the step-percent
-         * or throttle-ms threshold is crossed, but not more frequently than both allow.
+         * Reports progress. Emits a {@link StorageLogLevel#DEBUG} event when EITHER the step-percent
+         * OR the throttle-ms threshold is crossed (whichever comes first) - the two thresholds
+         * together are a "report at least this often" floor, not a joint gate.
          *
          * <p>Safe to call on every iteration - the check is inexpensive when thresholds are not met.
          *
