@@ -367,6 +367,12 @@ public final class CacheSync implements AutoCloseable {
      * and auto mode; the transport is backend-agnostic and routes by collection).
      */
     private void setupTransport(List<Binding<?>> all) {
+        // A transport is a PUSH source: assume it is connected as soon as it is wired, and let the
+        // connectivity listener (when the transport reports one) demote to fallback-poll only on a
+        // real disconnect. Without this, transportConnected stayed false whenever transportFallback
+        // was disabled or the transport never reported connectivity, so mode()/transportConnected()
+        // permanently misreported TRANSPORT_FALLBACK_POLL even though push was live.
+        transportConnected = true;
         if (transportFallback) {
             // A standby poller takes over while the transport is disconnected. Registered BEFORE the
             // subscription so the very first connect failure is observed. It only runs while the
