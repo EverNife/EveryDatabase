@@ -271,13 +271,19 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             return failed;
         }
         return CompletableFuture.supplyAsync(() -> {
-            inTransactionOnThread.set(Boolean.TRUE);
+            if (mongoClient == null || database == null) {
+                throw new IllegalStateException(
+                    "Mongo storage is not initialised - call init() before inTransaction().");
+            }
+            // Open the session BEFORE marking the thread in-transaction: if startSession() fails
+            // (transient driver/connection error), the marker is never set, so a later legitimate
+            // inTransaction() scheduled on this pooled thread is not falsely rejected as nested.
+            // This mirrors SqlStorage, which sets its ThreadLocal only after acquiring the connection.
+            // Everything set from here on is unwound by the finally.
             ClientSession session = mongoClient.startSession();
             long startMs = System.currentTimeMillis();
-            // The scope constructor does not touch the session, so it is safe outside the try; this
-            // lets the finally mark it ended. Everything that can fail (startTransaction) is inside the
-            // try so the session is still closed even when startTransaction() fails (e.g. standalone).
             MongoTransactionScope scope = new MongoTransactionScope(database, session, log);
+            inTransactionOnThread.set(Boolean.TRUE);
             try {
                 session.startTransaction();
                 log.txBegin(null);
