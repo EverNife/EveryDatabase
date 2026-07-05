@@ -40,14 +40,14 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 
 ## Why
 
-Most persistence libraries marry you to one engine. EveryDatabase treats the engine as a **deployment choice**, not an architectural one. An application can ship with file storage for small scenarios, let operators flip to MariaDB or MongoDB for large ones, and move the live data across with no code changes.
+Most persistence libraries marry you to one engine. EveryDatabase treats the engine as a **deployment choice**, not an architectural one: ship with file storage for small scenarios, flip to MariaDB or MongoDB for large ones, and move the live data across — all with no code changes.
 
 - **🔌 One interface, many engines.** `Storage` + `Repository<K, V>` is the entire surface you code against.
-- **⚡ Async-first.** Every I/O call returns a `CompletableFuture`. Block with `.join()` when you must; compose when you can. Uses virtual threads on Java 21+.
-- **🧩 Capabilities are interfaces, not flags.** Transactions, schema migrations and rich queries are *optional* interfaces a backend may implement — checked with `instanceof`, enforced by the compiler. No backend pretends to support something it can't.
-- **🗂️ Declarative indexes.** Annotate a field with `@Indexed` (or declare an `IndexHint`) and the backend creates a real secondary index — a SQL column + B-tree, a Mongo index, or an in-memory map.
+- **⚡ Async-first.** Every I/O call returns a `CompletableFuture` — block with `.join()` or compose. Virtual threads on Java 21+.
+- **🧩 Capabilities are interfaces, not flags.** Transactions, schema migrations and queries are *optional* interfaces a backend may implement, checked with `instanceof`. No backend pretends to support something it can't.
+- **🗂️ Declarative indexes.** Annotate a field with `@Indexed` (or declare an `IndexHint`) and the backend builds a real secondary index — a SQL column + B-tree, a Mongo index, or an in-memory map.
 - **🔁 Built-in data transfer.** `StorageTransfer.builder()` copies entities between *any* two backends, read-only on the source, with batching, progress and verification.
-- **☕ Java 8 runtime.** Bytecode targets Java 8 while being authored in modern Java — and the default dependency set is Java-8-clean too, so **every backend runs on a Java 8 JVM** (see [Java version requirements](#java-version-requirements)).
+- **☕ Java 8 runtime.** Java 8 bytecode authored in modern Java, with a Java-8-clean default dependency set — **every backend runs on a Java 8 JVM** (see [Java version requirements](#java-version-requirements)).
 
 ---
 
@@ -61,7 +61,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 | **MongoDB** | `Storages.createMongo` | ✅ *(replica set)* | ✅ | ✅ native index | ✅ | Durable |
 | **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Crash-atomic (no torn files; last write may be lost on power loss) — one file per entity |
 | **Grouped files** | `Storages.createGroupedFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Crash-atomic (no torn files; last write may be lost on power loss) — one file per key, all collections |
-| **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ❌ | ✅ in-memory map | ❌ | Ephemeral |
+| **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ✅ *(ephemeral ledger)* | ✅ in-memory map | ❌ | Ephemeral |
 
 > MySQL/MariaDB and PostgreSQL store the entity in a **native `JSON` column**, and MongoDB as a **native BSON sub-document** — not an escaped string — so the data stays queryable and readable in standard DB tools. (H2 stores it as plain `TEXT`.)
 
@@ -71,7 +71,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 
 ## Install
 
-The library is published to a public Maven repository in **two flavors** — same code, same API, different packaging (see [Distribution flavors](#distribution-flavors)). Pick exactly one.
+Published to a public Maven repository in **two flavors** — same code, same API, different packaging (see [Distribution flavors](#distribution-flavors)). Pick exactly one.
 
 **Gradle**
 
@@ -91,7 +91,7 @@ dependencies {
 }
 ```
 
-Nothing else to add — every backend works out of the box. To **change a version**, just declare your own (Gradle picks the highest by default; append `!!` to force a downgrade — in Maven your nearest declaration always wins). To **drop what you don't use**, exclude it:
+Nothing else to add — every backend works out of the box. To **change a version**, declare your own (Gradle picks the highest by default; append `!!` to force a downgrade — in Maven your nearest declaration wins). To **drop what you don't use**, exclude it:
 
 ```groovy
 dependencies {
@@ -129,11 +129,11 @@ dependencies {
 
 ## Distribution flavors
 
-Both flavors expose the exact same API and carry the **same dependency set** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They only differ in **how that set reaches your classpath**.
+Both flavors expose the same API and carry the **same dependency set** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They differ only in **how that set reaches your classpath**.
 
 ### `everydatabase-core` — recommended
 
-The library with everything declared as a **normal POM dependency**: it works out of the box, and you keep full control through standard dependency management — upgrade or downgrade any of the libraries by declaring your own version, or exclude what you don't use (see [Install](#install)). Scopes are meaningful: `jackson-databind` and `mongodb-driver-sync` are `compile` (their types appear in the public API), everything else is `runtime`.
+Everything declared as a **normal POM dependency**: it works out of the box, and you keep full control through dependency management — override any version, or exclude what you don't use (see [Install](#install)). Scopes are meaningful: `jackson-databind` and `mongodb-driver-sync` are `compile` (their types appear in the public API), everything else is `runtime`.
 
 | Included by default | Version | POM scope |
 |---|---|---|
@@ -145,11 +145,11 @@ The library with everything declared as a **normal POM dependency**: it works ou
 | `com.mysql:mysql-connector-j` (protobuf excluded — only the removed X DevAPI needs it) | 9.7.0 | runtime |
 | `org.postgresql:postgresql` | 42.7.12 | runtime |
 
-> **H2 version note:** H2 1.x and 2.x use **incompatible database file formats** and slightly different SQL dialects. The default stays on 1.4.200 so Java 8 hosts work out of the box; if you run on Java 11+ and want H2 2.x, override it (`implementation 'com.h2database:h2:2.3.232'`) — but don't switch versions over an existing embedded-file database.
+> **H2 version note:** H2 1.x and 2.x use **incompatible database file formats** and slightly different SQL dialects. The default stays on 1.4.200 so Java 8 hosts work out of the box; on Java 11+ you can override to H2 2.x (`implementation 'com.h2database:h2:2.3.232'`) — but don't switch versions over an existing embedded-file database.
 
 ### `everydatabase-libby` — runtime download
 
-`everydatabase-core` plus a small coordinator (package `br.com.finalcraft.everydatabase.libby`) that downloads the canonical, **non-relocated** libraries at runtime via [Libby](https://github.com/AlessioDP/libby) — your jar stays tiny, and the POM excludes `core`'s transitive set so nothing heavy enters your build-time graph either. Bootstrap it in your plugin's `onLoad` (or earliest bootstrap), **before touching any storage class**:
+`everydatabase-core` plus a small coordinator (package `br.com.finalcraft.everydatabase.libby`) that downloads the canonical, **non-relocated** libraries at runtime via [Libby](https://github.com/AlessioDP/libby): your jar stays tiny, and the POM excludes `core`'s transitive set so nothing heavy enters your build-time graph. Bootstrap it in your plugin's `onLoad` (or earliest bootstrap), **before touching any storage class**:
 
 ```java
 import br.com.finalcraft.everydatabase.libby.DependencyManager;
@@ -167,7 +167,7 @@ public void onLoad() {
 }
 ```
 
-After `loadAll(...)` returns, use `Storages` normally. Note: `everydatabase-libby` itself depends on `net.byteflux:libby-core`, resolved from `https://repo.alessiodp.com/releases/` — add that repository to your build alongside the ones above.
+After `loadAll(...)` returns, use `Storages` normally. Note: `everydatabase-libby` depends on `net.byteflux:libby-core`, resolved from `https://repo.alessiodp.com/releases/` — add that repository to your build alongside the ones above.
 
 ---
 
@@ -243,15 +243,15 @@ Storage storage = Storages.createMongo(new MongoConfig("mongodb://localhost:2701
 - `TransactionalStorage` — atomic `inTransaction(...)`
 - `SchemaAwareStorage` — `register(...).migrate()`
 
-You discover them with `instanceof`, so the compiler stops you from using transactions on a backend that doesn't support them.
+Discover them with `instanceof` — the compiler stops you from using transactions on a backend that doesn't support them.
 
-> **Codec tip:** `new JacksonJsonCodec<>(Type.class)` emits **compact** JSON (smallest payload — what you want in a database). Use `JacksonJsonCodec.pretty(Type.class)` for indented, human-readable output — pairs nicely with `LocalFileStorage` when you want to read the files by eye.
+> **Codec tip:** `new JacksonJsonCodec<>(Type.class)` emits **compact** JSON (smallest payload — what a database wants). Use `JacksonJsonCodec.pretty(Type.class)` for indented, human-readable output — handy with `LocalFileStorage` when you want to read the files by eye.
 
-> **Default mapper (`JacksonConfig`):** the built-in codecs come batteries-included — the `java.time` (`Instant`, `LocalDate`, `Duration`, …) and `Optional` modules are registered, dates serialise as **ISO-8601** text (not numeric epochs), map entries are emitted in **canonical key order** (deterministic, diff-friendly bytes), and unknown properties are **tolerated** on read so a field removed in newer code doesn't break old stored data. Need a custom `ObjectMapper`? Pass it to `new JacksonJsonCodec<>(Type.class, mapper)`, or apply a profile to your own mapper with `JacksonConfig.storageSafe(mapper)` (the default) / `JacksonConfig.compact(mapper)` (identical to `storageSafe` but **drops null/absent** properties, via `NON_ABSENT` — same ISO dates and ordering, so the two are fully interchange-compatible). Every profile shares one frozen *read* contract, so any profile reads what any other wrote.
+> **Default mapper (`JacksonConfig`):** the built-in codecs are batteries-included — the `java.time` and `Optional` modules registered, dates as **ISO-8601** text (not epochs), map entries in **canonical key order** (deterministic, diff-friendly bytes), and unknown properties **tolerated** on read (a field removed in newer code won't break old data). Need a custom `ObjectMapper`? Pass it to `new JacksonJsonCodec<>(Type.class, mapper)`, or apply a profile to your own: `JacksonConfig.storageSafe(mapper)` (the default) or `JacksonConfig.compact(mapper)` (same, but **drops null/absent** via `NON_ABSENT`). Every profile shares one frozen *read* contract, so any profile reads what any other wrote.
 
-> **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every supported backend (no quoting or escaping ever needed).
+> **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every backend (no quoting ever needed).
 
-> **Keys** are persisted by their `toString()` (the SQL primary key, the Mongo unique index, the LocalFile filename) and matched by `equals`/`hashCode` (the in-memory backend and the manager cache). A key type must therefore have a **stable, unique `toString()` of at most 255 characters** and value-based `equals`/`hashCode` — `UUID`, `String`, `Long`, `Integer` and `record`s all qualify (the default identity `Object.toString()` does **not**). `save`/`saveAll` reject an oversized key up front: the returned future completes exceptionally with a clear `IllegalArgumentException`, so a long key can never be **silently truncated** into a collision. (For `Ref` keys in the manager layer, the key must also be JSON-serializable.)
+> **Keys** are persisted by their `toString()` (SQL primary key, Mongo unique index, LocalFile filename) and matched by `equals`/`hashCode` (in-memory backend, manager cache). A key type must have a **stable, unique `toString()` of at most 255 characters** and value-based `equals`/`hashCode` — `UUID`, `String`, `Long`, `Integer` and `record`s qualify; the identity `Object.toString()` does **not**. `save`/`saveAll` reject an oversized key up front (the future completes with `IllegalArgumentException`), so a long key can never be silently truncated into a collision. (For `Ref` keys in the manager layer, the key must also be JSON-serializable.)
 
 ---
 
@@ -323,7 +323,7 @@ import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 LocalFileStorage file = Storages.createLocalFile(new LocalFileConfig(Paths.get("data")));
 file.init().join();
 ```
-Along with grouped files, this is a **file backend** that accepts a non-JSON codec — pair it with `JacksonYamlCodec` to get human-friendly `.yml` files. (LocalFile treats the payload as opaque bytes, so any codec works; grouped files embed each value into a shared aggregate document, so they accept JSON or YAML but not an arbitrary binary codec.)
+Like grouped files, this is a **file backend** that accepts a non-JSON codec — pair it with `JacksonYamlCodec` for human-friendly `.yml` files. (LocalFile treats the payload as opaque bytes, so any codec works; grouped files embed each value into a shared aggregate document, so they take JSON or YAML but not an arbitrary binary codec.)
 </details>
 
 <details>
@@ -335,7 +335,7 @@ import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileConfig;
 GroupedFileStorage grouped = Storages.createGroupedFile(new GroupedFileConfig(Paths.get("playerdata")));
 grouped.init().join();
 ```
-Where local files store one file **per entity**, grouped files invert the layout: one file **per key**, holding every collection that shares that key — ideal for "everything about one player in one file". The container format (JSON or YAML) follows the descriptor's codec, and all collections under one base directory must agree on it.
+Grouped files invert the local-file layout: one file **per key**, holding every collection that shares that key — ideal for "everything about one player in one file". The container format (JSON or YAML) follows the descriptor's codec, and all collections under one base directory must agree on it.
 </details>
 
 <details>
@@ -390,7 +390,7 @@ repo.find(id)
 
 ## Indexing & queries (`@Indexed`)
 
-Declare indexes and the backend materialises a real secondary index. Two equivalent styles:
+Declare indexes and the backend materialises a real secondary index. Two equivalent styles.
 
 **Annotation-driven** — annotate fields, and `EntityDescriptor.build()` discovers them:
 
@@ -444,11 +444,11 @@ repo.query(Query.eq("location.world", "world")
 
 **Index type factories:** `IndexHint.string` · `integer` · `bigInt` · `decimal` · `bool` · `timestamp`.
 
-> Querying a field that was **not** declared as an index throws `IllegalArgumentException` on **every** backend — including local files, which validate the declaration even though they answer queries with a full scan (`O(n)`, no real index). Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
+> Querying an undeclared field throws `IllegalArgumentException` on **every** backend — including local files, which validate the declaration even though they answer with a full scan (`O(n)`, no real index). Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
 
 ### Ordering & pagination (`QueryOptions`)
 
-Pass a `QueryOptions` to `query(Query, QueryOptions)` to **order** and **page** results at the storage layer, instead of loading the whole collection and sorting in memory. Use `Query.all()` to match every entity (a leaderboard or a plain page):
+Pass a `QueryOptions` to `query(Query, QueryOptions)` to **order** and **page** at the storage layer, instead of loading the whole collection and sorting in memory. Use `Query.all()` to match every entity (a leaderboard or plain page):
 
 ```java
 // Top 10 by score (highest first)
@@ -462,18 +462,18 @@ List<PlayerData> page2 = repo.query(
         QueryOptions.builder().ascending("score").offset(20).limit(20).build()).join();
 ```
 
-The ordering is **identical on every backend**, so a query keeps behaving the same when you swap the storage:
+The ordering is **identical on every backend**, so a query behaves the same when you swap storage:
 
 - **`orderBy` must be a declared index field** (same rule as query conditions) — an undeclared field throws `IllegalArgumentException`.
-- **`NULL`/missing values sort as the smallest value** — first when ascending, last when descending.
-- **Ties are broken by the entity key** (ascending), so a paged result is stable; pages never overlap or drop a row because two entities shared a score. Pagination with only `limit`/`offset` (no `orderBy`) is ordered by key for the same reason.
+- **`NULL`/missing values sort as the smallest value** — first ascending, last descending.
+- **Ties break by the entity key** (ascending), so paged results are stable — pages never overlap or drop a row because two entities shared a score. `limit`/`offset` with no `orderBy` is ordered by key for the same reason.
 - `limit(0)` means **unbounded**; a negative `limit`/`offset` is rejected up front (`IllegalArgumentException`).
 
 > H2 opts out of optimistic locking but still orders and pages like the others. SQL backends order on the materialized `_idx_<field>` column (a real B-tree); LocalFile/GroupedFile order during their full scan.
 
 #### Page responses — `querySlice` (cheap) and `queryPage` (with total)
 
-`query(...)` returns a plain `List`. When you want navigation metadata, two richer results are available — both take the same `QueryOptions` (use `.page(n, size)` for 0-based paging):
+`query(...)` returns a plain `List`. For navigation metadata, two richer results take the same `QueryOptions` (use `.page(n, size)` for 0-based paging):
 
 ```java
 // Slice — content + hasNext, fetched by reading one extra row. No COUNT runs.
@@ -499,7 +499,7 @@ long inNether = repo.count(Query.eq("world", "world_nether")).join();
 
 #### Keyset (cursor) pagination — `queryAfter`
 
-For deep paging or "load more"/infinite scroll, `queryAfter` seeks by the **position** of the last row instead of an offset, so it stays fast no matter how far in you are (offset scans and discards the skipped rows). It returns a forward-only `Slice` with **no total**, and is stable under concurrent inserts/deletes. The cursor carries the order, so you set it only once:
+For deep paging or "load more"/infinite scroll, `queryAfter` seeks by the **position** of the last row instead of an offset, so it stays fast however far in you are (offset scans and discards the skipped rows). It returns a forward-only `Slice` with **no total**, stable under concurrent inserts/deletes. The cursor carries the order, so you set it only once:
 
 ```java
 // First page (ordered by score, descending)
@@ -522,9 +522,9 @@ Slice<PlayerData> resumed = repo.queryAfter(Query.all(), Cursor.decode(token), 1
 
 ## Optimistic locking
 
-Opt in per descriptor to guard against concurrent writers (e.g. two app instances editing the same entity). On a version mismatch the save fails with `OptimisticLockException` (when you `.join()` the future, it surfaces as the cause of a `CompletionException`).
+Opt in per descriptor to guard against concurrent writers (e.g. two app instances editing the same entity). On a version mismatch the save fails with `OptimisticLockException` (surfacing as the cause of a `CompletionException` when you `.join()`).
 
-**The easy way — annotate a `long`/`Long` field with `@OptimisticLock`** and you're done: `build()` finds it and wires the getter/setter via reflection. No interface, no builder call:
+**The easy way — annotate a `long`/`Long` field with `@OptimisticLock`.** `build()` finds it and wires the getter/setter via reflection. No interface, no builder call:
 
 ```java
 import br.com.finalcraft.everydatabase.versioned.OptimisticLock;
@@ -545,7 +545,7 @@ EntityDescriptor<UUID, Account> ACCOUNTS = EntityDescriptor.builder(UUID.class, 
         .build();                      // @OptimisticLock detected automatically
 ```
 
-The field may be `long` or `Long` (a still-`null` `Long` reads as version `0`), and must not be `static` or `final`. The rules are **validated at `build()` time** so mistakes fail fast: a wrong type throws `IllegalArgumentException`, two annotated fields throw `IllegalStateException`, and combining the annotation with the manual wiring below also throws — pick one mechanism.
+The field may be `long` or `Long` (a still-`null` `Long` reads as version `0`), and must not be `static` or `final`. Rules are **validated at `build()`** so mistakes fail fast: a wrong type throws `IllegalArgumentException`, two annotated fields throw `IllegalStateException`, and combining the annotation with the manual wiring below also throws — pick one mechanism.
 
 <details>
 <summary><b>Alternative: manual wiring (when you can't annotate the class)</b></summary>
@@ -572,15 +572,15 @@ EntityDescriptor<UUID, Account> ACCOUNTS = EntityDescriptor.builder(UUID.class, 
 ```
 </details>
 
-The version starts at `0` on insert and is incremented on every successful update. Descriptors **without** versioning (no annotation, no `.versioned()` / `.version(getter, setter)`) keep plain upsert semantics — locking is entirely opt-in.
+The version starts at `0` on insert and increments on every successful update. Descriptors **without** versioning keep plain upsert semantics — locking is entirely opt-in.
 
-> **Backend support:** MySQL/MariaDB, PostgreSQL and MongoDB enforce the version check. **H2 does not** (by design — it's an embedded/dev engine): a versioned descriptor on H2 silently degrades to plain upsert, never throwing `OptimisticLockException` — creating the storage never fails because of versioning. Local files and in-memory don't enforce it either. Use a server-grade backend when concurrent writers matter.
+> **Backend support:** MySQL/MariaDB, PostgreSQL and MongoDB enforce the version check. **H2 does not** (by design — it's an embedded/dev engine): a versioned descriptor there silently degrades to plain upsert, never throwing `OptimisticLockException`. Local files and in-memory don't enforce it either. Use a server-grade backend when concurrent writers matter.
 
 ---
 
 ## Transactions
 
-Backends that implement `TransactionalStorage` run a unit of work atomically: every SQL dialect (including H2), MongoDB (replica set required) and in-memory (atomic, but no isolation) — local files don't. Repositories obtained from the scope share the transaction; it commits on success, rolls back on exception or an explicit `scope.rollback()`.
+Backends implementing `TransactionalStorage` run a unit of work atomically: every SQL dialect (including H2), MongoDB (replica set required) and in-memory (atomic, no isolation) — local files don't. Repositories obtained from the scope share the transaction; it commits on success, rolls back on exception or an explicit `scope.rollback()`.
 
 ```java
 if (storage instanceof TransactionalStorage) {
@@ -602,7 +602,7 @@ if (storage instanceof TransactionalStorage) {
 
 ## Schema migrations
 
-Backends implementing `SchemaAwareStorage` — SQL (all dialects), MongoDB, local files, grouped files and in-memory — track applied migrations (a `_schema_migrations` table/collection/file) and apply pending ones in version order, exactly once. Migrations are **forward-only**. (In-memory's ledger is ephemeral — it dies with the instance and re-applies on the next startup, which is correct because its data resets too; the point there is data-seeding/transform migrations, not DDL.)
+Backends implementing `SchemaAwareStorage` — SQL (all dialects), MongoDB, local files, grouped files and in-memory — track applied migrations (a `_schema_migrations` table/collection/file) and apply pending ones in version order, exactly once. Migrations are **forward-only**. (In-memory's ledger is ephemeral: it dies with the instance and re-applies on the next startup — correct, since its data resets too; the point there is data-seeding/transform migrations, not DDL.)
 
 ```java
 public final class V001_CreateAuditLog extends SqlMigration {
@@ -621,13 +621,13 @@ sql.register(new V001_CreateAuditLog()).migrate().join();
 
 Each backend ships a convenience base class: `SqlMigration` (return `upScript()`), `MongoMigration` (override `executeOnDatabase(MongoDatabase)`), `LocalFileMigration` / `GroupedFileMigration` / `InMemoryMigration` (override `executeOnStorage(...)`). For full control, implement `Migration.execute(MigrationContext)` and pull the native client via `context.getNativeClient(...)`.
 
-> Auto-create and migrations are complementary: entity tables/collections are created automatically on first `repository(...)`; migrations cover everything else (backfills, auxiliary tables, indexes you manage yourself). Write SQL migrations to be **idempotent** — DDL implicitly commits on MySQL/MariaDB.
+> Auto-create and migrations are complementary: entity tables/collections are created on first `repository(...)`; migrations cover everything else (backfills, auxiliary tables, your own indexes). Write SQL migrations to be **idempotent** — DDL implicitly commits on MySQL/MariaDB.
 
 ---
 
 ## Moving data between backends
 
-`StorageTransfer` copies entities from one backend to another. The **source is never modified** — it only reads. Ideal for a maintenance-window cutover (e.g. file storage → MariaDB).
+`StorageTransfer` copies entities from one backend to another. The **source is never modified** — it only reads. Ideal for a maintenance-window cutover (file storage → MariaDB).
 
 ```java
 TransferReport report = StorageTransfer.builder()
@@ -651,13 +651,13 @@ if (report.success()) {
 }
 ```
 
-Use `descriptor(sourceDesc, targetDesc)` to rename a collection or change codec mid-transfer (e.g. YAML on disk → JSON in SQL). The returned future never completes exceptionally for expected failures — they're collected in `report.errors()`.
+Use `descriptor(sourceDesc, targetDesc)` to rename a collection or change codec mid-transfer (e.g. YAML on disk → JSON in SQL). The future never completes exceptionally for expected failures — they're collected in `report.errors()`.
 
 ---
 
 ## Logging & diagnostics
 
-The library is **silent by default**: routine operations emit nothing, while failures always do (an `ERROR` floor that no configuration can switch off). Everything in between is opt-in, per **topic** (`INDEX`, `WRITE`, `DELETE`, `QUERY`, `MIGRATION`, `TRANSACTION`, `TRANSFER`, ...), with live runtime editing.
+The library is **silent by default**: routine operations emit nothing, failures always do (an `ERROR` floor no configuration can switch off). Everything in between is opt-in, per **topic** (`INDEX`, `WRITE`, `DELETE`, `QUERY`, `MIGRATION`, `TRANSACTION`, `TRANSFER`, ...), editable live at runtime.
 
 ```java
 // Create a storage that already watches index work and migrations, with writes muted.
@@ -676,14 +676,14 @@ sql.getStorageLogConfig()
 
 Other presets: `StorageLogConfig.silent()` (only the ERROR floor), `verbose()` (DEBUG), `trace()`.
 
-**Where the lines go.** By default events route to **SLF4J** when it is on the runtime classpath (loggers named `everydatabase.<topic>`), and become a silent no-op otherwise — the library never requires a logging framework. A host application can install its own bridge once, globally:
+**Where the lines go.** By default events route to **SLF4J** when it's on the runtime classpath (loggers named `everydatabase.<topic>`), and no-op silently otherwise — the library never requires a logging framework. A host application can install its own bridge once, globally:
 
 ```java
 // e.g. a Bukkit plugin routing storage logs to its own logger:
 StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()));
 ```
 
-**Privacy by default.** Emitted log events carry counts, durations, collection names and index/migration metadata — never entity keys or content. `includeKeys(true)`, `includeValues(true)` (truncated `toString()`, single-entity saves only) and `includeQueryValues(true)` are explicit opt-ins for local debugging. (An *exception message* handed back to the caller may name the offending key — but that key was supplied by the caller in the first place.)
+**Privacy by default.** Log events carry counts, durations, collection names and index/migration metadata — never entity keys or content. `includeKeys(true)`, `includeValues(true)` (truncated `toString()`, single-entity saves only) and `includeQueryValues(true)` are explicit opt-ins for local debugging. (An *exception message* handed to the caller may name the offending key — but the caller supplied it.)
 
 **Quick verbosity for tests/CI** — no code changes needed:
 
@@ -696,7 +696,7 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 
 ## Caching & references (`everydatabase-manager`)
 
-An **optional add-on module** that sits *in front of* the core: hold a **typed reference** to an entity in another collection (and even another **database**), cache the hot ones with a policy you control, and resolve them lazily. It's a façade — the core stays untouched. A reference *is not* a cache: `Ref` is the pointer, the `CachingManager` is the cache.
+An **optional add-on module** that sits *in front of* the core: hold a **typed reference** to an entity in another collection (even another **database**), cache the hot ones with a policy you control, and resolve them lazily. It's a façade — the core stays untouched. A reference *is not* a cache: `Ref` is the pointer, the `CachingManager` is the cache.
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
@@ -722,16 +722,16 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 ```
 
 - **Typed refs that serialize as the key** — no embedded objects, no ORM; the target type is recovered from the field on read.
-- **Caching with a policy you own** — `always()` / `ttl(...)` / `noCache()`, a per-field `@RefPolicy` override, and an LRU `maxSize`. `peek()` is a lock-free, cache-only read; `resolve()` loads on a miss; `getAll(...)` batches (the N+1 antidote); `saveAndCache` / `deleteAndEvict` keep cache and backend consistent.
+- **Caching with a policy you own** — `always()` / `ttl(...)` / `noCache()`, a per-field `@RefPolicy` override, and an LRU `maxSize`. `peek()` is a lock-free cache-only read; `resolve()` loads on a miss; `getAll(...)` batches (the N+1 antidote); `saveAndCache` / `deleteAndEvict` keep cache and backend consistent.
 - **Write-back when you want it** — opt-in dirty-trackable entities (implement `IDirtyable` or annotate a `boolean` field with `@DirtyFlag`) mutate in memory and flush in a batch (`flushDirty()`); a dirty value is never reloaded over, and `seedIfAbsent(...)` caches a not-yet-persisted default.
-- **Cross-backend by design** — because a reference resolves through its type's manager, a single root entity can fan out across MySQL, PostgreSQL, Mongo, H2, files and memory **at once**, each reference under its own key type.
-- **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two of them can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere. Registries can also chain to a **parent**, composing a private-then-shared lookup (a plugin's own registry falling back to a shared one).
+- **Cross-backend by design** — a reference resolves through its type's manager, so a single root entity can fan out across MySQL, PostgreSQL, Mongo, H2, files and memory **at once**, each reference under its own key type.
+- **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere. Registries can chain to a **parent** for a private-then-shared lookup (a plugin's own registry falling back to a shared one).
 
 **→ Full guide: [Caching & References](https://github.com/EverNife/EveryDatabase/wiki/Caching-and-References) on the wiki** (and [Typed References](https://github.com/EverNife/EveryDatabase/wiki/Typed-References), [Caching Managers](https://github.com/EverNife/EveryDatabase/wiki/Caching-Managers), [Cache Policies & Freshness](https://github.com/EverNife/EveryDatabase/wiki/Cache-Policies-and-Freshness), [Cross-Process Cache Sync](https://github.com/EverNife/EveryDatabase/wiki/Cross-Process-Cache-Sync), [One Entity, Many Databases](https://github.com/EverNife/EveryDatabase/wiki/One-Entity-Many-Databases)).**
 
 ### Cross-process cache sync over pub/sub (`everydatabase-manager-jedis`)
 
-When several instances share one backend, a write on one leaves the others' caches stale. The manager keeps them fresh through the single `CacheSync` facade — a backend-native change feed where it exists (Mongo change streams, Postgres `LISTEN/NOTIFY`), or version **polling** anywhere. For backends with **no native feed** (MySQL/MariaDB, …) an **optional pub/sub transport** replaces polling with real push: lower latency, and no per-key version-check load on the database.
+When several instances share one backend, a write on one leaves the others' caches stale. The single `CacheSync` facade keeps them fresh — via a backend-native change feed where it exists (Mongo change streams, Postgres `LISTEN/NOTIFY`), or version **polling** anywhere. For backends with **no native feed** (MySQL/MariaDB, …) an **optional pub/sub transport** replaces polling with real push: lower latency, no per-key version-check load on the database.
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
@@ -761,8 +761,8 @@ Each manager publishes a tiny signal (collection + key + op — **never** entity
 
 ### Prerequisites
 
-- **JDK 25** — the only JDK you need to set up. The wrapper is Gradle 9.5.1, which launches on JDK 25 directly, and all test code compiles and runs on the Java 25 toolchain.
-  - The published artifacts still target **Java 8**: production sources are compiled on the same JDK 25 toolchain to Java 8 bytecode via the FinalCraft [Jabel](https://github.com/bsideup/jabel) fork (modern *syntax* → Java 8 *bytecode*, with `--release 8` keeping the API floor honest). No separate JDK 17 compiler is needed.
+- **JDK 25** — the only JDK you need. The wrapper is Gradle 9.5.1, which launches on JDK 25 directly, and all test code compiles and runs on the Java 25 toolchain.
+  - The published artifacts still target **Java 8**: production sources compile on that same toolchain to Java 8 bytecode via the FinalCraft [Jabel](https://github.com/bsideup/jabel) fork (modern *syntax* → Java 8 *bytecode*, with `--release 8` keeping the API floor honest). No separate JDK 17 compiler needed.
 - **Docker** (optional) — only for the SQL/Mongo integration suites against real servers; without it, run with `-PnoDocker`.
 
 ### Clone & build
@@ -779,7 +779,7 @@ export JAVA_HOME=/path/to/jdk-25      # PowerShell: $env:JAVA_HOME = "C:\path\to
 
 ### Integration databases via Docker
 
-The integration suites need real database servers. `docker-compose.yml` starts all three on **non-default high ports** that match the test defaults — no configuration needed.
+The integration suites need real database servers. `docker-compose.yml` starts all of them on **non-default high ports** that match the test defaults — no configuration needed.
 
 | Service | Host port | Credentials |
 |---|---|---|
@@ -799,7 +799,7 @@ docker compose down             # stop (keeps data)
 docker compose down -v          # stop + wipe volumes
 ```
 
-Running `./gradlew :core:test` brings the containers up automatically (the Gradle docker-compose plugin is wired to the `test` task). No Docker on the machine? Add `-PnoDocker` to skip the compose wiring entirely — the SQL/Mongo suites **self-skip when their server is unreachable**, and the embedded suites (H2, local files, in-memory) still run.
+Running `./gradlew :core:test` brings the containers up automatically (the docker-compose plugin is wired to the `test` task). No Docker? Add `-PnoDocker` to skip the compose wiring entirely — the SQL/Mongo suites **self-skip when their server is unreachable**, and the embedded suites (H2, local files, in-memory) still run.
 
 ### Running specific tests
 
@@ -811,7 +811,7 @@ Running `./gradlew :core:test` brings the containers up automatically (the Gradl
 ./gradlew :core:test --tests "*MariaDbStorageTest.inTransaction_commit_savesAreVisible"
 ```
 
-Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HOST`, `MONGO_USER`, `POSTGRES_URL`). Each SQL/Mongo test method runs against its own throwaway database (`enc_NNN_<backend>_<method>`), dropped automatically afterwards — set `TEST_KEEP_DATABASES=true` to keep them for inspection.
+Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HOST`, `MONGO_USER`, `POSTGRES_URL`). Each SQL/Mongo test method runs against its own throwaway database (`enc_NNN_<backend>_<method>`), dropped afterwards — set `TEST_KEEP_DATABASES=true` to keep them for inspection.
 
 > 📊 The `@Tag("stress")` suites double as a **benchmark**: each prints a per-backend throughput report (insert/query/update/delete + phase breakdown). Curated numbers, recommendations and caveats live on the **[Benchmarks](https://github.com/EverNife/EveryDatabase/wiki/Benchmarks)** wiki page.
 
@@ -845,7 +845,7 @@ EveryDatabase/
 
 ### Java version requirements
 
-**Everything runs on Java 8** — the library is compiled with `--release 8`, and the default dependency versions were deliberately chosen as the **last Java-8-compatible lines** of each library:
+**Everything runs on Java 8** — the library is compiled with `--release 8`, and the default dependency versions are the **last Java-8-compatible lines** of each library:
 
 (Exact default versions are in the [Install](#install) `everydatabase-core` table — the single, catalog-stamped source; not repeated here to avoid drift.)
 
@@ -859,22 +859,22 @@ EveryDatabase/
 | MySQL / PostgreSQL JDBC drivers | 8 |
 | Local files / In-memory backends (no external deps) | 8 |
 
-Running on **Java 11+** and want the newer majors? With the `core` flavor just override them — the library's code paths work with both lines:
+Running on **Java 11+** and want the newer majors? With the `core` flavor just override them — the library's code paths work with both:
 
 ```groovy
 implementation 'com.zaxxer:HikariCP:5.1.0'     // Java 11+ (5.x line)
 implementation 'com.h2database:h2:2.3.232'     // Java 11+ (2.x line) — read the warning below!
 ```
 
-> ⚠️ **H2 1.x ↔ 2.x are not interchangeable on disk:** the database **file formats are incompatible** and the SQL dialects differ slightly. Pick one before going to production and never swap the major version over an existing embedded-file database (export/import instead). In-memory H2 (`jdbc:h2:mem:`) has no such concern.
+> ⚠️ **H2 1.x ↔ 2.x are not interchangeable on disk:** the **file formats are incompatible** and the SQL dialects differ slightly. Pick one before production and never swap the major version over an existing embedded-file database (export/import instead). In-memory H2 (`jdbc:h2:mem:`) has no such concern.
 
 ### Other notes
 
-- **Build:** authored in modern Java syntax and compiled to Java 8 bytecode via the FinalCraft [Jabel](https://github.com/bsideup/jabel) fork on the single **JDK 25** toolchain (Gradle 9.5 launches on JDK 25 directly).
+- **Build:** authored in modern Java syntax, compiled to Java 8 bytecode via the FinalCraft [Jabel](https://github.com/bsideup/jabel) fork on the single **JDK 25** toolchain (Gradle 9.5 launches on JDK 25 directly).
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
-- **Dependencies & drivers:** both flavors ship the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `libby` downloads the full set at runtime — see [Distribution flavors](#distribution-flavors).
-- **Licensing:** this project never redistributes third-party libraries inside its own artifacts — each flavor pulls them as normal dependencies (`core`) or downloads them at runtime (`libby`). In particular `mysql-connector-j` (GPLv2 + Universal FOSS Exception) is only referenced as POM metadata (`core`) or fetched from Maven Central on the end user's machine (`libby`), never bundled.
-- **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it on the classpath logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework.
+- **Dependencies & drivers:** both flavors ship the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. `core` lets you override versions via dependency management; `libby` downloads the set at runtime — see [Distribution flavors](#distribution-flavors).
+- **Licensing:** third-party libraries are never bundled inside the artifacts — each flavor pulls them as normal dependencies (`core`) or downloads them at runtime (`libby`). In particular `mysql-connector-j` (GPLv2 + Universal FOSS Exception) is only POM metadata (`core`) or fetched from Maven Central on the end user's machine (`libby`), never bundled.
+- **Logging:** SLF4J is **optional** — `slf4j-api` is compile-only, detected reflectively at runtime. Without it, logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework.
 - **Serialisation:** entities must be Jackson-serialisable (a no-arg constructor plus accessors, or appropriate Jackson annotations).
 
 <div align="center">
