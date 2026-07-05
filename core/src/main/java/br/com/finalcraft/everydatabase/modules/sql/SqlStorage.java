@@ -33,7 +33,7 @@ import java.util.function.Function;
  * reserved {@value #MIGRATIONS_TABLE} table. Register migrations with
  * {@link #register(List)} before calling {@link #migrate()}.
  *
- * <p>The default SQL dialect is MySQL/MariaDB (backtick quoting, {@code MEDIUMTEXT},
+ * <p>The default SQL dialect is MySQL/MariaDB (backtick quoting, {@code JSON},
  * {@code ON DUPLICATE KEY UPDATE}).
  * Subclasses override {@link #q(String)} and {@link #createRepository(EntityDescriptor)} to
  * provide dialect-specific behaviour (e.g. {@code PostgreSqlStorage}, {@code H2SqlStorage}).

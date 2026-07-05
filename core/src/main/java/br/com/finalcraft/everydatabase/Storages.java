@@ -53,7 +53,7 @@ public final class Storages {
 
     /**
      * Creates a {@link SqlStorage} using the default MySQL/MariaDB dialect
-     * (backtick identifiers, {@code MEDIUMTEXT}, {@code ON DUPLICATE KEY UPDATE}).
+     * (backtick identifiers, {@code JSON}, {@code ON DUPLICATE KEY UPDATE}).
      */
     public static SqlStorage createSQL(SqlConfig config) {
         return new SqlStorage(config);

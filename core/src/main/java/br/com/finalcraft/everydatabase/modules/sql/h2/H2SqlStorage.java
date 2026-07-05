@@ -29,6 +29,12 @@ import java.util.List;
  *   <li>{@code TEXT} column type for the data column.</li>
  *   <li>{@code MERGE INTO ... KEY (...) VALUES (?)} for upsert.</li>
  * </ul>
+ *
+ * <p><b>Optimistic locking is NOT enforced on H2, even in TCP/server mode.</b> H2 opts out
+ * of the extra SELECT+conditional-UPDATE, so a versioned descriptor silently degrades to a
+ * plain last-writer-wins upsert - concurrent writers over a shared TCP/server database will
+ * not see {@code OptimisticLockException}. Use MySQL/MariaDB, PostgreSQL or MongoDB when
+ * concurrent writers must be guarded by {@code lock_version}.
  */
 public class H2SqlStorage extends SqlStorage {
 

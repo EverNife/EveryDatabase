@@ -37,7 +37,7 @@ import java.util.stream.Stream;
  * <pre>
  * CREATE TABLE `{collection}` (
  *   `storage_key`  VARCHAR(255) NOT NULL,
- *   `storage_data` MEDIUMTEXT   NOT NULL,
+ *   `storage_data` JSON         NOT NULL,
  *   `_idx_type`    VARCHAR(255),         -- one per IndexHint
  *   ...
  *   PRIMARY KEY (`storage_key`),
@@ -520,10 +520,9 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     // ------------------------------------------------------------------
 
     /**
-     * Returns {@code true} when this SQL dialect supports optimistic locking.
-     * Override and return {@code false} for embedded/single-process dialects (e.g. H2)
-     * where concurrent multi-process writes cannot occur and the extra SELECT+conditional
-     * UPDATE overhead brings no benefit.
+     * Returns {@code true} when this SQL dialect enforces optimistic locking.
+     * Override and return {@code false} for a dialect that opts out of the extra
+     * SELECT+conditional UPDATE entirely (e.g. H2) - regardless of deployment mode.
      * When {@code false}, save() falls through to the plain upsert path regardless of
      * whether the descriptor declares versioning.
      */
