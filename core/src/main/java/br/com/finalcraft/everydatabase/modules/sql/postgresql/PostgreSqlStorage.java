@@ -43,6 +43,8 @@ public class PostgreSqlStorage extends SqlStorage implements ChangeFeedStorage {
     private final ChangeFeedSupport changeFeed = new ChangeFeedSupport();
     /** Lazily started on first subscribe; the NOTIFY listener thread. */
     private volatile PostgresChangeFeed changeFeedSource;
+    /** Set by {@link #close()}, cleared by {@link #init()}; blocks a subscribe racing shutdown. */
+    private volatile boolean closed;
 
     public PostgreSqlStorage(SqlConfig config) {
         this(config, StorageLogConfig.defaults());
@@ -78,13 +80,29 @@ public class PostgreSqlStorage extends SqlStorage implements ChangeFeedStorage {
     }
 
     @Override
+    public CompletableFuture<Void> init() {
+        // A storage may be reused (close() then init()); clear the closed flag once init succeeds so
+        // a later subscribe() can restart the listener.
+        return super.init().thenApply(v -> { closed = false; return v; });
+    }
+
+    @Override
     public ChangeSubscription subscribe(ChangeListener listener) {
         ensureChangeFeedStarted();
         return changeFeed.subscribe(listener);
     }
 
-    /** Lazily starts the NOTIFY listener on first subscribe (requires {@link #init()} first). */
+    /**
+     * Lazily starts the NOTIFY listener on first subscribe. The listener holds its own unpooled
+     * {@code DriverManager} connection, so it does not depend on the HikariCP pool built by
+     * {@link #init()}. Synchronised on the same monitor as {@link #close()} so a subscribe racing
+     * shutdown cannot restart the listener after the storage has been closed.
+     */
     private synchronized void ensureChangeFeedStarted() {
+        if (closed) {
+            throw new IllegalStateException(
+                "PostgreSQL storage is closed - subscribe() after close() is not supported.");
+        }
         if (changeFeedSource != null) {
             return;
         }
@@ -95,7 +113,8 @@ public class PostgreSqlStorage extends SqlStorage implements ChangeFeedStorage {
     }
 
     @Override
-    public CompletableFuture<Void> close() {
+    public synchronized CompletableFuture<Void> close() {
+        closed = true;
         PostgresChangeFeed source = changeFeedSource;
         if (source != null) {
             source.stop();
