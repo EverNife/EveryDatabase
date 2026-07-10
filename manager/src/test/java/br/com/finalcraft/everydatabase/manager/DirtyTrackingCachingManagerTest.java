@@ -122,6 +122,24 @@ class DirtyTrackingCachingManagerTest {
     }
 
     @Test
+    void bounded_lru_never_evicts_a_dirty_cell() {
+        CachingManager<UUID, Bank> mgr = new CachingManager<>(descriptor, storage,
+                CacheOptions.builder().policy(CachePolicy.always()).maxSize(2).build(), registry);
+        UUID dirtyId = UUID.randomUUID();
+        Bank dirty = mgr.seedIfAbsent(dirtyId, new Bank(dirtyId, 0));
+        dirty.deposit(75);                                   // unsaved local change -> pinned
+        UUID b = UUID.randomUUID();
+        UUID c = UUID.randomUUID();
+        mgr.seedIfAbsent(b, new Bank(b, 0));                 // clean
+        mgr.seedIfAbsent(c, new Bank(c, 0));                 // overflows the bound of 2
+
+        assertSame(dirty, mgr.peek(dirtyId).get(), "the dirty cell survives LRU pressure");
+        assertFalse(mgr.flushDirty().join().hasFailures());
+        assertEquals(75, mgr.repository().find(dirtyId).join().get().getCoins(),
+                "the pinned write still lands on the next flush");
+    }
+
+    @Test
     void saveAllAndCache_writes_through_and_updates_the_cells() {
         CachingManager<UUID, Bank> mgr = manager();
         Bank a = new Bank(UUID.randomUUID(), 10);

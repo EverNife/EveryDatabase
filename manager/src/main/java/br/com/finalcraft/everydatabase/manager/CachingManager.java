@@ -90,7 +90,9 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         this.dirtyAccessor = DirtyAccessor.forType(type);
         this.keyOf      = descriptor.keyExtractor();
         this.options    = options;
-        this.store      = new LruCacheStore<>(options.maxSize());
+        //dirty cells are pinned against LRU eviction: evicting one would silently drop the
+        //unsaved write-back changes before the next flushDirty() could persist them
+        this.store      = new LruCacheStore<>(options.maxSize(), this::isDirty);
         registry.register(type, this);
     }
 

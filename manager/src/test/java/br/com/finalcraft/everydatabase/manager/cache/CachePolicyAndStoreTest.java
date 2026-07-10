@@ -87,6 +87,29 @@ class CachePolicyAndStoreTest {
     }
 
     @Test
+    void lru_skips_vetoed_entries_and_evicts_the_next_eldest() {
+        LruCacheStore<String, String> store = new LruCacheStore<>(2, entry -> "a".equals(entry.getValue()));
+        store.put("a", new CacheEntry<>("a"));   // eldest, but pinned by the veto
+        store.put("b", new CacheEntry<>("b"));
+        store.put("c", new CacheEntry<>("c"));   // overflows -> "a" is skipped, "b" goes instead
+
+        assertEquals(2, store.size());
+        assertNotNull(store.get("a"));
+        assertNull(store.get("b"));
+        assertNotNull(store.get("c"));
+    }
+
+    @Test
+    void lru_bound_is_soft_while_every_candidate_is_vetoed() {
+        LruCacheStore<String, String> store = new LruCacheStore<>(2, entry -> true);
+        store.put("a", new CacheEntry<>("a"));
+        store.put("b", new CacheEntry<>("b"));
+        store.put("c", new CacheEntry<>("c"));
+
+        assertEquals(3, store.size());   // nothing evictable -> temporarily over the bound
+    }
+
+    @Test
     void unbounded_store_keeps_everything() {
         LruCacheStore<Integer, Integer> store = new LruCacheStore<>(0);
         for (int i = 0; i < 1000; i++) {

@@ -6,13 +6,22 @@ import java.util.function.Predicate;
 /**
  * Thread-safe entry store for a {@code CachingManager}.
  *
- * <p>When {@code maxSize > 0} it is a bounded LRU (access-order {@link LinkedHashMap} that
- * evicts the least-recently-used entry past the bound); when {@code 0} it is unbounded.
+ * <p>When {@code maxSize > 0} it is a bounded LRU (access-order {@link LinkedHashMap}; entries
+ * past the bound are evicted least-recently-used first); when {@code 0} it is unbounded.
  *
  * <p>A single lock guards every operation. Access-order {@code LinkedHashMap.get} structurally
  * reorders, so reads must hold the same lock as writes - the cost is negligible at cache sizes,
  * and it keeps the store correct without a third-party dependency. Swap in Caffeine here if a
  * deployment needs lock-striped concurrency.
+ *
+ * <p><b>Eviction veto (dirty pinning).</b> A write-back cell holding unsaved local changes must
+ * never be LRU-evicted: nobody else references it, so evicting it silently loses the write before
+ * the next {@code flushDirty()}. The optional {@code evictionVeto} predicate pins such entries -
+ * a vetoed entry is skipped and the next-eldest evictable one goes instead. While every overflow
+ * candidate is vetoed the bound is deliberately SOFT: the map exceeds {@code maxSize} and only
+ * trims on the next insertion of a new key <em>after</em> a flush has cleared the dirty flags - not
+ * during the flush itself, which evicts nothing. If insertions stop while cells stay dirty the map
+ * stays over the bound, so under sustained dirty pressure this bound is not a hard memory ceiling.
  *
  * <p>Note: in bounded mode <em>any</em> consultation via {@link #get} counts as an LRU access and
  * promotes the key to most-recently-used, even when the caller then judges the entry stale and
@@ -32,22 +41,38 @@ public class LruCacheStore<K, V> {
 
     protected final Object lock = new Object();
     protected final Map<K, CacheEntry<V>> map;
+    protected final int bound;
+    /** Entries this predicate accepts are pinned (never LRU-evicted); {@code null} = no veto. */
+    protected final Predicate<CacheEntry<V>> evictionVeto;
 
     public LruCacheStore(int maxSize) {
-        if (maxSize > 0) {
-            final int bound = maxSize;
-            this.map = new LinkedHashMap<K, CacheEntry<V>>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<K, CacheEntry<V>> eldest) {
-                    if (size() > bound) {
-                        eldest.getValue().markEvicted();   // tell any holder to re-resolve
-                        return true;
-                    }
-                    return false;
-                }
-            };
-        } else {
-            this.map = new HashMap<>();
+        this(maxSize, null);
+    }
+
+    public LruCacheStore(int maxSize, Predicate<CacheEntry<V>> evictionVeto) {
+        this.bound = Math.max(0, maxSize);
+        this.evictionVeto = evictionVeto;
+        // access-order in bounded mode (LRU iteration order); plain map when unbounded
+        this.map = bound > 0 ? new LinkedHashMap<>(16, 0.75f, true) : new HashMap<>();
+    }
+
+    /**
+     * Evicts least-recently-used entries until the map is back inside the bound, skipping the ones
+     * the {@link #evictionVeto} pins. Called under the lock after every insertion. A no-op when
+     * unbounded or inside the bound.
+     */
+    protected void enforceBound() {
+        if (bound <= 0 || map.size() <= bound) {
+            return;
+        }
+        Iterator<Map.Entry<K, CacheEntry<V>>> it = map.entrySet().iterator();
+        while (map.size() > bound && it.hasNext()) {
+            CacheEntry<V> eldest = it.next().getValue();
+            if (evictionVeto != null && evictionVeto.test(eldest)) {
+                continue;   // pinned (e.g. dirty write-back cell) - try the next-eldest
+            }
+            eldest.markEvicted();   // tell any holder to re-resolve
+            it.remove();
         }
     }
 
@@ -60,6 +85,7 @@ public class LruCacheStore<K, V> {
     public void put(K key, CacheEntry<V> entry) {
         synchronized (lock) {
             map.put(key, entry);
+            enforceBound();
         }
     }
 
@@ -84,6 +110,7 @@ public class LruCacheStore<K, V> {
                 return existing;
             }
             map.put(key, candidate);
+            enforceBound();
             return candidate;
         }
     }
@@ -102,6 +129,7 @@ public class LruCacheStore<K, V> {
             if (cell == null) {
                 CacheEntry<V> fresh = new CacheEntry<>(value, stamp);
                 map.put(key, fresh);
+                enforceBound();
                 return fresh;
             }
             if (!cell.isDeleted()) {
@@ -126,6 +154,7 @@ public class LruCacheStore<K, V> {
                 cell = new CacheEntry<>(null, stamp);
                 cell.tombstone(stamp);
                 map.put(key, cell);
+                enforceBound();
             } else {
                 cell.tombstone(stamp);
             }
