@@ -1,8 +1,12 @@
 package br.com.finalcraft.everydatabase.manager;
 
 import br.com.finalcraft.everydatabase.Repository;
+import br.com.finalcraft.everydatabase.WriteMode;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.ScanRow;
+import br.com.finalcraft.everydatabase.query.Slice;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -68,6 +72,14 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            return saveAll(entities);
+        }
+        throw new UnsupportedOperationException();   // this fake has no update-only maintenance path
+    }
+
+    @Override
     public CompletableFuture<Optional<V>> find(K key) {
         return CompletableFuture.completedFuture(Optional.ofNullable(data.get(key)));
     }
@@ -124,6 +136,11 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
         throw new UnsupportedOperationException();
     }
 }

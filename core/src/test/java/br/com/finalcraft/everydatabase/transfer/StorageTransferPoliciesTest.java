@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
@@ -13,8 +14,11 @@ import br.com.finalcraft.everydatabase.modules.sql.PoolTuning;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import br.com.finalcraft.everydatabase.modules.sql.SqlMigration;
 import br.com.finalcraft.everydatabase.modules.sql.h2.H2SqlStorage;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.ScanRow;
+import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import org.junit.jupiter.api.*;
 
@@ -792,6 +796,11 @@ class StorageTransferPoliciesTest {
                     }
 
                     @Override
+                    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+                        return base.saveAll(entities, mode);
+                    }
+
+                    @Override
                     public CompletableFuture<Boolean> delete(K key) { return base.delete(key); }
 
                     @Override
@@ -816,6 +825,11 @@ class StorageTransferPoliciesTest {
                     @Override
                     public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
                         return base.query(query, options);
+                    }
+
+                    @Override
+                    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
+                        return base.scanAll(cursor, limit);
                     }
                 };
             }

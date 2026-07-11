@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageOp;
@@ -13,6 +14,7 @@ import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -273,6 +275,57 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             .thenRun(() -> log.savedBatch(collection, count, System.currentTimeMillis() - startMs));
     }
 
+    @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            return saveAll(entities);
+        }
+        for (V entity : entities) {
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, collection);
+            if (reject != null) return reject;
+        }
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
+        List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
+        for (V entity : entities) {
+            K key = descriptor.keyExtractor().apply(entity);
+            futures.add(CompletableFuture.runAsync(() -> updateEntityOnly(key, entity), StorageExecutors.get()));
+        }
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            .thenRun(() -> log.savedBatch(collection, count, System.currentTimeMillis() - startMs));
+    }
+
+    /**
+     * {@code UPDATE_ONLY} read-modify-write: rewrite this collection's sub-node only if it already exists
+     * in the key file. When the sub-node is absent (a concurrent delete, or a key that only holds other
+     * collections) it is a no-op, so the maintenance pass never resurrects a deleted entity.
+     */
+    private void updateEntityOnly(K key, V entity) {
+        ReadWriteLock lock = lockFor(key);
+        lock.writeLock().lock();
+        try {
+            Path file = fileFor(key);
+            ObjectNode root = readRoot(file);
+            if (root == null || !root.has(collection)) return;   // absent - never inserts
+            root.set(collection, store.mapper().readTree(descriptor.codec().encode(entity)));
+            store.writeAtomic(file, store.mapper().writeValueAsBytes(root));
+        } catch (IOException e) {
+            throw log.errored(StorageOp.SAVE, collection,
+                new RuntimeException("GroupedFile: failed to write key=" + key, e));
+        } catch (CodecException e) {
+            throw log.errored(StorageOp.SAVE, collection,
+                new RuntimeException("GroupedFile: codec error writing key=" + key, e));
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
     /**
      * Read-modify-write of the key file under the global per-key write lock: load the aggregate root
      * (or a fresh one), set this collection's sub-node to the encoded entity, and atomically rewrite the
@@ -326,6 +379,49 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                     new RuntimeException("GroupedFile: failed to delete key=" + key, e));
             } finally {
                 lock.writeLock().unlock();
+            }
+        }, StorageExecutors.get());
+    }
+
+    /**
+     * Key-ordered scan. Like {@link LocalFileRepository}, GroupedFile is single-instance and holds modest
+     * collections, so this returns the whole collection in one page (ordered by key file name); {@code limit}
+     * is advisory. A key file that is unreadable, or holds an undecodable sub-node for this collection, is
+     * surfaced as a failed {@link ScanRow} (never silently dropped). A non-start cursor returns an empty
+     * final page.
+     */
+    @Override
+    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        if (!cursor.isStart()) {
+            return CompletableFuture.completedFuture(Slice.ofCursor(new ArrayList<>(), QueryOptions.none(), false, null));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                List<Path> files = new ArrayList<>();
+                for (Path file : store.keyFiles()) files.add(file);
+                files.sort(Comparator.comparing(p -> p.getFileName().toString()));
+                List<ScanRow<V>> rows = new ArrayList<>();
+                for (Path file : files) {
+                    String fileName = file.getFileName().toString();
+                    try {
+                        ObjectNode root = readRoot(file);
+                        if (root == null || !root.has(collection)) continue;   // key holds only other collections
+                        byte[] bytes = store.mapper().writeValueAsBytes(root.get(collection));
+                        V value = descriptor.codec().decode(bytes);
+                        // Carry the real storage key (from the decoded entity), not the key file name, so
+                        // ScanRow.key() matches the other backends for sanitized/hashed keys.
+                        rows.add(ScanRow.ok(descriptor.keyExtractor().apply(value).toString(), value));
+                    } catch (Exception e) {
+                        log.skippedCorruptedRow(collection, fileName, e);
+                        rows.add(ScanRow.failed(fileName, e));   // undecodable: best-effort identifier is the file name
+                    }
+                }
+                return Slice.ofCursor(rows, QueryOptions.none(), false, null);
+            } catch (IOException e) {
+                throw log.errored(StorageOp.SCAN_ALL, collection,
+                    new RuntimeException("GroupedFile: failed to scan all entities", e));
             }
         }, StorageExecutors.get());
     }

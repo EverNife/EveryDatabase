@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
@@ -14,6 +15,7 @@ import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -953,6 +955,118 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         });
     }
 
+    @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            return saveAll(entities);
+        }
+        if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
+        for (V entity : entities) {
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, tableName());
+            if (reject != null) return reject;
+        }
+
+        if (versioningActive()) {
+            // Each entity's guarded update is atomic on the shared connection; an absent row is a no-op
+            // (never an INSERT) and a version mismatch throws OptimisticLockException.
+            return withConnection(StorageOp.SAVE_BATCH, conn -> {
+                boolean autoCommit = conn.getAutoCommit();
+                if (autoCommit) conn.setAutoCommit(false);
+                try {
+                    for (V entity : entities) {
+                        updateOnlyVersionedOnConn(conn, entity);
+                    }
+                    if (autoCommit) conn.commit();
+                    return null;
+                } catch (Exception e) {
+                    if (autoCommit) { try { conn.rollback(); } catch (SQLException ignored) {} }
+                    throw e;
+                } finally {
+                    if (autoCommit) conn.setAutoCommit(true);
+                }
+            });
+        }
+
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
+        String sql = buildUpdateOnlySql();
+        return withConnection(StorageOp.SAVE_BATCH, conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (V entity : entities) {
+                    K key = descriptor.keyExtractor().apply(entity);
+                    byte[] data = descriptor.codec().encode(entity);
+                    bindUpdateOnlyParameters(ps, key, entity, data);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            log.savedBatch(tableName(), count, System.currentTimeMillis() - startMs);
+            return null;
+        });
+    }
+
+    /**
+     * {@code UPDATE_ONLY} for a versioned descriptor: guarded update, no INSERT. An absent row is a
+     * no-op (the maintenance pass must never resurrect a concurrently deleted row); a version mismatch
+     * or a lost update raises {@link OptimisticLockException}.
+     */
+    private void updateOnlyVersionedOnConn(Connection conn, V entity) throws SQLException, CodecException {
+        K key = descriptor.keyExtractor().apply(entity);
+        Long boxedVersion = descriptor.versionGetter().apply(entity);
+        long incomingVersion = boxedVersion != null ? boxedVersion : 0L;
+        Long dbVersion = selectVersion(conn, key);
+
+        if (dbVersion == null) {
+            return; // row gone - UPDATE_ONLY never inserts
+        }
+        if (dbVersion == incomingVersion) {
+            long newVersion = incomingVersion + 1;
+            descriptor.versionSetter().accept(entity, newVersion);
+            byte[] data = descriptor.codec().encode(entity);
+            String dataStr = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+            int rows = updateVersioned(conn, key, dataStr, entity, incomingVersion);
+            if (rows == 0) {
+                descriptor.versionSetter().accept(entity, incomingVersion); // undo
+                log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
+                throw new OptimisticLockException(descriptor.type(), key, incomingVersion, dbVersion);
+            }
+        } else {
+            log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
+            throw new OptimisticLockException(descriptor.type(), key, incomingVersion, dbVersion);
+        }
+    }
+
+    /** {@code UPDATE ... SET storage_data=?, _idx_*=? WHERE storage_key=?} - plain (non-versioned) update. */
+    private String buildUpdateOnlySql() {
+        StringBuilder sb = new StringBuilder("UPDATE ").append(q(tableName())).append(" SET ");
+        sb.append(q(COL_DATA)).append(" = ?");
+        for (IndexHint hint : indexes) {
+            sb.append(", ").append(q(hint.indexColumnName())).append(" = ?");
+        }
+        sb.append(" WHERE ").append(q(COL_KEY)).append(" = ?");
+        return sb.toString();
+    }
+
+    /** Binds {@code (storage_data, _idx_a, _idx_b, ..., storage_key)} for {@link #buildUpdateOnlySql}. */
+    private void bindUpdateOnlyParameters(PreparedStatement ps, K key, V entity, byte[] data) throws SQLException {
+        int slot = 1;
+        setDataParam(ps, slot++, new String(data, StandardCharsets.UTF_8));
+        if (!indexes.isEmpty()) {
+            JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
+            for (IndexHint hint : indexes) {
+                Object value = IndexValueExtractor.extract(tree, hint);
+                ps.setObject(slot++, toJdbcValue(value, hint));
+            }
+        }
+        ps.setString(slot, key.toString());
+    }
+
     /**
      * Performs a versioned save of a single entity on an already-open connection (no own tx mgmt).
      * Used by {@link #saveAll} for versioned descriptors.
@@ -1077,6 +1191,55 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 return readEntities(ps).stream();
             }
         });
+    }
+
+    @Override
+    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        StringBuilder sql = new StringBuilder("SELECT ").append(q(COL_KEY)).append(", ").append(q(COL_DATA))
+            .append(" FROM ").append(q(tableName()));
+        List<Object> params = new ArrayList<>(2);
+        if (!cursor.isStart()) {
+            sql.append(" WHERE ").append(q(COL_KEY)).append(" > ?");
+            params.add(cursor.lastKey());
+        }
+        sql.append(" ORDER BY ").append(q(COL_KEY)).append(" ASC LIMIT ?");
+        int probe = limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1;   // one extra to detect hasNext
+        params.add(probe);
+        return withConnection(StorageOp.SCAN_ALL, conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                List<ScanRow<V>> rows = new ArrayList<>();
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String key  = rs.getString(1);
+                        String json = rs.getString(2);
+                        try {
+                            V value = descriptor.codec().decode(json.getBytes(StandardCharsets.UTF_8));
+                            rows.add(ScanRow.ok(key, value));
+                        } catch (CodecException e) {
+                            // Unlike readEntities, surface the failure to the caller AS WELL AS logging it.
+                            log.skippedCorruptedRow(tableName(), key, e);
+                            rows.add(ScanRow.failed(key, e));
+                        }
+                    }
+                }
+                return sliceOf(rows, cursor, limit);
+            }
+        });
+    }
+
+    /** Trims the probe row and builds the key-ordered continuation cursor from the last content row. */
+    private Slice<ScanRow<V>> sliceOf(List<ScanRow<V>> rows, Cursor cursor, int limit) {
+        boolean hasNext = rows.size() > limit;
+        List<ScanRow<V>> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
+        Cursor next = null;
+        if (hasNext && !content.isEmpty()) {
+            String lastKey = content.get(content.size() - 1).key();
+            next = Cursor.after(cursor.orderBy(), cursor.direction(), lastKey, lastKey);
+        }
+        return Slice.ofCursor(content, QueryOptions.none(), hasNext, next);
     }
 
     // ------------------------------------------------------------------

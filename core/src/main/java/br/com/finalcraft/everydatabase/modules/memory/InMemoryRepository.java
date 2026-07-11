@@ -3,9 +3,11 @@ package br.com.finalcraft.everydatabase.modules.memory;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
 import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
+import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
@@ -13,6 +15,7 @@ import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -152,6 +155,40 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         return CompletableFuture.completedFuture(null);
     }
 
+    @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            return saveAll(entities);
+        }
+        for (V entity : entities) {
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
+            if (reject != null) return reject;
+        }
+        long startMs = System.currentTimeMillis();
+        List<K> updated = new ArrayList<>(entities.size());
+        synchronized (this) {
+            for (V entity : entities) {
+                K key = descriptor.keyExtractor().apply(entity);
+                V existing = store.get(key);
+                if (existing == null) continue;   // UPDATE_ONLY: never inserts an absent key
+                V copy = deepCopy(entity);
+                store.put(key, copy);
+                removeFromIndexes(key, existing);
+                addToIndexes(key, copy);
+                updated.add(key);
+            }
+        }
+        log.savedBatch(descriptor.collection(), updated.size(), System.currentTimeMillis() - startMs);
+        for (K key : updated) emitSave(key, store.get(key));
+        return CompletableFuture.completedFuture(null);
+    }
+
     private V deepCopy(V entity) {
         return descriptor.codec().decode(descriptor.codec().encode(entity));
     }
@@ -249,6 +286,41 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         List<V> snapshot = new ArrayList<>(store.size());
         for (V v : store.values()) snapshot.add(deepCopy(v));
         return CompletableFuture.completedFuture(snapshot.stream());
+    }
+
+    @Override
+    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        // Key-ordered by the key's string form (the same ordering the file/SQL backends page by).
+        List<Map.Entry<String, V>> ordered = new ArrayList<>(store.size());
+        synchronized (this) {
+            for (Map.Entry<K, V> e : store.entrySet()) {
+                ordered.add(new AbstractMap.SimpleEntry<>(e.getKey().toString(), e.getValue()));
+            }
+        }
+        ordered.sort(Map.Entry.comparingByKey());
+        String afterKey = cursor.isStart() ? null : cursor.lastKey();
+        long probe = limit == Integer.MAX_VALUE ? Long.MAX_VALUE : (long) limit + 1;   // one extra to detect hasNext
+        List<ScanRow<V>> rows = new ArrayList<>();
+        for (Map.Entry<String, V> e : ordered) {
+            if (afterKey != null && e.getKey().compareTo(afterKey) <= 0) continue;
+            if (rows.size() >= probe) break;
+            try {
+                rows.add(ScanRow.ok(e.getKey(), deepCopy(e.getValue())));
+            } catch (CodecException ex) {
+                log.skippedCorruptedRow(descriptor.collection(), e.getKey(), ex);
+                rows.add(ScanRow.failed(e.getKey(), ex));
+            }
+        }
+        boolean hasNext = rows.size() > limit;
+        List<ScanRow<V>> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
+        Cursor next = null;
+        if (hasNext && !content.isEmpty()) {
+            String lastKey = content.get(content.size() - 1).key();
+            next = Cursor.after(cursor.orderBy(), cursor.direction(), lastKey, lastKey);
+        }
+        return CompletableFuture.completedFuture(Slice.ofCursor(content, QueryOptions.none(), hasNext, next));
     }
 
     // ------------------------------------------------------------------

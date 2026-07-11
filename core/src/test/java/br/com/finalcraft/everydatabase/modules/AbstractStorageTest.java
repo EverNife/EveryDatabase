@@ -5,6 +5,7 @@ import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.log.StorageLogEvent;
@@ -15,6 +16,7 @@ import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Page;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.testutil.CapturingSink;
 import org.junit.jupiter.api.*;
@@ -1141,5 +1143,124 @@ public abstract class AbstractStorageTest {
         repo.query(Query.eq("world", "world_nether")).join();
         assertTrue(capture.byOp(StorageOp.QUERY).get(0).format().contains("world_nether"),
             "includeQueryValues=true must render the filter literal");
+    }
+
+    // ------------------------------------------------------------------
+    //  scanAll (key-ordered maintenance scan) + WriteMode.UPDATE_ONLY
+    // ------------------------------------------------------------------
+
+    /**
+     * Injects one raw, undecodable row under {@code collection} directly at the storage layer, bypassing
+     * the codec, then returns {@code true}. Default: this backend cannot fabricate a corrupt row (e.g.
+     * InMemory stores live objects), so the corrupted-row scan test self-skips. Persistent backends override.
+     */
+    protected boolean injectCorruptRow(String collection) throws Exception {
+        return false;
+    }
+
+    /** Drains the whole collection through the paged scan, following the cursor to exhaustion. */
+    protected List<ScanRow<TestPlayer>> drainScan(Repository<UUID, TestPlayer> repository, int pageSize) {
+        List<ScanRow<TestPlayer>> out = new ArrayList<>();
+        Cursor cursor = Cursor.scan();
+        while (true) {
+            Slice<ScanRow<TestPlayer>> slice = repository.scanAll(cursor, pageSize).join();
+            out.addAll(slice.content());
+            if (!slice.hasNext()) break;
+            cursor = slice.nextCursor().orElseThrow(() -> new AssertionError("hasNext but no continuation cursor"));
+        }
+        return out;
+    }
+
+    @Test
+    @Order(300)
+    @DisplayName("[base] scanAll pages through the whole collection exactly once")
+    void scanAll_returnsEveryRowOnce() {
+        repo.saveAll(Arrays.asList(alice(), bob(), carol())).join();
+
+        // A small page size forces multiple pages on the paginating backends.
+        List<ScanRow<TestPlayer>> scanned = drainScan(repo, 2);
+
+        assertTrue(scanned.stream().noneMatch(ScanRow::isFailed), "no decode failures expected on clean data");
+        Set<UUID> keys = scanned.stream().map(r -> r.value().getUuid()).collect(Collectors.toSet());
+        assertEquals(Set.of(UUID_ALICE, UUID_BOB, UUID_CAROL), keys,
+            "scanAll must return every stored row exactly once");
+
+        // ScanRow.key() on a successful row is the real storage key on every backend.
+        Set<String> rowKeys = scanned.stream().map(ScanRow::key).collect(Collectors.toSet());
+        assertEquals(Set.of(UUID_ALICE.toString(), UUID_BOB.toString(), UUID_CAROL.toString()), rowKeys,
+            "ScanRow.key() must be the real storage key, not a backend-specific file name");
+    }
+
+    @Test
+    @Order(301)
+    @DisplayName("[base] scanAll on an empty collection returns no rows and no next page")
+    void scanAll_emptyCollection() {
+        Slice<ScanRow<TestPlayer>> slice = repo.scanAll(Cursor.scan(), 10).join();
+        assertTrue(slice.content().isEmpty(), "empty collection yields no rows");
+        assertFalse(slice.hasNext(), "empty collection has no next page");
+    }
+
+    @Test
+    @Order(302)
+    @DisplayName("[base] scanAll rejects a limit < 1")
+    void scanAll_rejectsNonPositiveLimit() {
+        assertThrows(IllegalArgumentException.class, () -> repo.scanAll(Cursor.scan(), 0));
+    }
+
+    @Test
+    @Order(305)
+    @DisplayName("[base] saveAll(UPDATE_ONLY) updates an existing key without changing the count")
+    void updateOnly_updatesExisting() {
+        repo.saveAll(Arrays.asList(alice(), bob())).join();
+
+        TestPlayer updated = alice();
+        updated.setScore(999);
+        repo.saveAll(Collections.singletonList(updated), WriteMode.UPDATE_ONLY).join();
+
+        assertEquals(999, repo.find(UUID_ALICE).join().orElseThrow(AssertionError::new).getScore());
+        assertEquals(2L, repo.count().join(), "update-only must not change the row count");
+    }
+
+    @Test
+    @Order(306)
+    @DisplayName("[base] saveAll(UPDATE_ONLY) never inserts an absent key")
+    void updateOnly_absentKeyIsNoOp() {
+        repo.saveAll(Arrays.asList(alice(), bob())).join();
+
+        TestPlayer ghost = new TestPlayer(UUID_GHOST, "Ghost", 7);
+        repo.saveAll(Collections.singletonList(ghost), WriteMode.UPDATE_ONLY).join();
+
+        assertFalse(repo.find(UUID_GHOST).join().isPresent(), "UPDATE_ONLY must not insert an absent key");
+        assertEquals(2L, repo.count().join(), "count must be unchanged after an update-only no-op insert");
+    }
+
+    @Test
+    @Order(307)
+    @DisplayName("[base] saveAll(UPSERT) behaves exactly like saveAll()")
+    void updateMode_upsert_insertsLikeSaveAll() {
+        repo.saveAll(Arrays.asList(alice(), bob()), WriteMode.UPSERT).join();
+        assertEquals(2L, repo.count().join(), "UPSERT mode must insert like plain saveAll()");
+        assertEquals(100, repo.find(UUID_ALICE).join().orElseThrow(AssertionError::new).getScore());
+    }
+
+    @Test
+    @Order(310)
+    @DisplayName("[base] scanAll surfaces an undecodable row as a failed ScanRow (persistent backends)")
+    void scanAll_corruptedRow_surfacedAsFailed() throws Exception {
+        repo.saveAll(Arrays.asList(alice(), bob(), carol())).join();
+        Assumptions.assumeTrue(injectCorruptRow(DESCRIPTOR.collection()),
+            "backend cannot fabricate a raw corrupt row");
+
+        List<ScanRow<TestPlayer>> scanned = drainScan(repo, 2);
+
+        assertEquals(1, scanned.stream().filter(ScanRow::isFailed).count(),
+            "the corrupted row must surface as exactly one failed ScanRow");
+        assertEquals(3, scanned.stream().filter(r -> !r.isFailed()).count(),
+            "the 3 clean rows must still be returned");
+        ScanRow<TestPlayer> bad = scanned.stream().filter(ScanRow::isFailed)
+            .findFirst().orElseThrow(AssertionError::new);
+        assertNull(bad.value(), "a failed row carries no value");
+        assertNotNull(bad.error(), "a failed row carries the decode cause");
+        assertNotNull(bad.key(), "a failed row still carries a best-effort identifier");
     }
 }

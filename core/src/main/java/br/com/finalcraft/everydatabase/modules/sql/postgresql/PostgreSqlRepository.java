@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.sql.postgresql;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.log.StorageLog;
@@ -71,6 +72,21 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         return super.saveAll(entities).thenApply(done -> {
+            for (V entity : entities) {
+                notifyChange(ChangeOp.SAVE, descriptor.keyExtractor().apply(entity), versionOf(entity));
+            }
+            return done;
+        });
+    }
+
+    @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            // UPSERT already routes through saveAll(entities), which emits one NOTIFY per entity;
+            // re-notifying here would double every change event.
+            return saveAll(entities);
+        }
+        return super.saveAll(entities, mode).thenApply(done -> {
             for (V entity : entities) {
                 notifyChange(ChangeOp.SAVE, descriptor.keyExtractor().apply(entity), versionOf(entity));
             }

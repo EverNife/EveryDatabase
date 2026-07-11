@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.util.FileKeyNames;
 import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.codec.CodecException;
@@ -18,6 +19,7 @@ import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -205,6 +207,42 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
     }
 
+    @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            return saveAll(entities);
+        }
+        for (V entity : entities) {
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
+            if (reject != null) return reject;
+        }
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
+        List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
+        for (V entity : entities) {
+            K key = descriptor.keyExtractor().apply(entity);
+            futures.add(CompletableFuture.runAsync(() -> {
+                // UPDATE_ONLY: write only if a file already exists, all under the per-key write lock so a
+                // concurrent delete cannot be resurrected. The reentrant write lock lets writeFile re-take it.
+                ReadWriteLock lock = lockFor(key);
+                lock.writeLock().lock();
+                try {
+                    if (Files.exists(existingPathFor(key))) writeFile(key, entity);
+                } finally {
+                    lock.writeLock().unlock();
+                }
+            }, StorageExecutors.get()));
+        }
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
+    }
+
     /**
      * Encodes and writes one entity to disk under its per-key lock. Shared by {@link #save}
      * (which logs a single {@code SAVE} event) and {@link #saveAll} (which logs one
@@ -364,6 +402,56 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             } catch (IOException e) {
                 throw log.errored(StorageOp.SCAN_ALL, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to stream all entities", e));
+            }
+        }, StorageExecutors.get());
+    }
+
+    /**
+     * Key-ordered scan. File backends are single-instance and hold modest collections, so this returns
+     * the whole collection in one page (ordered by file stem), which keeps the scan complete and simple;
+     * {@code limit} is advisory here. A file that cannot be read/decoded is surfaced as a failed
+     * {@link ScanRow} (never silently dropped). A non-start cursor returns an empty final page, since the
+     * first page already returned everything.
+     */
+    @Override
+    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        if (!cursor.isStart()) {
+            return CompletableFuture.completedFuture(Slice.ofCursor(new ArrayList<>(), QueryOptions.none(), false, null));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                if (!Files.exists(collectionDir)) {
+                    return Slice.ofCursor(new ArrayList<ScanRow<V>>(), QueryOptions.none(), false, null);
+                }
+                String ext = "." + fileExtension();
+                List<Path> files;
+                try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
+                    files = paths
+                        .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
+                        .sorted(Comparator.comparing(p -> p.getFileName().toString()))
+                        .collect(Collectors.toList());
+                }
+                List<ScanRow<V>> rows = new ArrayList<>(files.size());
+                for (Path path : files) {
+                    String fileName = path.getFileName().toString();
+                    String stem = fileName.substring(0, fileName.length() - ext.length());
+                    try {
+                        byte[] data = Files.readAllBytes(path);
+                        V value = descriptor.codec().decode(data);
+                        // Carry the real storage key (from the decoded entity), not the file stem, so
+                        // ScanRow.key() matches the other backends for sanitized/hashed keys.
+                        rows.add(ScanRow.ok(descriptor.keyExtractor().apply(value).toString(), value));
+                    } catch (Exception e) {
+                        log.skippedCorruptedRow(descriptor.collection(), fileName, e);
+                        rows.add(ScanRow.failed(stem, e));   // undecodable: best-effort identifier is the file stem
+                    }
+                }
+                return Slice.ofCursor(rows, QueryOptions.none(), false, null);
+            } catch (IOException e) {
+                throw log.errored(StorageOp.SCAN_ALL, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to scan all entities", e));
             }
         }, StorageExecutors.get());
     }

@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -86,6 +87,13 @@ class GroupedFileStorageTest extends AbstractStorageTest {
                 .sorted(Comparator.reverseOrder())
                 .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
         } catch (IOException ignored) {}
+    }
+
+    @Override
+    protected boolean injectCorruptRow(String collection) throws IOException {
+        // A key file that fails to parse must surface as a failed ScanRow (not silently skipped).
+        Files.write(tempDir.resolve("corrupt.json"), "{ this is not valid json".getBytes(StandardCharsets.UTF_8));
+        return true;
     }
 
     // Two collections sharing the SAME key space (UUID) - the grouping case.

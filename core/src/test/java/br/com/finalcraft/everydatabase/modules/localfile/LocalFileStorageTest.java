@@ -62,6 +62,14 @@ class LocalFileStorageTest extends AbstractStorageTest {
         return new LocalFileStorage(new LocalFileConfig(tempDir));
     }
 
+    @Override
+    protected boolean injectCorruptRow(String collection) throws IOException {
+        Path dir = tempDir.resolve(collection);
+        Files.createDirectories(dir);
+        Files.write(dir.resolve("corrupt.json"), "{ this is not valid json".getBytes(StandardCharsets.UTF_8));
+        return true;
+    }
+
     @AfterAll
     static void handleResiduals() {
         if (!CLEAN_TEST_RESIDUALS) {

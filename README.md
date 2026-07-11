@@ -518,6 +518,31 @@ Slice<PlayerData> resumed = repo.queryAfter(Query.all(), Cursor.decode(token), 1
 
 > Keyset is forward-only and has no "jump to page N" or total — use `queryPage` for "page X of N" admin screens, `queryAfter` for feeds and large/deep lists. The order field must be a declared index; the same NULL=least, key-tie-break order applies, so cursor paging is consistent across every backend.
 
+#### Full-collection maintenance sweep — `scanAll` + `WriteMode.UPDATE_ONLY`
+
+For a pass over an **entire** collection — re-encoding every row through a codec transform, backfilling a field, auditing for corruption — `scanAll` pages by the **storage key** (no declared index needed) and, unlike `all()`/`query()`, **never silently drops a row that fails to decode**: each page element is a `ScanRow` that is either the decoded entity or the decode failure (`key()` + `error()`), so a poisoned row is counted and named instead of shrinking the scan.
+
+```java
+Cursor cursor = Cursor.scan();
+List<PlayerData> repaired = new ArrayList<>();
+while (true) {
+    Slice<ScanRow<PlayerData>> page = repo.scanAll(cursor, 500).join();
+    for (ScanRow<PlayerData> row : page.content()) {
+        if (row.isFailed()) { log.warn("undecodable row {}: {}", row.key(), row.error()); continue; }
+        repaired.add(transform(row.value()));
+    }
+    if (!page.hasNext()) break;
+    cursor = page.nextCursor().get();
+}
+
+// Write the sweep back WITHOUT resurrecting rows deleted meanwhile:
+repo.saveAll(repaired, WriteMode.UPDATE_ONLY).join();
+```
+
+`WriteMode.UPDATE_ONLY` updates only rows that still exist — an absent key is a silent no-op, never an insert — so a concurrent delete during the sweep is not undone; on a versioned descriptor it keeps the optimistic-lock guard (a version mismatch still throws `OptimisticLockException`). `WriteMode.UPSERT` is exactly `saveAll(entities)`.
+
+> SQL/Mongo/InMemory page by key; the single-instance file backends return the whole collection in one page (`limit` is advisory there). `ScanRow.key()` is the real storage key on a successful row.
+
 ---
 
 ## Optimistic locking

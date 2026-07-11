@@ -28,6 +28,13 @@ public final class Cursor {
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().build();
 
+    /**
+     * Reserved {@code orderBy} used by {@link br.com.finalcraft.everydatabase.Repository#scanAll(Cursor, int)}:
+     * it means "order by the storage key itself", which every backend can page cheaply without a declared
+     * index. Not a real field name, so it never collides with an {@link IndexHint}.
+     */
+    public static final String STORAGE_KEY_ORDER = "__storage_key__";
+
     private final String orderBy;
     private final IndexHint.Order direction;
     private final boolean start;
@@ -45,6 +52,14 @@ public final class Cursor {
     /** Begins a keyset sequence ordered by {@code orderBy}/{@code direction}, from the first row. */
     public static Cursor start(String orderBy, IndexHint.Order direction) {
         return new Cursor(orderBy, direction, true, null, null);
+    }
+
+    /**
+     * Begins a full-collection scan ordered by the storage key ascending, from the first row - the start
+     * cursor for {@link br.com.finalcraft.everydatabase.Repository#scanAll(Cursor, int)}.
+     */
+    public static Cursor scan() {
+        return start(STORAGE_KEY_ORDER, IndexHint.Order.ASCENDING);
     }
 
     /** A cursor positioned right after the row {@code (lastValue, lastKey)}; built by the repository. */

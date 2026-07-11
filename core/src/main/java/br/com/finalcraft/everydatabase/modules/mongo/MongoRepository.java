@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
@@ -14,6 +15,7 @@ import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -511,6 +513,126 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     }
 
     @Override
+    public CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode) {
+        if (mode == null || mode == WriteMode.UPSERT) {
+            return saveAll(entities);
+        }
+        if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
+        for (V entity : entities) {
+            K key;
+            try {
+                key = descriptor.keyExtractor().apply(entity);
+            } catch (RuntimeException e) {
+                return StorageKeys.failedFuture(e);
+            }
+            CompletableFuture<Void> reject = StorageKeys.rejectIfTooLong(key, descriptor.collection());
+            if (reject != null) return reject;
+        }
+
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
+
+        if (descriptor.isVersioned()) {
+            if (session != null) {
+                CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
+                for (V entity : entities) {
+                    chain = chain.thenCompose(ignored -> saveVersionedUpdateOnly(entity));
+                }
+                return chain.thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
+            }
+            List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
+            for (V entity : entities) futures.add(saveVersionedUpdateOnly(entity));
+            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
+        }
+
+        // Non-versioned UPDATE_ONLY: replaceOne with upsert(false) - an absent _id matches nothing.
+        return CompletableFuture.supplyAsync(() -> {
+            ReplaceOptions noUpsert = new ReplaceOptions().upsert(false);
+            BulkWriteOptions unordered = new BulkWriteOptions().ordered(false);
+            List<ReplaceOneModel<Document>> models = new ArrayList<>(Math.min((int) count, BULK_WRITE_CHUNK));
+            for (V entity : entities) {
+                K key = descriptor.keyExtractor().apply(entity);
+                try {
+                    models.add(new ReplaceOneModel<>(
+                        Filters.eq(COL_KEY, key.toString()), buildDocument(key, entity), noUpsert));
+                } catch (CodecException e) {
+                    throw log.errored(StorageOp.SAVE_BATCH, descriptor.collection(),
+                        new RuntimeException("Mongo codec error saving key=" + key, e));
+                }
+                if (models.size() >= BULK_WRITE_CHUNK) {
+                    bulkWriteChunk(models, unordered);
+                    models.clear();
+                }
+            }
+            if (!models.isEmpty()) bulkWriteChunk(models, unordered);
+            log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs);
+            return null;
+        }, StorageExecutors.get());
+    }
+
+    /**
+     * Versioned {@code UPDATE_ONLY}: guarded {@code updateOne}, no insert. A matched update bumps the
+     * version; when nothing matches, an existing document means a version conflict (OLE) and an absent
+     * document is a no-op (the maintenance pass must never resurrect a concurrently deleted row).
+     */
+    private CompletableFuture<Void> saveVersionedUpdateOnly(V entity) {
+        K key = descriptor.keyExtractor().apply(entity);
+        Long boxedVersion = descriptor.versionGetter().apply(entity);
+        long incomingVersion = boxedVersion != null ? boxedVersion : 0L;
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                long newVersion = incomingVersion + 1;
+                descriptor.versionSetter().accept(entity, newVersion);
+                byte[] data = descriptor.codec().encode(entity);
+
+                Document setDoc = new Document(COL_DATA, toDataDoc(data));
+                if (!hintsByPath.isEmpty()) {
+                    JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
+                    for (IndexHint hint : hintsByPath.values()) {
+                        Object value = IndexValueExtractor.extract(tree, hint);
+                        setDoc.append(hint.indexColumnName(), toMongoValue(value, hint));
+                    }
+                }
+                Document update = new Document("$set", setDoc)
+                    .append("$inc", new Document(COL_VERSION, 1L));
+                Bson filter = Filters.and(
+                    Filters.eq(COL_KEY, key.toString()),
+                    Filters.eq(COL_VERSION, incomingVersion));
+
+                UpdateResult result = session != null
+                    ? collection.updateOne(session, filter, update)
+                    : collection.updateOne(filter, update);
+
+                if (result.getMatchedCount() == 0) {
+                    descriptor.versionSetter().accept(entity, incomingVersion); // undo
+                    long existCount = session != null
+                        ? collection.countDocuments(session, Filters.eq(COL_KEY, key.toString()))
+                        : collection.countDocuments(Filters.eq(COL_KEY, key.toString()));
+                    if (existCount == 0) {
+                        return null; // absent - UPDATE_ONLY never inserts
+                    }
+                    Document found = session != null
+                        ? collection.find(session, Filters.eq(COL_KEY, key.toString())).first()
+                        : collection.find(Filters.eq(COL_KEY, key.toString())).first();
+                    long actualVersion = found != null && found.get(COL_VERSION) instanceof Number
+                        ? ((Number) found.get(COL_VERSION)).longValue()
+                        : -1L;
+                    log.optimisticLockConflict(descriptor.collection(), key, incomingVersion, actualVersion);
+                    throw new OptimisticLockException(descriptor.type(), key, incomingVersion, actualVersion);
+                }
+                log.saved(descriptor.collection(), key, entity);
+                return null;
+            } catch (OptimisticLockException ole) {
+                throw ole;
+            } catch (CodecException e) {
+                throw log.errored(StorageOp.SAVE, descriptor.collection(),
+                    new RuntimeException("Mongo codec error saving key=" + key, e));
+            }
+        }, StorageExecutors.get());
+    }
+
+    @Override
     public CompletableFuture<Boolean> delete(K key) {
         return CompletableFuture.supplyAsync(() -> {
             long count = session != null
@@ -659,6 +781,39 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         return CompletableFuture.supplyAsync(() -> {
             FindIterable<Document> all = session != null ? collection.find(session) : collection.find();
             return decodeAll(all).stream();
+        }, StorageExecutors.get());
+    }
+
+    @Override
+    public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        int probe = limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1;   // one extra to detect hasNext
+        return CompletableFuture.supplyAsync(() -> {
+            Bson filter = cursor.isStart()
+                ? new Document()
+                : Filters.gt(COL_KEY, cursor.lastKey());
+            FindIterable<Document> found = (session != null ? collection.find(session, filter) : collection.find(filter))
+                .sort(Sorts.ascending(COL_KEY))
+                .limit(probe);
+            List<ScanRow<V>> rows = new ArrayList<>();
+            for (Document doc : found) {
+                String key = String.valueOf(doc.get(COL_KEY));
+                try {
+                    rows.add(ScanRow.ok(key, decodeEntity(doc)));
+                } catch (CodecException e) {
+                    log.skippedCorruptedRow(descriptor.collection(), key, e);
+                    rows.add(ScanRow.failed(key, e));
+                }
+            }
+            boolean hasNext = rows.size() > limit;
+            List<ScanRow<V>> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
+            Cursor next = null;
+            if (hasNext && !content.isEmpty()) {
+                String lastKey = content.get(content.size() - 1).key();
+                next = Cursor.after(cursor.orderBy(), cursor.direction(), lastKey, lastKey);
+            }
+            return Slice.ofCursor(content, QueryOptions.none(), hasNext, next);
         }, StorageExecutors.get());
     }
 

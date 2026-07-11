@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.modules;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.AnnotatedTestPlayer;
 import br.com.finalcraft.everydatabase.data.AnnotatedVersionedTestPlayer;
@@ -14,6 +15,7 @@ import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import org.junit.jupiter.api.*;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -326,6 +328,64 @@ public abstract class AbstractVersionedStorageTest {
 
         assertEquals(11, vRepo.find(UUID_ALPHA).join().orElseThrow(AssertionError::new).getScore());
         assertEquals(22, vRepo.find(UUID_BETA).join().orElseThrow(AssertionError::new).getScore());
+    }
+
+    @Test
+    @Order(61)
+    @DisplayName("[versioned] saveAll(UPDATE_ONLY) updates an existing key and bumps the version")
+    void updateOnly_versioned_updatesAndBumps() {
+        VersionedTestPlayer a = alpha();
+        vRepo.saveAll(Arrays.asList(a, beta())).join();
+        assertEquals(0L, a.getLockVersion());
+
+        a.setScore(111);
+        vRepo.saveAll(Collections.singletonList(a), WriteMode.UPDATE_ONLY).join();
+        assertEquals(1L, a.getLockVersion(), "UPDATE_ONLY must bump the version on a real update");
+
+        VersionedTestPlayer loaded = vRepo.find(UUID_ALPHA).join().orElseThrow(AssertionError::new);
+        assertEquals(111, loaded.getScore());
+        assertEquals(1L, loaded.getLockVersion());
+    }
+
+    @Test
+    @Order(62)
+    @DisplayName("[versioned] saveAll(UPDATE_ONLY) never inserts an absent key")
+    void updateOnly_versioned_absentIsNoOp() {
+        vRepo.saveAll(Collections.singletonList(alpha())).join();
+
+        VersionedTestPlayer ghost = new VersionedTestPlayer(UUID_CAROL, "Ghost", 5);
+        ghost.setLockVersion(0L);
+        vRepo.saveAll(Collections.singletonList(ghost), WriteMode.UPDATE_ONLY).join();
+
+        assertFalse(vRepo.find(UUID_CAROL).join().isPresent(), "UPDATE_ONLY must not insert an absent key");
+        assertEquals(1L, vRepo.count().join(), "count unchanged after an update-only no-op");
+    }
+
+    @Test
+    @Order(63)
+    @DisplayName("[versioned] stale saveAll(UPDATE_ONLY) -> OptimisticLockException, no lost update")
+    void updateOnly_versioned_staleThrows() {
+        VersionedTestPlayer p = alpha();
+        vRepo.save(p).join();               // stored at version 0
+
+        // A concurrent writer bumps the row to version 1.
+        VersionedTestPlayer concurrent = new VersionedTestPlayer(UUID_ALPHA, "Alpha", 10);
+        concurrent.setLockVersion(0L);
+        vRepo.save(concurrent).join();
+        assertEquals(1L, concurrent.getLockVersion());
+
+        // p still believes it is at version 0 -> UPDATE_ONLY must report a conflict, not absorb it as a no-op.
+        p.setScore(42);
+        try {
+            vRepo.saveAll(Collections.singletonList(p), WriteMode.UPDATE_ONLY).join();
+            fail("Expected OptimisticLockException for a stale UPDATE_ONLY write");
+        } catch (CompletionException ce) {
+            assertInstanceOf(OptimisticLockException.class, ce.getCause());
+        } catch (OptimisticLockException expected) {
+            // synchronous path - equally valid
+        }
+        VersionedTestPlayer loaded = vRepo.find(UUID_ALPHA).join().orElseThrow(AssertionError::new);
+        assertEquals(1L, loaded.getLockVersion(), "the stale write must not have landed");
     }
 
     // ==================================================================

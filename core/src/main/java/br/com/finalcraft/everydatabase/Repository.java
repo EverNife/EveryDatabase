@@ -5,6 +5,7 @@ import br.com.finalcraft.everydatabase.query.Page;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 
 import java.util.ArrayList;
@@ -56,6 +57,20 @@ public interface Repository<K, V> {
     CompletableFuture<Void> saveAll(Collection<V> entities);
 
     /**
+     * Batch write under the given {@link WriteMode}. {@link WriteMode#UPSERT} is exactly
+     * {@link #saveAll(Collection)}; {@link WriteMode#UPDATE_ONLY} updates only rows that already exist and
+     * never inserts, so a key deleted concurrently is a silent no-op rather than a resurrection.
+     *
+     * <p>On a versioned descriptor {@code UPDATE_ONLY} keeps the optimistic-lock guard: a version mismatch
+     * still raises {@link br.com.finalcraft.everydatabase.versioned.OptimisticLockException} (report it as a
+     * conflict), while an absent row is absorbed as a no-op.
+     *
+     * <p>Every implementation must honour both modes; a {@code null} mode is treated as {@link WriteMode#UPSERT}
+     * and must behave exactly like {@link #saveAll(Collection)}.
+     */
+    CompletableFuture<Void> saveAll(Collection<V> entities, WriteMode mode);
+
+    /**
      * Deletes the entity. Returns {@code true} if it existed.
      */
     CompletableFuture<Boolean> delete(K key);
@@ -94,6 +109,28 @@ public interface Repository<K, V> {
      * Implementations should materialise results internally and paginate for large datasets.
      */
     CompletableFuture<Stream<V>> all();
+
+    /**
+     * Key-ordered, match-all pagination for a full-collection maintenance scan, at most {@code limit} rows
+     * per page. Unlike {@link #all()} it does not materialise the whole collection, and unlike {@link #query}
+     * it needs no declared index - it orders by the storage key itself. Begin with {@link Cursor#scan()} and
+     * follow {@link Slice#nextCursor()} until {@link Slice#hasNext()} is false.
+     *
+     * <p>Crucially, and unlike every other read, {@code scanAll} does <b>not</b> silently drop a row whose
+     * stored payload fails to decode: each page element is a {@link ScanRow} that is either the decoded
+     * entity or the decode failure (key + cause). A caller sweeping the collection can therefore count and
+     * name a poisoned row instead of mistaking a shorter scan for a complete one.
+     *
+     * <p>Decoding goes through the descriptor's {@link br.com.finalcraft.everydatabase.codec.Codec}, so any
+     * decode-time transform installed on the codec (the reason this method exists) runs here too.
+     *
+     * <p>Every backend implements this with true per-backend pagination; the single-instance file backends
+     * may return the whole collection in one page, treating {@code limit} as advisory.
+     *
+     * @param cursor {@link Cursor#scan()} for the first page, or a previous slice's {@link Slice#nextCursor()}
+     * @param limit  maximum rows in the returned page; must be {@code >= 1}
+     */
+    CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit);
 
     // ------------------------------------------------------------------
     //  Secondary-index queries
