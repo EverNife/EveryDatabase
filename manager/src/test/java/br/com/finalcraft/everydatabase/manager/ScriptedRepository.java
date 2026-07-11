@@ -143,4 +143,9 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit) {
         throw new UnsupportedOperationException();
     }
+
+    @Override
+    public CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
+        throw new UnsupportedOperationException();
+    }
 }

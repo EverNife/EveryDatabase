@@ -239,13 +239,10 @@ public interface Repository<K, V> {
      * and has no total. Begin with {@link Cursor#start(String, IndexHint.Order)} and follow
      * {@link Slice#nextCursor()}.
      *
-     * <p>Advanced capability: the default throws {@link UnsupportedOperationException}; every built-in
-     * backend overrides it. The order field must be a declared index.
+     * <p>Every backend implements this with true keyset pagination. The order field must be a declared index.
      *
      * @see Cursor
      * @see Slice
      */
-    default CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
-        throw new UnsupportedOperationException("This repository does not support keyset (cursor) pagination");
-    }
+    CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit);
 }
