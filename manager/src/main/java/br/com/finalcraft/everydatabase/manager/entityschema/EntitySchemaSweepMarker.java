@@ -6,7 +6,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * One row of the framework-owned {@code _entity_schema_sweeps} meta collection: records how far the
+ * One row of the framework-owned {@code entity_schema_sweeps} meta collection: records how far the
  * eager schema sweep has progressed for ONE data collection, on the SAME backend as that data.
  * Keyed by the data collection's name.
  *
