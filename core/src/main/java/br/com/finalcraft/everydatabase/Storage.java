@@ -18,6 +18,11 @@ import java.util.concurrent.CompletableFuture;
  *   <li>{@link SchemaAwareStorage} - schema migrations</li>
  * </ul>
  *
+ * <p>{@link #enforcesOptimisticLock()} is the exception to that idiom, and deliberately so: it is a
+ * queryable boolean rather than a marker interface because a subclass must be able to answer
+ * {@code false} for a capability its superclass answers {@code true} for (H2 extends the SQL
+ * backend and opts out), which un-implementing an inherited interface cannot express.
+ *
  * <p>Backends are obtained via {@link Storages#create(StorageConfig)}.
  */
 public interface Storage {
@@ -70,6 +75,26 @@ public interface Storage {
      *        .includeKeys(true);
      * }</pre>
      */
+    /**
+     * Whether this backend actually ENFORCES the optimistic-lock version check on save for a
+     * versioned descriptor.
+     *
+     * <p>Enforcing backends (MySQL/MariaDB, PostgreSQL, MongoDB) reject a stale write with
+     * {@link br.com.finalcraft.everydatabase.versioned.OptimisticLockException}; non-enforcing ones
+     * (H2 - a deliberate opt-out -, the file backends and the in-memory backend) silently degrade to
+     * last-write-wins, which is only safe while a single process writes.
+     *
+     * <p>This is a capability question, not a per-descriptor one: it says what the backend
+     * <em>would</em> do for a versioned descriptor, and answers the same for every descriptor.
+     * Callers routing a versioned entity while writes from several instances are intended should
+     * treat {@code false} as a misconfiguration - concurrent writes would silently drop one side.
+     *
+     * <p>Defaults to {@code false}: a backend only claims enforcement by overriding.
+     */
+    default boolean enforcesOptimisticLock() {
+        return false;
+    }
+
     StorageLogConfig getStorageLogConfig();
 
     /**

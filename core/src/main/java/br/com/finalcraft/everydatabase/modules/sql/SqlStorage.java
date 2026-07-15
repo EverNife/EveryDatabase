@@ -118,6 +118,16 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     //  Storage.getStorageLogConfig / setStorageLogConfig
     // ------------------------------------------------------------------
 
+    /**
+     * The MySQL/MariaDB dialect enforces the version check: a versioned descriptor updates only
+     * when the stored {@code lock_version} still matches, and a stale write throws instead of
+     * overwriting. PostgreSQL inherits this; H2 overrides it back to {@code false}.
+     */
+    @Override
+    public boolean enforcesOptimisticLock() {
+        return true;
+    }
+
     @Override
     public StorageLogConfig getStorageLogConfig() {
         return logConfig;

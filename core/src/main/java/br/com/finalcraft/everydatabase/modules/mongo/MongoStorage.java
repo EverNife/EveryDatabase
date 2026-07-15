@@ -95,6 +95,16 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
         this.log       = new StorageLog("mongo", () -> this.logConfig);
     }
 
+    /**
+     * MongoDB enforces the version check: a versioned descriptor replaces a document only while the
+     * stored {@code lock_version} still matches, and a stale write (or a lost first-insert race,
+     * surfaced as a duplicate key) throws instead of overwriting.
+     */
+    @Override
+    public boolean enforcesOptimisticLock() {
+        return true;
+    }
+
     // ------------------------------------------------------------------
     //  Storage.getStorageLogConfig / setStorageLogConfig
     // ------------------------------------------------------------------

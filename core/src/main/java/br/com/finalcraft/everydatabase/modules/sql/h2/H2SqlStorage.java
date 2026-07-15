@@ -47,6 +47,16 @@ public class H2SqlStorage extends SqlStorage {
     }
 
     /**
+     * H2 opts out of the version check, so it reports {@code false} where the SQL base reports
+     * {@code true}: a versioned descriptor degrades to a plain last-writer-wins upsert here, even
+     * in TCP/server mode with several writers.
+     */
+    @Override
+    public boolean enforcesOptimisticLock() {
+        return false;
+    }
+
+    /**
      * H2 uses ANSI double-quote for identifier quoting (same as PostgreSQL).
      * Overrides the base class backtick default so the {@code _schema_migrations}
      * table and its columns are quoted correctly.

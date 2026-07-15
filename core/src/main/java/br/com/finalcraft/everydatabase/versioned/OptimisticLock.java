@@ -53,7 +53,9 @@ import java.lang.annotation.Target;
  * is incremented by the backend on every successful update; a stale in-memory version makes
  * {@code save()} fail with {@link OptimisticLockException}. Backends that do not enforce
  * optimistic locking (H2, local files, in-memory) silently degrade to plain upsert - the
- * descriptor stays valid, no error is raised at storage-creation time.
+ * descriptor stays valid, no error is raised at storage-creation time. Ask the backend which
+ * it does via {@link br.com.finalcraft.everydatabase.Storage#enforcesOptimisticLock()} rather
+ * than hardcoding the list.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)

@@ -89,7 +89,8 @@ public interface Repository<K, V> {
      * Returns the current optimistic-lock version of each given key that exists in storage; absent
      * keys are omitted from the result.
      *
-     * <p>For a versioned descriptor on an enforcing backend (MySQL/MariaDB, PostgreSQL, MongoDB)
+     * <p>For a versioned descriptor on an enforcing backend (MySQL/MariaDB, PostgreSQL, MongoDB -
+     * the ones {@link Storage#enforcesOptimisticLock()} answers {@code true} for)
      * the value is the stored {@code lock_version}. Backends that do not enforce versioning -
      * H2, local files, grouped files - report {@code 0} for every existing key, as does any
      * non-versioned descriptor: a poller can still detect <em>deletions</em> (a cached key
