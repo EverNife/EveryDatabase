@@ -71,6 +71,18 @@ public abstract class AbstractStorageTest {
             .index(IndexHint.timestamp("createdAt"))
             .build();
 
+    /**
+     * A descriptor in the framework-reserved underscore namespace, used by the round-trip test that
+     * proves an underscore-prefixed name survives table/collection/directory creation on every backend.
+     */
+    public static final EntityDescriptor<UUID, TestPlayer> RESERVED_DESCRIPTOR =
+        EntityDescriptor.builder(UUID.class, TestPlayer.class)
+            .collection("_base_reserved_probe")
+            .reserved()
+            .keyExtractor(TestPlayer::getUuid)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+
     // ------------------------------------------------------------------
     //  Lifecycle
     // ------------------------------------------------------------------
@@ -1262,5 +1274,33 @@ public abstract class AbstractStorageTest {
         assertNull(bad.value(), "a failed row carries no value");
         assertNotNull(bad.error(), "a failed row carries the decode cause");
         assertNotNull(bad.key(), "a failed row still carries a best-effort identifier");
+    }
+
+    // ------------------------------------------------------------------
+    //  Reserved collection namespace
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(320)
+    @DisplayName("[base] a reserved (underscore-prefixed) collection round-trips like any other")
+    void reservedCollection_roundTrips() {
+        // The framework keeps its own metadata under '_'-prefixed names; this proves such a name
+        // survives table/collection/directory creation and every read/write path on this backend.
+        Repository<UUID, TestPlayer> reserved = storage.repository(RESERVED_DESCRIPTOR);
+
+        reserved.save(alice()).join();
+        assertEquals(alice(), reserved.find(UUID_ALICE).join().orElseThrow(AssertionError::new),
+            "an entity saved to a reserved collection must read back equal");
+
+        List<ScanRow<TestPlayer>> scanned = drainScan(reserved, 10);
+        assertEquals(1, scanned.size(), "the reserved collection must expose its single row to scanAll");
+        assertFalse(scanned.get(0).isFailed(), "the scanned row must decode cleanly");
+        assertEquals(UUID_ALICE, scanned.get(0).value().getUuid());
+
+        // The reserved collection is a collection of its own - it must not leak into the data one.
+        assertEquals(0L, repo.count().join(), "a reserved collection must not share storage with test_players");
+
+        assertTrue(reserved.delete(UUID_ALICE).join(), "delete must report the entity existed");
+        assertFalse(reserved.find(UUID_ALICE).join().isPresent(), "the entity must be gone after delete");
     }
 }

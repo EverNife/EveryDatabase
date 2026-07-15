@@ -47,12 +47,9 @@ public final class EntitySchemaSweeper {
 
     /**
      * The framework-owned meta collection holding one {@link EntitySchemaSweepMarker} per data
-     * collection. No underscore prefix - {@link br.com.finalcraft.everydatabase.EntityDescriptor}
-     * requires a leading letter, so the {@code _schema_migrations} style used by the SQL/Mongo/File
-     * backends (which register those tables directly, bypassing the descriptor validator) is not
-     * available here.
+     * collection. Lives in the reserved underscore namespace, like {@code _schema_migrations}.
      */
-    public static final String MARKER_COLLECTION = "entity_schema_sweeps";
+    public static final String MARKER_COLLECTION = "_entity_schema_sweeps";
 
     /** Default lease-renewal window - one heartbeat per batch, expires after this if not renewed. */
     public static final long DEFAULT_LEASE_MILLIS = 60_000L;
@@ -64,6 +61,7 @@ public final class EntitySchemaSweeper {
     public static final EntityDescriptor<String, EntitySchemaSweepMarker> MARKER_DESCRIPTOR =
             EntityDescriptor.builder(String.class, EntitySchemaSweepMarker.class)
                     .collection(MARKER_COLLECTION)
+                    .reserved()
                     .keyExtractor(EntitySchemaSweepMarker::getCollection)
                     .codec(new JacksonJsonCodec<>(EntitySchemaSweepMarker.class))
                     .build(); // @OptimisticLock auto-wired from the lockVersion field

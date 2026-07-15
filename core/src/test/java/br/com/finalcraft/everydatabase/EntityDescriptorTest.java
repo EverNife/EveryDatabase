@@ -59,4 +59,59 @@ class EntityDescriptorTest {
                 "collection '" + bad + "' should be rejected");
         }
     }
+
+    // ------------------------------------------------------------------
+    //  Reserved underscore namespace
+    // ------------------------------------------------------------------
+
+    private static EntityDescriptor.Builder<UUID, TestPlayer> playerBuilder(String collection) {
+        return EntityDescriptor.builder(UUID.class, TestPlayer.class)
+            .collection(collection)
+            .keyExtractor(TestPlayer::getUuid)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class));
+    }
+
+    @Test
+    @DisplayName("a regular descriptor rejects the reserved '_' prefix, and says so")
+    void build_underscorePrefixWithoutReserved_throws() {
+        for (String reservedName : new String[]{"_players", "_schema_migrations", "_entity_schema_sweeps"}) {
+            IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> playerBuilder(reservedName).build(),
+                "collection '" + reservedName + "' is framework-reserved and must be rejected");
+            assertTrue(thrown.getMessage().contains("reserved"),
+                "the error must point at the reserved namespace: " + thrown.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("reserved() accepts a single leading underscore followed by an identifier")
+    void build_reserved_acceptsUnderscorePrefixedName() {
+        EntityDescriptor<UUID, TestPlayer> descriptor =
+            assertDoesNotThrow(() -> playerBuilder("_entity_schema_sweeps").reserved().build());
+
+        assertEquals("_entity_schema_sweeps", descriptor.collection());
+    }
+
+    @Test
+    @DisplayName("reserved() rejects a name outside the reserved namespace")
+    void build_reserved_rejectsNamesOutsideTheNamespace() {
+        // "players": no underscore at all - a reserved descriptor must not claim a user name.
+        // "_": nothing after the underscore. "__x": double underscore. "_1x": digit after the underscore.
+        for (String bad : new String[]{"players", "_", "__x", "_1x"}) {
+            assertThrows(IllegalStateException.class,
+                () -> playerBuilder(bad).reserved().build(),
+                "reserved collection '" + bad + "' should be rejected");
+        }
+    }
+
+    @Test
+    @DisplayName("build() stays idempotent on a reserved() builder")
+    void build_reserved_calledTwice_isIdempotent() {
+        EntityDescriptor.Builder<UUID, TestPlayer> builder = playerBuilder("_reserved_idempotent").reserved();
+
+        EntityDescriptor<UUID, TestPlayer> first  = builder.build();
+        EntityDescriptor<UUID, TestPlayer> second = assertDoesNotThrow(builder::build);
+
+        assertEquals(first.collection(), second.collection());
+    }
 }

@@ -33,6 +33,9 @@ import java.util.regex.Pattern;
  *   <li>Must start with a letter (a-z / A-Z)</li>
  *   <li>Remaining characters may be letters, digits (0-9), or underscores ({@code _})</li>
  *   <li>No spaces, hyphens, dots, backticks, quotes, or any other special character</li>
+ *   <li>Names starting with {@code _} are a reserved namespace for EveryDatabase-internal
+ *       metadata ({@code _schema_migrations}, {@code _entity_schema_sweeps}); the builder
+ *       rejects them for regular descriptors (see {@link Builder#reserved()})</li>
  * </ul>
  * These rules produce identifiers that are safe across all supported backends without
  * any additional quoting or escaping: MySQL/MariaDB, PostgreSQL, H2, MongoDB,
@@ -68,6 +71,14 @@ public final class EntityDescriptor<K, V> {
      * MongoDB collection names, and file-system directory names.
      */
     static final Pattern VALID_COLLECTION = Pattern.compile("^[a-zA-Z][a-zA-Z0-9_]*$");
+
+    /**
+     * Regex a framework-reserved collection name must satisfy: a single leading underscore
+     * followed by a regular identifier. The leading underscore is EveryDatabase's reserved
+     * namespace - regular descriptors reject it (see {@link #VALID_COLLECTION}), so framework
+     * metadata such as {@code _schema_migrations} can never collide with a user collection.
+     */
+    static final Pattern VALID_RESERVED_COLLECTION = Pattern.compile("^_[a-zA-Z][a-zA-Z0-9_]*$");
 
     private final String collection;
     private final Class<V> type;
@@ -145,6 +156,8 @@ public final class EntityDescriptor<K, V> {
         private BiConsumer<V, Long>  versionSetter;
         /** Set by {@link #versioned()} so build() can validate the type implements Versioned eagerly. */
         private boolean versionedByInterface = false;
+        /** Set by {@link #reserved()} so build() validates the collection against the reserved namespace. */
+        private boolean reserved = false;
 
         private Builder(Class<K> keyType, Class<V> type) {
             this.keyType = keyType;
@@ -153,6 +166,21 @@ public final class EntityDescriptor<K, V> {
 
         public Builder<K, V> collection(String collection) {
             this.collection = collection;
+            return this;
+        }
+
+        /**
+         * Marks this descriptor's collection as framework-reserved: the name must start with a
+         * single underscore followed by a letter (e.g. {@code _entity_schema_sweeps}). The
+         * underscore prefix is EveryDatabase's reserved namespace - regular descriptors reject it,
+         * which is exactly what guarantees framework metadata never collides with a user
+         * collection. <b>Application code must not call this</b>: a reserved collection may be
+         * read, rewritten or dropped by the framework at any time.
+         *
+         * @return this builder
+         */
+        public Builder<K, V> reserved() {
+            this.reserved = true;
             return this;
         }
 
@@ -260,12 +288,20 @@ public final class EntityDescriptor<K, V> {
         public EntityDescriptor<K, V> build() {
             if (collection == null || collection.isEmpty())
                 throw new IllegalStateException("EntityDescriptor.collection must be set");
-            if (!VALID_COLLECTION.matcher(collection).matches())
+            if (reserved) {
+                if (!VALID_RESERVED_COLLECTION.matcher(collection).matches())
+                    throw new IllegalStateException(
+                        "EntityDescriptor.collection '" + collection + "' is not a valid RESERVED identifier. " +
+                        "A reserved collection must start with a single underscore followed by a letter, " +
+                        "then letters, digits, or underscores (e.g. '_entity_schema_sweeps').");
+            } else if (!VALID_COLLECTION.matcher(collection).matches()) {
                 throw new IllegalStateException(
                     "EntityDescriptor.collection '" + collection + "' is not a valid identifier. " +
                     "Must start with a letter and contain only letters, digits, or underscores " +
                     "(no spaces, hyphens, dots, backticks, or other special characters). " +
+                    "Names starting with '_' are reserved for EveryDatabase-internal metadata. " +
                     "This rule is enforced for all backends: SQL, MongoDB, and local file storage.");
+            }
             if (keyExtractor == null)
                 throw new IllegalStateException("EntityDescriptor.keyExtractor must be set");
             if (codec == null)
