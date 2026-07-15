@@ -29,6 +29,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 - [Optimistic locking](#optimistic-locking)
 - [Transactions](#transactions)
 - [Schema migrations](#schema-migrations)
+- [Entity payload schema (`everydatabase-manager`)](#entity-payload-schema-everydatabase-manager)
 - [Moving data between backends](#moving-data-between-backends)
 - [Logging & diagnostics](#logging--diagnostics)
 - [Caching & references (`everydatabase-manager`)](#caching--references-everydatabase-manager)
@@ -64,6 +65,8 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 | **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ✅ *(ephemeral ledger)* | ✅ in-memory map | ❌ | Ephemeral |
 
 > MySQL/MariaDB and PostgreSQL store the entity in a **native `JSON` column**, and MongoDB as a **native BSON sub-document** — not an escaped string — so the data stays queryable and readable in standard DB tools. (H2 stores it as plain `TEXT`.)
+
+> **Ask the backend, never hard-code a list.** The *Optimistic locking* column is exactly what **`storage.enforcesOptimisticLock()`** returns at runtime — it's a plain method on `Storage` (default `false`; a backend claims enforcement by overriding), so code that must route a versioned entity can query the capability instead of pattern-matching on a backend name. See [Optimistic locking](#optimistic-locking).
 
 > 📊 **Performance:** see the **[Benchmarks](https://github.com/EverNife/EveryDatabase/wiki/Benchmarks)** wiki page for per-backend throughput (insert / query / update / delete) at 10k records, plus a pick-a-backend cheat sheet and the caveats.
 
@@ -242,14 +245,17 @@ Storage storage = Storages.createMongo(new MongoConfig("mongodb://localhost:2701
 
 - `TransactionalStorage` — atomic `inTransaction(...)`
 - `SchemaAwareStorage` — `register(...).migrate()`
+- `ChangeFeedStorage` — a backend-native push feed of changes
 
 Discover them with `instanceof` — the compiler stops you from using transactions on a backend that doesn't support them.
+
+> **Not every capability is an interface.** `Storage.enforcesOptimisticLock()` is a plain **default method** returning `false`, not a marker interface — because `H2SqlStorage extends SqlStorage` has to answer `false` where its parent answers `true`, and Java has no way to *un*-implement an inherited interface. The rule of thumb: a capability that adds **methods** is an interface (`instanceof`); one that only answers a **question** is a method.
 
 > **Codec tip:** `new JacksonJsonCodec<>(Type.class)` emits **compact** JSON (smallest payload — what a database wants). Use `JacksonJsonCodec.pretty(Type.class)` for indented, human-readable output — handy with `LocalFileStorage` when you want to read the files by eye.
 
 > **Default mapper (`JacksonConfig`):** the built-in codecs are batteries-included — the `java.time` and `Optional` modules registered, dates as **ISO-8601** text (not epochs), map entries in **canonical key order** (deterministic, diff-friendly bytes), and unknown properties **tolerated** on read (a field removed in newer code won't break old data). Need a custom `ObjectMapper`? Pass it to `new JacksonJsonCodec<>(Type.class, mapper)`, or apply a profile to your own: `JacksonConfig.storageSafe(mapper)` (the default) or `JacksonConfig.compact(mapper)` (same, but **drops null/absent** via `NON_ABSENT`). Every profile shares one frozen *read* contract, so any profile reads what any other wrote.
 
-> **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every backend (no quoting ever needed). Names starting with `_` are reserved for EveryDatabase-internal metadata (e.g. `_schema_migrations`), so your collections can never collide with the framework's.
+> **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every backend (no quoting ever needed). Names starting with `_` are reserved for EveryDatabase-internal metadata, so your collections can never collide with the framework's. That rejection *is* the guarantee: because a regular descriptor can never be named `_anything`, the framework's own metadata needs no escaping and no opt-out. Reserved today: **`_schema_migrations`** (the [migration](#schema-migrations) ledger) and **`_entity_schema_sweeps`** (the [payload-sweep](#entity-payload-schema-everydatabase-manager) marker). The framework builds those through `EntityDescriptor.builder(...).reserved()`, which swaps the rule to `^_[a-zA-Z][a-zA-Z0-9_]*$` — **application code must not call it**: a reserved collection may be read, rewritten or dropped by the framework at any time.
 
 > **Keys** are persisted by their `toString()` (SQL primary key, Mongo unique index, LocalFile filename) and matched by `equals`/`hashCode` (in-memory backend, manager cache). A key type must have a **stable, unique `toString()` of at most 255 characters** and value-based `equals`/`hashCode` — `UUID`, `String`, `Long`, `Integer` and `record`s qualify; the identity `Object.toString()` does **not**. `save`/`saveAll` reject an oversized key up front (the future completes with `IllegalArgumentException`), so a long key can never be silently truncated into a collision. (For `Ref` keys in the manager layer, the key must also be JSON-serializable.)
 
@@ -601,6 +607,30 @@ The version starts at `0` on insert and increments on every successful update. D
 
 > **Backend support:** MySQL/MariaDB, PostgreSQL and MongoDB enforce the version check. **H2 does not** (by design — it's an embedded/dev engine): a versioned descriptor there silently degrades to plain upsert, never throwing `OptimisticLockException`. Local files and in-memory don't enforce it either. Use a server-grade backend when concurrent writers matter.
 
+### Is my backend actually enforcing it? — `enforcesOptimisticLock()`
+
+The degradation above is *silent*, and that's the danger: a versioned entity pointed at H2 or a file backend behaves perfectly in a single-process test and quietly drops one side of every concurrent write in production. Ask the backend directly rather than guessing from its class or config name:
+
+```java
+if (!storage.enforcesOptimisticLock()) {
+    // last-write-wins here — fine for one writer, data loss for several
+}
+```
+
+It's a capability question, not a per-descriptor one: it reports what the backend *would* do for **any** versioned descriptor.
+
+**Let it fail at boot.** If you have the manager add-on, `SyncBindGuard` turns that check into a fail-fast at bind time — the only combination it rejects is the one that is *certainly* wrong (a versioned descriptor + a non-enforcing backend + writes intended from several instances):
+
+```java
+import br.com.finalcraft.everydatabase.manager.sync.SyncBindGuard;
+
+// Once per entity, at bind time. Throws IllegalStateException on the fatal combination;
+// a no-op otherwise — a single-writer deployment on H2 is still perfectly legal.
+SyncBindGuard.check("accounts", ACCOUNTS, storage, /* multiInstanceIntent = */ true);
+```
+
+Declared multi-instance intent is what makes it decidable: without it, a versioned entity on H2 is merely unusual; with it, it is a misconfiguration that corrupts data hours later. The guard reads the capability off the `Storage` object, so it decides at bind time without opening a connection.
+
 ---
 
 ## Transactions
@@ -647,6 +677,56 @@ sql.register(new V001_CreateAuditLog()).migrate().join();
 Each backend ships a convenience base class: `SqlMigration` (return `upScript()`), `MongoMigration` (override `executeOnDatabase(MongoDatabase)`), `LocalFileMigration` / `GroupedFileMigration` / `InMemoryMigration` (override `executeOnStorage(...)`). For full control, implement `Migration.execute(MigrationContext)` and pull the native client via `context.getNativeClient(...)`.
 
 > Auto-create and migrations are complementary: entity tables/collections are created on first `repository(...)`; migrations cover everything else (backfills, auxiliary tables, your own indexes). Write SQL migrations to be **idempotent** — DDL implicitly commits on MySQL/MariaDB.
+
+---
+
+## Entity payload schema (`everydatabase-manager`)
+
+Your entity **class** changes shape across releases — a field splits in two, a unit changes, a typo in a name is fixed — while rows written by last month's build sit unchanged on disk. That's a third, independent versioning axis. Keeping the three apart is deliberate; the verbose `EntitySchema*` prefix is what disambiguates them:
+
+| Axis | Scope | Where the version lives | Entry point |
+|---|---|---|---|
+| **Schema migration** (DDL) | the whole storage | `_schema_migrations` ledger | `SchemaAwareStorage.register(...).migrate()` |
+| **Optimistic lock** | one row, one write | `lock_version` column/field | [`@OptimisticLock`](#optimistic-locking) |
+| **Entity payload schema** | one row, across releases | `schemaVersion` **inside** the entity | `EntitySchemaMigrations.register(...)` |
+
+Stamp the entity, register the steps, and wrap the codec — old rows then upgrade **as they're read**:
+
+```java
+public class Account implements EntitySchema {
+    private UUID id;
+    private String currency;
+    private int schemaVersion = EntitySchema.INITIAL_SCHEMA_VERSION;  // MUST be initialized
+    @DirtyFlag private boolean dirty;      // lets a migrated row be re-persisted (see below)
+
+    public int getSchemaVersion()       { return schemaVersion; }
+    public void setSchemaVersion(int v) { this.schemaVersion = v; }
+}
+
+// A step is a PURE JSON-tree transform, v1 -> v2. No I/O, no shared state.
+// The framework owns "schemaVersion" and re-stamps it for you after the step returns.
+EntitySchemaMigrations.register(Account.class, 1, node -> node.put("currency", "USD"));
+
+// ALWAYS wrap an EntitySchema type — even before the first step exists.
+EntityDescriptor<UUID, Account> ACCOUNTS = EntityDescriptor.builder(UUID.class, Account.class)
+        .collection("accounts")
+        .keyExtractor(Account::getId)
+        .codec(EntitySchemaMigratingCodec.wrap(
+                Account.class, new JacksonJsonCodec<>(Account.class), "id"))  // "id" = protected
+        .build();
+```
+
+Steps are declared **contiguously** from version 1 up (registering out of order throws), and each is `LAZY` by default — it runs on read, costing nothing until a stale row is touched. Register one as `EntitySchemaMigrationMode.EAGER` when you can't wait for organic reads, then have a `CachingManager` sweep the collection once at boot:
+
+```java
+SweepReport report = EntitySchemaSweeper.sweep(accounts, SweepOptions.defaults());
+```
+
+The sweep pages the collection, re-persists what it upgrades, and records how far it got in the reserved `_entity_schema_sweeps` marker so later boots skip the re-scan in O(1). It's a plain blocking utility: **you** own the thread, the schedule and the kill-switch (`SweepOptions.builder().abortCheck(...)`, polled at every batch boundary). Because it detects an upgraded row through its dirty flag, a type with **no dirty tracking** (neither `IDirtyable` nor `@DirtyFlag`) is rejected with `IllegalArgumentException` rather than silently sweeping nothing and marking the collection done.
+
+> **The marker is a hint, never authority.** The lazy decode-time migration never consults it — the per-row `schemaVersion` plus the chain stay the single source of truth. The marker only buys a completed sweep the O(1) skip on the next boot, so losing or deleting it costs a re-scan, never correctness.
+
+> **Wrap first, register later — both work.** An `EntitySchema` type is decorated even when no chain exists yet, precisely so that a chain registered *after* the descriptor was built still runs. The wrapped codec must expose its `ObjectMapper` (`ObjectMapperAware` — `JacksonJsonCodec` does); raw-tree migration needs one, so a codec that doesn't is rejected at `wrap(...)`. A stored version below `1`, or a step that throws, fails **that row's** decode with `EntitySchemaMigrationException` and leaves it untouched on disk to retry — it never writes a half-migrated row.
 
 ---
 
@@ -753,6 +833,57 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 - **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere. Registries can chain to a **parent** for a private-then-shared lookup (a plugin's own registry falling back to a shared one).
 
 **→ Full guide: [Caching & References](https://github.com/EverNife/EveryDatabase/wiki/Caching-and-References) on the wiki** (and [Typed References](https://github.com/EverNife/EveryDatabase/wiki/Typed-References), [Caching Managers](https://github.com/EverNife/EveryDatabase/wiki/Caching-Managers), [Cache Policies & Freshness](https://github.com/EverNife/EveryDatabase/wiki/Cache-Policies-and-Freshness), [Cross-Process Cache Sync](https://github.com/EverNife/EveryDatabase/wiki/Cross-Process-Cache-Sync), [One Entity, Many Databases](https://github.com/EverNife/EveryDatabase/wiki/One-Entity-Many-Databases)).**
+
+### Write-back conflict resolution (`manager.writeback`)
+
+`flushDirty()` writes a whole batch of dirty entities at once. Behind an [enforcing backend](#is-my-backend-actually-enforcing-it--enforcesoptimisticlock), any entity in that batch can lose a version race — another instance moved the row on while you were editing your copy. `WriteBackFlusher` resolves each loser individually instead of failing the batch, and `ConflictHooks<K, V extends IDirtyable>` is the seam where *you* decide what winning means for your type:
+
+```java
+WriteBackFlusher flusher = new WriteBackFlusher(managerLog);   // null log = silent
+
+flusher.persistBatch(accounts, dirtyBatch, FlushMode.FORCED, "accounts", HOOKS, null).join();
+```
+
+On a conflict the flusher re-reads the stored row, takes your entity's lock via `hooks.lock(live)`, and picks a branch — **in this order, first match wins**:
+
+| Situation | What happens | Hook called |
+|---|---|---|
+| The re-read itself failed | local state kept, retried on the next flush | *(none — just re-marked dirty)* |
+| The stored row **vanished** meanwhile | the lock is reset so the next flush re-creates the row | `resetLockForRecreate` |
+| Your hooks **merge** (`mergesOnConflict()` → `true`) | the hook owns the whole resolution: combine both sides, re-mark dirty, adopt the lock version | `adoptStoredState` |
+| The entity was **re-dirtied** while resolving | **your values are kept** — only the winner's lock version is adopted, so the next flush wins cleanly | `adoptStoredLockVersion` |
+| Otherwise (still clean) | **ADOPT_WINNER** — the stored winner's state is copied into your live instance | `adoptStoredState`, then `afterAdopt` |
+
+The live instance is always *updated in place*, never replaced: references your code already holds stay valid, which is what makes adoption safe. `PersistedState.copyInto(live, stored)` is the building block for `adoptStoredState` — a reflective field-by-field copy that skips `static`, `transient` and `@JsonIgnore` fields.
+
+**The two modes differ only in reporting**, never in resolution: `FlushMode.BACKGROUND` logs and completes the future normally (a periodic autosave shouldn't explode), while `FlushMode.FORCED` completes it exceptionally — `StorageWriteException` for a real write failure, `OptimisticConflictException` for a pure race. A write failure is the *primary* exception with the race attached via `addSuppressed`, since a backend that won't write is the bigger news.
+
+> **Hooks are typed `ConflictHooks<K, ? super V>`** at the call site on purpose: one hooks singleton written against a base type can serve every subtype in a heterogeneous batch.
+
+> **Refuse writes from the future.** If you also use the [payload-schema axis](#entity-payload-schema-everydatabase-manager), call `flusher.refuseAheadWrite(entity, what, key)` before flushing and **skip** the entity when it returns `true`. A row written by a *newer* build already lost its unknown fields on decode (Jackson drops them), so persisting it would erase them for good while keeping the newer version stamp. The entity stays dirty and cached; this process is simply read-only for that row.
+
+### Freezing writes
+
+`tryFreezeWrites()` suspends persistence for one manager while its cache stays live and writable — the window you need to copy a collection elsewhere (see [`StorageTransfer`](#moving-data-between-backends)) without losing writes that land mid-copy:
+
+```java
+try (CachingManager.FreezeHandle freeze = accounts.tryFreezeWrites()
+        .orElseThrow(() -> new IllegalStateException("a freeze is already held"))) {
+
+    StorageTransfer.builder().from(oldStorage).to(newStorage)
+            .descriptor(ACCOUNTS).build().execute().join();
+}   // released here — deferred writes drain on the first flushDirty() afterwards
+```
+
+| While frozen | Behavior |
+|---|---|
+| `saveAndCache` / `saveAllAndCache` | **deferred** — the cache is updated **in place** and the value marked dirty |
+| `flushDirty()` | **no-op that clears no flag** — the entire dirty set survives the window |
+| `deleteAndEvict` | **fails** (`IllegalStateException`) — a delete has no dirty state to be retained in |
+
+A write is only deferrable if something will eventually drain it, so the deferral is conditional: the type must be dirty-trackable **and** the manager must actually cache. On a `noCache()` manager or a type with no dirty tracking the frozen save **fails** instead — reporting a durable success that will never happen is the worse outcome. `tryFreezeWrites()` returns `Optional.empty()` when a freeze is already held (an atomic take — prefer it to checking `isFrozen()` first, which races); `freezeWrites()` is the same thing but throws. Closing a handle is idempotent.
+
+> ⚠️ **Never leak the handle** — always `try`-with-resources. A leaked freeze is silent and unrecoverable: every later flush of that manager dies quietly and the dirty set grows in memory until the process restarts. Likewise, code that collects dirty entities and persists them *itself* must check `isFrozen()` **before** clearing their dirty flags — once cleared, the write is already gone and no later check can bring it back.
 
 ### Cross-process cache sync over pub/sub (`everydatabase-manager-jedis`)
 
