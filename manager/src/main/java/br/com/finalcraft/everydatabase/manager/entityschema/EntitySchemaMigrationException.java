@@ -23,4 +23,13 @@ public class EntitySchemaMigrationException extends CodecException {
     public EntitySchemaMigrationException(Class<?> type, String problem) {
         super("Entity-schema migration of " + type.getName() + ": " + problem);
     }
+
+    /**
+     * The migration failed around - rather than inside - a step: the payload could not be read as a
+     * tree, or the migrated tree could not be bound to the entity. Keeps {@code cause}, which is
+     * where the actionable detail (the offending field, the parse position) lives.
+     */
+    public EntitySchemaMigrationException(Class<?> type, String problem, Throwable cause) {
+        super("Entity-schema migration of " + type.getName() + ": " + problem, cause);
+    }
 }

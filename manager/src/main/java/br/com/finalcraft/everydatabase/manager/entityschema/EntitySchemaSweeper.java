@@ -6,7 +6,8 @@ import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.manager.CachingManager;
-import br.com.finalcraft.everydatabase.manager.cache.IDirtyable;
+import br.com.finalcraft.everydatabase.manager.cache.DirtyAccessor;
+import br.com.finalcraft.everydatabase.manager.log.ManagerLog;
 import br.com.finalcraft.everydatabase.manager.sync.KeyParsers;
 import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.ScanRow;
@@ -17,7 +18,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.BooleanSupplier;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.logging.Level;
 
@@ -37,8 +39,8 @@ import java.util.logging.Level;
  * their next read.
  *
  * <p>Pure utility - the caller owns the executor, the scheduling ("run after boot", "one collection
- * at a time"), and any freeze/kill-switch policy. The {@code abortCheck} lambda is polled at every
- * batch boundary so the caller can cut a sweep short.
+ * at a time"), and any freeze/kill-switch policy. {@link SweepOptions#abortCheck()} is polled at
+ * every batch boundary so the caller can cut a sweep short.
  */
 public final class EntitySchemaSweeper {
 
@@ -51,12 +53,6 @@ public final class EntitySchemaSweeper {
      */
     public static final String MARKER_COLLECTION = "_entity_schema_sweeps";
 
-    /** Default lease-renewal window - one heartbeat per batch, expires after this if not renewed. */
-    public static final long DEFAULT_LEASE_MILLIS = 60_000L;
-
-    /** Default throttle for the "still going" progress line. */
-    public static final long DEFAULT_PROGRESS_LOG_MILLIS = 5_000L;
-
     /** The descriptor of the marker meta-collection; safe to install on any backend. */
     public static final EntityDescriptor<String, EntitySchemaSweepMarker> MARKER_DESCRIPTOR =
             EntityDescriptor.builder(String.class, EntitySchemaSweepMarker.class)
@@ -66,50 +62,55 @@ public final class EntitySchemaSweeper {
                     .codec(new JacksonJsonCodec<>(EntitySchemaSweepMarker.class))
                     .build(); // @OptimisticLock auto-wired from the lockVersion field
 
+    /** Sweeps scanning right now in THIS process - the substrate of {@link #isSweeping}. */
+    private static final Set<ActiveSweep> ACTIVE_SWEEPS = ConcurrentHashMap.newKeySet();
+
     // ------------------------------------------------------------------
     //  Core sweep
     // ------------------------------------------------------------------
 
     /**
-     * Sweeps ONE collection to its eager target version, using the built-in {@link KeyParsers} for
-     * the descriptor's key type. Convenience over the fully-parameterized overload for the common
-     * key contract (UUID, String, Long, Integer); throws on unusual key types (bind the explicit
-     * overload for those).
+     * Sweeps the manager's collection to its eager target version, parsing scanned keys with the
+     * built-in {@link KeyParsers} for the manager's key type. Convenience over the explicit-parser
+     * overload for the common key contract (UUID, String, Long, Integer); throws on unusual key
+     * types (use the other overload for those).
      */
-    public static <K, V extends EntitySchema> SweepReport sweep(
-            EntityDescriptor<K, V> descriptor,
-            Repository<K, V> repository,
-            CachingManager<K, V> manager,
-            Storage storage,
-            String runnerId,
-            int batchSize,
-            BooleanSupplier abortCheck,
-            Logger logger) {
-        Function<String, K> keyParser = KeyParsers.forType(descriptor.keyType());
-        return sweep(descriptor, repository, manager, storage, runnerId, batchSize, abortCheck,
-                logger, keyParser, DEFAULT_LEASE_MILLIS, DEFAULT_PROGRESS_LOG_MILLIS);
+    public static <K, V extends EntitySchema> SweepReport sweep(CachingManager<K, V> manager,
+                                                                SweepOptions options) {
+        return sweep(manager, options, KeyParsers.forType(manager.keyType()));
     }
 
     /**
-     * Sweeps ONE collection to its eager target version. Fully parameterized: the caller supplies
-     * a {@code keyParser} (for the resident-dirty peek on custom key types) and can tune lease /
-     * progress-log intervals. Idempotent and crash-restartable.
+     * Sweeps the manager's collection to its eager target version. Idempotent and
+     * crash-restartable: re-running it after a crash resumes rather than redoes, and a sweep that
+     * finds nothing pending costs one marker read.
+     *
+     * <p>Everything the sweep touches is derived from {@code manager} - the repository it scans and
+     * rewrites, the storage its marker lives on, and the cache it invalidates for every row it
+     * rewrote behind the manager's back.
+     *
+     * @param keyParser recovers the entity key from a scanned row's string key; supply an explicit
+     *                  one for a composite/record key that {@link KeyParsers} cannot build
+     * @throws IllegalArgumentException if the entity type has no dirty tracking: the sweep detects
+     *                                  an upcast row through its dirty flag, so without one it would
+     *                                  rewrite nothing and still mark the collection complete
      */
-    public static <K, V extends EntitySchema> SweepReport sweep(
-            EntityDescriptor<K, V> descriptor,
-            Repository<K, V> repository,
-            CachingManager<K, V> manager,
-            Storage storage,
-            String runnerId,
-            int batchSize,
-            BooleanSupplier abortCheck,
-            Logger logger,
-            Function<String, K> keyParser,
-            long leaseMillis,
-            long progressLogMillis) {
-        Class<V> type = descriptor.type();
-        String collection = descriptor.collection();
-        Logger log = logger == null ? Logger.SILENT : logger;
+    public static <K, V extends EntitySchema> SweepReport sweep(CachingManager<K, V> manager,
+                                                                SweepOptions options,
+                                                                Function<String, K> keyParser) {
+        Class<V> type = manager.type();
+        String collection = manager.collection();
+        Repository<K, V> repository = manager.repository();
+        Storage storage = manager.storage();
+        ManagerLog log = options.logger();
+
+        DirtyAccessor dirtyAccessor = DirtyAccessor.forType(type);
+        if (dirtyAccessor == null) {
+            throw new IllegalArgumentException(type.getName() + " has no dirty tracking (implement"
+                    + " IDirtyable or annotate a boolean field with @DirtyFlag) - an eager sweep of it"
+                    + " could not tell a migrated row from an untouched one, so it would advance the"
+                    + " completion marker without rewriting anything.");
+        }
 
         int target = EntitySchemaMigrations.eagerTargetVersion(type);
         if (target <= EntitySchema.INITIAL_SCHEMA_VERSION) {
@@ -130,12 +131,12 @@ public final class EntitySchemaSweeper {
             marker.setCompletedVersion(EntitySchema.INITIAL_SCHEMA_VERSION);
         } else if (marker.getInProgressVersion() > 0
                 && marker.getLeaseExpiresAtEpochMs() > now
-                && !runnerId.equals(marker.getRunnerId())) {
+                && !options.runnerId().equals(marker.getRunnerId())) {
             return SweepReport.of(collection, "contended (live lease held by another instance)");
         }
         marker.setInProgressVersion(target);
-        marker.setRunnerId(runnerId);
-        marker.setLeaseExpiresAtEpochMs(now + leaseMillis);
+        marker.setRunnerId(options.runnerId());
+        marker.setLeaseExpiresAtEpochMs(now + options.leaseMillis());
         try {
             markerRepo.save(marker).join();
         } catch (Throwable claimFailure) {
@@ -145,63 +146,101 @@ public final class EntitySchemaSweeper {
             return SweepReport.of(collection, "lease not claimed");
         }
 
+        ActiveSweep active = new ActiveSweep(storage, collection);
+        ACTIVE_SWEEPS.add(active);
+        try {
+            return scan(manager, options, keyParser, dirtyAccessor, markerRepo, marker, target);
+        } finally {
+            ACTIVE_SWEEPS.remove(active);
+        }
+    }
+
+    /** The scan/rewrite loop proper - entered only with the lease claimed. */
+    private static <K, V extends EntitySchema> SweepReport scan(
+            CachingManager<K, V> manager,
+            SweepOptions options,
+            Function<String, K> keyParser,
+            DirtyAccessor dirtyAccessor,
+            Repository<String, EntitySchemaSweepMarker> markerRepo,
+            EntitySchemaSweepMarker marker,
+            int target) {
+        Class<V> type = manager.type();
+        String collection = manager.collection();
+        Repository<K, V> repository = manager.repository();
+        ManagerLog log = options.logger();
+        long leaseMillis = options.leaseMillis();
+
         long scanned = 0, rewritten = 0, failed = 0, conflicted = 0, skippedDirty = 0, skippedAhead = 0;
         long lastProgressLog = System.currentTimeMillis();
         boolean exhausted = false;
-        int effectiveBatch = Math.max(1, batchSize);
         Cursor cursor = Cursor.scan();
         while (true) {
-            if (abortCheck != null && abortCheck.getAsBoolean()) {
+            if (options.abortCheck().getAsBoolean()) {
                 log.log(Level.INFO, "[EntitySchemaSweep] " + collection
                         + ": aborted mid-sweep (frozen/shutdown) - will resume next boot.");
+                releaseLease(markerRepo, marker);
                 return SweepReport.of(collection, "aborted");
             }
-            Slice<ScanRow<V>> slice = repository.scanAll(cursor, effectiveBatch).join();
+            Slice<ScanRow<V>> slice = repository.scanAll(cursor, options.batchSize()).join();
             List<V> toWrite = new ArrayList<>();
+            List<K> toWriteKeys = new ArrayList<>(); // index-aligned with toWrite; null when unparseable
             for (ScanRow<V> row : slice.content()) {
                 scanned++;
                 if (row.isFailed()) {
                     failed++;
                     log.log(Level.WARNING, "[EntitySchemaSweep] " + collection
                             + ": row '" + row.key() + "' could not be migrated/decoded: "
-                            + String.valueOf(row.error()));
+                            + describe(row.error()));
                     continue;
                 }
                 V entity = row.value();
-                boolean dirtied = entity instanceof IDirtyable && ((IDirtyable) entity).isDirty();
-                if (dirtied) {
-                    if (cachedDirty(manager, keyParser, row.key())) {
-                        skippedDirty++; // the resident dirty copy is already upcast; its flush persists it
-                    } else {
-                        toWrite.add(entity);
+                if (!dirtyAccessor.isDirty(entity)) {
+                    if (EntitySchemaMigrations.isAhead(entity)) {
+                        skippedAhead++; // written by a newer schema - leave it (an ahead-write guard elsewhere protects it)
                     }
-                } else if (EntitySchemaMigrations.isAhead(entity)) {
-                    skippedAhead++; // written by a newer schema - leave it (an ahead-write guard elsewhere protects it)
+                    continue;
                 }
+                K key = parseKey(keyParser, row.key());
+                if (key != null && isResidentDirty(manager, dirtyAccessor, key)) {
+                    skippedDirty++; // the resident dirty copy is already upcast; its flush persists it
+                    continue;
+                }
+                toWrite.add(entity);
+                toWriteKeys.add(key);
             }
+            List<K> rewrittenKeys = new ArrayList<>();
             if (!toWrite.isEmpty()) {
                 try {
                     repository.saveAll(toWrite, WriteMode.UPDATE_ONLY).join();
                     rewritten += toWrite.size();
+                    addParsed(rewrittenKeys, toWriteKeys);
                 } catch (Throwable batchFailure) {
                     // fall back per-entity so one conflict does not lose the whole batch (versioned SQL
                     // rolls the batch back)
-                    for (V entity : toWrite) {
+                    for (int i = 0; i < toWrite.size(); i++) {
+                        V entity = toWrite.get(i);
                         try {
                             repository.saveAll(Collections.singletonList(entity), WriteMode.UPDATE_ONLY).join();
                             rewritten++;
+                            K key = toWriteKeys.get(i);
+                            if (key != null) rewrittenKeys.add(key);
                         } catch (Throwable single) {
                             if (isOptimisticLock(single)) {
                                 conflicted++; // a live write won; lazy is the backstop for this row
                             } else {
                                 failed++;
                                 log.log(Level.WARNING, "[EntitySchemaSweep] " + collection
-                                        + ": failed to rewrite a row: "
-                                        + String.valueOf(single.getMessage()));
+                                        + ": failed to rewrite a row: " + describe(single));
                             }
                         }
                     }
                 }
+            }
+            // the rows were rewritten behind the manager's back, so a clean cached cell of one of
+            // them now holds a stale lock version - its next write would conflict for no reason.
+            // Marking stale keeps any dirty cell (whose flush is what carries the migrated shape).
+            if (!rewrittenKeys.isEmpty()) {
+                manager.invalidateAll(rewrittenKeys);
             }
 
             // heartbeat: renew the lease and persist running telemetry once per batch
@@ -217,7 +256,7 @@ public final class EntitySchemaSweeper {
                 return SweepReport.of(collection, "lease lost");
             }
 
-            if (System.currentTimeMillis() - lastProgressLog >= progressLogMillis) {
+            if (System.currentTimeMillis() - lastProgressLog >= options.progressLogMillis()) {
                 log.log(Level.INFO, "[EntitySchemaSweep] " + collection
                         + ": " + scanned + " scanned, " + rewritten + " rewritten, "
                         + conflicted + " conflicts, " + failed + " failed...");
@@ -232,11 +271,22 @@ public final class EntitySchemaSweeper {
 
         // completion: only when the whole collection scanned cleanly (never gate on a live count(),
         // which a concurrent insert/delete makes both too strict and too weak)
-        if (exhausted && failed == 0) {
+        boolean complete = exhausted && failed == 0;
+        if (complete) {
             marker.setCompletedVersion(target);
             marker.setInProgressVersion(0);
             marker.setLastSweepEpochMs(System.currentTimeMillis());
-            markerRepo.save(marker).join();
+            try {
+                markerRepo.save(marker).join();
+            } catch (Throwable completionFailure) {
+                // the data IS swept; only the O(1) skip hint failed to land, so the next boot
+                // re-scans and finds nothing to do
+                log.log(Level.WARNING, "[EntitySchemaSweep] " + collection
+                        + ": swept to v" + target + " but the completion marker write failed ("
+                        + describe(completionFailure) + ") - the next boot re-scans.");
+                return SweepReport.of(collection, type, target, scanned, rewritten, conflicted,
+                        skippedDirty, skippedAhead, failed, false, "completion write failed");
+            }
             log.log(Level.INFO, "[EntitySchemaSweep] " + collection
                     + ": swept to v" + target + " (scanned=" + scanned
                     + " rewritten=" + rewritten + " conflicts=" + conflicted
@@ -247,18 +297,92 @@ public final class EntitySchemaSweeper {
                     + ") - will retry on the next boot.");
         }
         return SweepReport.of(collection, type, target, scanned, rewritten, conflicted, skippedDirty,
-                skippedAhead, failed, exhausted && failed == 0);
+                skippedAhead, failed, complete);
     }
 
-    private static <K, V> boolean cachedDirty(CachingManager<K, V> manager,
-                                              Function<String, K> keyParser, String keyStr) {
+    /**
+     * Hands the lease back on the abort path, so a quick restart can resume immediately instead of
+     * seeing a live lease held by a runner that is already gone. Best-effort: if this write does not
+     * land, the lease simply expires on its own.
+     */
+    private static void releaseLease(Repository<String, EntitySchemaSweepMarker> markerRepo,
+                                     EntitySchemaSweepMarker marker) {
+        marker.setLeaseExpiresAtEpochMs(0); // inProgressVersion stays: it records what was attempted
         try {
-            K key = keyParser.apply(keyStr);
-            Optional<V> cell = manager.peek(key);
-            return cell.isPresent() && cell.get() instanceof IDirtyable && ((IDirtyable) cell.get()).isDirty();
-        } catch (Exception notParseableOrNoCell) {
-            return false;
+            markerRepo.save(marker).join();
+        } catch (Throwable ignored) {
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  Active-sweep registry
+    // ------------------------------------------------------------------
+
+    /**
+     * Whether {@code collection} on {@code storage} is being swept by this process right now -
+     * the hook for excluding a sweep and a bulk job (a runtime collection transfer, a bulk import)
+     * from running over the same rows at once.
+     *
+     * <p>Scoped to the storage INSTANCE, not just the collection name: two storages may hold
+     * same-named collections, and only one of them is being swept. Says nothing about a sweep in
+     * another process - that is what the marker's lease is for.
+     */
+    public static boolean isSweeping(Storage storage, String collection) {
+        return ACTIVE_SWEEPS.contains(new ActiveSweep(storage, collection));
+    }
+
+    /** One in-flight sweep: the storage instance (by identity) plus the collection name. */
+    private static final class ActiveSweep {
+
+        private final Storage storage;
+        private final String collection;
+
+        private ActiveSweep(Storage storage, String collection) {
+            this.storage = storage;
+            this.collection = collection;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof ActiveSweep)) return false;
+            ActiveSweep that = (ActiveSweep) other;
+            return this.storage == that.storage && this.collection.equals(that.collection);
+        }
+
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(storage) * 31 + collection.hashCode();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Helpers
+    // ------------------------------------------------------------------
+
+    private static <K> K parseKey(Function<String, K> keyParser, String keyStr) {
+        try {
+            return keyParser.apply(keyStr);
+        } catch (Exception notParseable) {
+            return null;
+        }
+    }
+
+    private static <K> void addParsed(List<K> target, List<K> keys) {
+        for (K key : keys) {
+            if (key != null) target.add(key);
+        }
+    }
+
+    private static <K, V> boolean isResidentDirty(CachingManager<K, V> manager,
+                                                  DirtyAccessor dirtyAccessor, K key) {
+        Optional<V> cell = manager.peek(key);
+        return cell.isPresent() && dirtyAccessor.isDirty(cell.get());
+    }
+
+    private static String describe(Throwable t) {
+        if (t == null) return "null";
+        return t.getClass().getSimpleName() + ": " + t.getMessage();
     }
 
     private static boolean isOptimisticLock(Throwable t) {
@@ -266,24 +390,6 @@ public final class EntitySchemaSweeper {
             if (cause instanceof OptimisticLockException) return true;
         }
         return false;
-    }
-
-    // ------------------------------------------------------------------
-    //  Logger seam
-    // ------------------------------------------------------------------
-
-    /**
-     * The sweep's log seam. Sweep progress and per-collection notices are emitted through this;
-     * the caller decides whether to route them to SLF4J, {@code java.util.logging}, a plugin's own
-     * logger, or nowhere. The default ({@link #SILENT}) drops everything - which matches
-     * EveryDatabase's silent-by-default posture.
-     */
-    @FunctionalInterface
-    public interface Logger {
-        void log(Level level, String message);
-
-        /** Drop-everything sink; the sweep's default when no logger is supplied. */
-        Logger SILENT = (level, message) -> { };
     }
 
     // ------------------------------------------------------------------
@@ -321,8 +427,15 @@ public final class EntitySchemaSweeper {
 
         public static SweepReport of(String collection, Class<?> type, int targetVersion, long scanned, long rewritten,
                                      long conflicted, long skippedDirty, long skippedAhead, long failed, boolean advanced) {
+            return of(collection, type, targetVersion, scanned, rewritten, conflicted, skippedDirty,
+                    skippedAhead, failed, advanced, advanced ? "complete" : "incomplete");
+        }
+
+        public static SweepReport of(String collection, Class<?> type, int targetVersion, long scanned, long rewritten,
+                                     long conflicted, long skippedDirty, long skippedAhead, long failed,
+                                     boolean advanced, String note) {
             return new SweepReport(collection, type, targetVersion, scanned, rewritten, conflicted,
-                    skippedDirty, skippedAhead, failed, advanced, advanced ? "complete" : "incomplete");
+                    skippedDirty, skippedAhead, failed, advanced, note);
         }
 
         public String collection()      { return collection; }
@@ -330,6 +443,15 @@ public final class EntitySchemaSweeper {
         public int targetVersion()      { return targetVersion; }
         public long scanned()           { return scanned; }
         public long rewritten()         { return rewritten; }
+
+        /**
+         * Rows a concurrent write beat the sweep to - harmless, since that write persisted the
+         * migrated shape anyway and a lazy read heals whatever it did not.
+         *
+         * <p>Slightly over-counts on a backend whose failed bulk write partially landed: the
+         * per-entity retry of an already-written row loses on the lock version and is counted here.
+         * These counters are telemetry; the rows on disk are correct either way.
+         */
         public long conflicted()        { return conflicted; }
         public long skippedDirty()      { return skippedDirty; }
         public long skippedAhead()      { return skippedAhead; }

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -118,6 +119,15 @@ public final class EntitySchemaMigrations {
     }
 
     /**
+     * Whether any migration step is registered for {@code type} - i.e. whether a decode of it can
+     * ever upcast. Sugar over {@link #currentVersion(Class)}; the read path uses it to skip the
+     * tree round-trip entirely for a type whose payload never evolved.
+     */
+    public static boolean hasChain(Class<?> type) {
+        return currentVersion(type) > EntitySchema.INITIAL_SCHEMA_VERSION;
+    }
+
+    /**
      * The highest version an {@link EntitySchemaMigrationMode#EAGER} step upgrades TO, or
      * {@link EntitySchema#INITIAL_SCHEMA_VERSION} when no step is eager. The eager sweep drives the
      * whole collection up to this version; because a decode always reaches {@link #currentVersion},
@@ -150,7 +160,8 @@ public final class EntitySchemaMigrations {
      * <p>A payload already at (or ahead of) the current version is left completely untouched and
      * returns {@code false}. A missing version field is treated as
      * {@link EntitySchema#INITIAL_SCHEMA_VERSION} (a pre-schema payload); a non-integral version
-     * field, or a throwing step, raises {@link EntitySchemaMigrationException}.
+     * field, a version below the initial one, or a throwing step, raises
+     * {@link EntitySchemaMigrationException}.
      *
      * @return {@code true} when at least one step ran (the decoded entity should be re-persisted)
      */
@@ -189,11 +200,21 @@ public final class EntitySchemaMigrations {
         if (!v.isIntegralNumber()) {
             throw new EntitySchemaMigrationException(type, "non-integral '" + SCHEMA_VERSION_FIELD + "': " + v);
         }
-        return v.asInt();
+        int version = v.asInt();
+        if (version < EntitySchema.INITIAL_SCHEMA_VERSION) {
+            // A stored version below the initial one describes no shape the chain can start from
+            // (0 is what an uninitialized 'int schemaVersion' field writes), and guessing which one
+            // it really is would corrupt the row. Refusing keeps it readable once the entity stamps
+            // its version correctly.
+            throw new EntitySchemaMigrationException(type, "stored '" + SCHEMA_VERSION_FIELD + "' is "
+                    + version + ", below the initial version " + EntitySchema.INITIAL_SCHEMA_VERSION
+                    + " - the entity must stamp its schema version on construction");
+        }
+        return version;
     }
 
     private static Map<String, JsonNode> snapshot(ObjectNode node, List<String> fields) {
-        Map<String, JsonNode> snap = new java.util.HashMap<>(fields.size() * 2);
+        Map<String, JsonNode> snap = new HashMap<>(fields.size() * 2);
         for (String field : fields) {
             snap.put(field, node.get(field)); // null == absent
         }
@@ -261,8 +282,12 @@ public final class EntitySchemaMigrations {
         WARNED_STALE.remove(type);
     }
 
-    /** Read-only view of the chain for {@code type} (empty when none) - for the eager sweep engine. */
-    static List<Step> steps(Class<?> type) {
+    /**
+     * Read-only snapshot of the chain registered for {@code type} (empty when none) - lets a
+     * consumer inspect or copy a chain it did not register, e.g. to mirror it onto another entity
+     * type or to report the pending steps in admin tooling.
+     */
+    public static List<Step> steps(Class<?> type) {
         List<Step> steps = STEPS.get(type);
         return steps == null ? Collections.emptyList() : Collections.unmodifiableList(new ArrayList<>(steps));
     }

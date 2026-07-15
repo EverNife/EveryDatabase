@@ -101,10 +101,6 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         this(descriptor, storage, CacheOptions.of(policy), registry);
     }
 
-    public Repository<K, V> getRepository() {
-        return repository;
-    }
-
     // ------------------------------------------------------------------
     //  RefResolver
     // ------------------------------------------------------------------

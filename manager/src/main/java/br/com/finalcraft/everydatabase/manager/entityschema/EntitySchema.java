@@ -15,10 +15,15 @@ import br.com.finalcraft.everydatabase.schema.SchemaVersion;
  * writes, and {@code SchemaAwareStorage} shapes the collection it lives in.
  *
  * <p>Implementors add a {@code schemaVersion} field and expose it through the two accessors. A
- * brand-new entity should be stamped with {@link EntitySchemaMigrations#currentVersion(Class)} at
- * construction; a decoded entity whose stored version is behind is run through the registered
+ * decoded entity whose stored version is behind is run through the registered
  * {@link EntitySchemaStep} chain (via {@link EntitySchemaMigratingCodec}) and re-persisted only after
  * it was actually upcast.
+ *
+ * <p><b>The field MUST be initialized</b> - either to {@link #INITIAL_SCHEMA_VERSION} (an entity
+ * whose shape is the original one) or, for a brand-new entity, to
+ * {@link EntitySchemaMigrations#currentVersion(Class)} (its shape is already the newest, so no step
+ * should ever run on it). A left-at-zero {@code int schemaVersion} persists a version that names no
+ * known shape, and every later read of that row fails rather than guess which shape it holds.
  */
 public interface EntitySchema {
 
