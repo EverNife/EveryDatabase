@@ -9,8 +9,10 @@ import java.util.concurrent.locks.ReentrantLock;
  * the concrete entity (where its key lives, which lock guards it, how a stored winner is taken on),
  * the flusher knows the protocol. One implementation per entity type, usually a singleton.
  *
- * <p>Every method is called with the entity's {@link #lock} held, except {@link #storageKey} and
- * {@link #mergesOnConflict}.
+ * <p>Conflict resolution calls every method with the entity's lock held - including
+ * {@link #mergesOnConflict}, which is queried inside the resolution to pick the branch. The only
+ * exceptions are {@link #storageKey}, called while the batch is being keyed, and {@link #lock}
+ * itself, which is what hands the lock over to be taken.
  *
  * @param <K> the key type
  * @param <V> the entity type; dirty-trackable, because the resolution decides on the dirty flag

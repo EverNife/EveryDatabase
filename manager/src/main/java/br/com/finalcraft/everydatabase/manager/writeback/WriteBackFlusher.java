@@ -50,7 +50,7 @@ public class WriteBackFlusher {
 
     /** Writes that failed since the caller last drained the count for its aggregate summary. */
     private final AtomicInteger writeFailures = new AtomicInteger();
-    /** Optimistic-lock conflicts resolved by adopting the stored winner, since this flusher was built. */
+    /** Optimistic-lock conflicts that entered resolution, since this flusher was built. */
     private final AtomicInteger conflictsAdopted = new AtomicInteger();
     /** Epoch millis of the last failed write; 0 = none. */
     private volatile long lastWriteFailureAt = 0L;
@@ -71,7 +71,7 @@ public class WriteBackFlusher {
      * batch and reacts to the per-key report:
      * <ul>
      *   <li><b>error</b> (transient): re-mark the entity dirty so the next flush retries it;</li>
-     *   <li><b>conflict</b>: adopt the stored winner into the live instance;</li>
+     *   <li><b>conflict</b>: resolve it against the stored winner (see {@code resolveConflict});</li>
      *   <li><b>persisted</b>: {@code onPersisted} runs (e.g. a "row exists in the backend" flag).</li>
      * </ul>
      *
@@ -159,15 +159,20 @@ public class WriteBackFlusher {
     // ------------------------------------------------------------------
 
     /**
-     * Conflict resolution, decided under the live instance's lock:
+     * Conflict resolution, decided under the live instance's lock, in the order the branches are
+     * tested:
      * <ul>
-     *   <li>live still clean -&gt; copy the winner's state into it (held references stay valid) and
-     *       run {@link ConflictHooks#afterAdopt}, since the winner may come from an older instance;</li>
-     *   <li>live re-dirtied while resolving -&gt; KEEP the local values and adopt only the winner's
-     *       lock version, so the next flush wins cleanly instead of conflicting forever;</li>
+     *   <li>the re-read of the winner itself failed -&gt; re-mark dirty and let the next flush retry
+     *       the whole race; nothing is adopted;</li>
      *   <li>winner row vanished (deleted between the failed save and the re-read) -&gt; reset the lock
      *       and re-mark dirty so the next flush re-creates the row;</li>
-     *   <li>the re-read itself failed -&gt; re-mark dirty and let the next flush retry.</li>
+     *   <li>the type {@link ConflictHooks#mergesOnConflict() merges} -&gt; {@link
+     *       ConflictHooks#adoptStoredState} combines both sides and owns the entire resolution, so it
+     *       runs ahead of the dirty check and gets no {@link ConflictHooks#afterAdopt};</li>
+     *   <li>live re-dirtied while resolving -&gt; KEEP the local values and adopt only the winner's
+     *       lock version, so the next flush wins cleanly instead of conflicting forever;</li>
+     *   <li>live still clean -&gt; copy the winner's state into it (held references stay valid) and
+     *       run {@link ConflictHooks#afterAdopt}, since the winner may come from an older instance.</li>
      * </ul>
      * Every branch re-installs the SAME held instance as the canonical cached cell.
      */
@@ -263,7 +268,14 @@ public class WriteBackFlusher {
         return true;
     }
 
-    /** Optimistic-lock conflicts resolved so far (monotonic; for a health/status readout). */
+    /**
+     * Optimistic-lock conflicts that entered resolution so far (monotonic; for a health/status
+     * readout). The count is raised once per conflicted key as its resolution is entered, NOT when a
+     * winner is actually taken on - so despite the name it also counts the branches that adopt
+     * nothing: the winning row vanished, or re-reading it failed and the conflict was left to the
+     * next flush. It answers "how often did instances race over this data", which is the health
+     * question, and every branch of the resolution is a race that happened.
+     */
     public int conflictsAdoptedCount() {
         return conflictsAdopted.get();
     }
