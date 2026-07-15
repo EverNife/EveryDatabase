@@ -84,4 +84,10 @@ class PostgreSqlStorageTest extends AbstractTransactionalStorageTest {
     protected Storage openExtraStorageOnSameDatabase() {
         return new PostgreSqlStorage(new SqlConfig(currentTestDbUrl, PG_USER, PG_PASS, TEST_POOL));
     }
+
+    /** Inherits the SQL version-guarded update - a stale write is rejected, as on the MySQL dialect. */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return true;
+    }
 }

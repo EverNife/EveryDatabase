@@ -42,6 +42,12 @@ class InMemoryStorageTest extends AbstractStorageTest {
         return false;
     }
 
+    /** A single-process store has no second writer to lose a race against - it stores the version but never checks it. */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return false;
+    }
+
     // ------------------------------------------------------------------
     //  InMemory-specific: TransactionalStorage capability
     // ------------------------------------------------------------------

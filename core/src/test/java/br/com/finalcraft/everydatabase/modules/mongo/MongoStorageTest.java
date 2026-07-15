@@ -114,6 +114,12 @@ class MongoStorageTest extends AbstractTransactionalStorageTest {
         return new MongoStorage(new MongoConfig(MONGO_URL, currentTestDbName));
     }
 
+    /** The replace is filtered on the stored version - a stale write matches no document and is rejected. */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return true;
+    }
+
     // ------------------------------------------------------------------
     //  Mongo-specific: capability assertions
     // ------------------------------------------------------------------

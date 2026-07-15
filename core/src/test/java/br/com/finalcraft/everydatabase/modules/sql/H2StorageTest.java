@@ -70,6 +70,15 @@ class H2StorageTest extends AbstractTransactionalStorageTest {
         return new H2SqlStorage(new SqlConfig(currentTestDbUrl, "sa", "", TEST_POOL));
     }
 
+    /**
+     * H2 opts out of the version check its SQL parent enforces, degrading to plain upsert - the
+     * deliberate behaviour pinned by {@link #versionedDescriptor_onH2_isPlainUpsert()}.
+     */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return false;
+    }
+
     // ------------------------------------------------------------------
     //  H2-specific: schema enforcement (removed IndexHint)
     // ------------------------------------------------------------------

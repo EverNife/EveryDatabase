@@ -109,6 +109,14 @@ public abstract class AbstractStorageTest {
         return true;
     }
 
+    /**
+     * The expected answer of {@link Storage#enforcesOptimisticLock()} for this backend: {@code true}
+     * when a stale write against a versioned descriptor is rejected, {@code false} when the version
+     * check degrades to last-write-wins. Declared here rather than derived so that a backend silently
+     * changing its enforcement shows up as a failing contract test instead of a self-fulfilling one.
+     */
+    protected abstract boolean expectedEnforcesOptimisticLock();
+
     @BeforeEach
     void setUp(TestInfo testInfo) {
         String methodName = testInfo.getTestMethod().map(Method::getName).orElse("unknown");
@@ -1302,5 +1310,19 @@ public abstract class AbstractStorageTest {
 
         assertTrue(reserved.delete(UUID_ALICE).join(), "delete must report the entity existed");
         assertFalse(reserved.find(UUID_ALICE).join().isPresent(), "the entity must be gone after delete");
+    }
+
+    // ------------------------------------------------------------------
+    //  Optimistic-lock capability
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(330)
+    @DisplayName("[base] capability: enforcesOptimisticLock matches the backend contract")
+    void capability_enforcesOptimisticLock() {
+        // Callers route versioned entities on this answer, so a wrong one costs silent data loss
+        // rather than an error - it is worth pinning per backend.
+        assertEquals(expectedEnforcesOptimisticLock(), storage.enforcesOptimisticLock(),
+            "the capability must report what this backend really does with a stale versioned write");
     }
 }

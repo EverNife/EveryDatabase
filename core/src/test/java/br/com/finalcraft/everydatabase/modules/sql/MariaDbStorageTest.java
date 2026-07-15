@@ -88,4 +88,10 @@ class MariaDbStorageTest extends AbstractTransactionalStorageTest {
     protected Storage openExtraStorageOnSameDatabase() {
         return new SqlStorage(new SqlConfig(currentTestDbUrl, MARIADB_USER, MARIADB_PASS, TEST_POOL));
     }
+
+    /** The MySQL/MariaDB dialect guards its update with the stored version - a stale write is rejected. */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return true;
+    }
 }

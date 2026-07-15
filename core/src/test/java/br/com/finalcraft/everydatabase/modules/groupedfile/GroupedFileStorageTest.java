@@ -70,6 +70,12 @@ class GroupedFileStorageTest extends AbstractStorageTest {
         return new GroupedFileStorage(new GroupedFileConfig(tempDir));
     }
 
+    /** Aggregate files are rewritten wholesale with no compare-and-set - a versioned descriptor degrades to last-write-wins. */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return false;
+    }
+
     @AfterAll
     static void handleResiduals() {
         if (!CLEAN_TEST_RESIDUALS) {

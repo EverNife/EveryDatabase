@@ -62,6 +62,12 @@ class LocalFileStorageTest extends AbstractStorageTest {
         return new LocalFileStorage(new LocalFileConfig(tempDir));
     }
 
+    /** Writes are atomic per file but carry no compare-and-set - a versioned descriptor degrades to last-write-wins. */
+    @Override
+    protected boolean expectedEnforcesOptimisticLock() {
+        return false;
+    }
+
     @Override
     protected boolean injectCorruptRow(String collection) throws IOException {
         Path dir = tempDir.resolve(collection);
