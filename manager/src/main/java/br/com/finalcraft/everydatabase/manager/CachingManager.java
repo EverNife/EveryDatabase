@@ -10,6 +10,7 @@ import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
@@ -49,6 +50,10 @@ import java.util.function.Function;
  * {@link #flushDirty()} / {@link #saveAllAndCache(Collection)} persist the dirty set in a batch.
  * Plain entities are unaffected.
  *
+ * <p>Persistence can also be suspended wholesale: while a {@link #freezeWrites() freeze} is held this
+ * manager writes nothing to its backend, the dirty set is retained instead of cleared, and everything
+ * drains on the first flush after the freeze is released - see {@link #freezeWrites()}.
+ *
  * @param <K> the key type
  * @param <V> the entity type
  */
@@ -71,6 +76,10 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     protected final DirtyAccessor dirtyAccessor;
     /** Optional hook fired after a successful local write; used by {@code CacheSync.via(...)} to publish a signal. */
     private volatile LocalWriteListener<K> localWriteListener;
+    /** Set while a freeze handle is open; read on the entry of every persistence path. */
+    private volatile boolean frozen = false;
+    /** Guards the take/release of the freeze so two callers can never hold it at once. */
+    private final Object freezeLock = new Object();
 
     /** Always-on, ~free metrics counters (read via {@link #stats()}); striped to avoid hot-path contention. */
     private final LongAdder statHits = new LongAdder();
@@ -311,6 +320,150 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     }
 
     // ------------------------------------------------------------------
+    //  Write freeze (suspend persistence, retain the dirty set)
+    // ------------------------------------------------------------------
+
+    /**
+     * Suspends every persistence path of this manager until the returned handle is closed, without
+     * losing a single write: {@link #saveAndCache} and {@link #saveAllAndCache} still update the cache
+     * but only <b>mark</b> the value dirty instead of writing it, {@link #flushDirty()} becomes a no-op
+     * that leaves the dirty set intact, and {@link #deleteAndEvict} fails (a delete has no dirty state
+     * to retain, so it cannot be deferred). A mutation made during the freeze window drains on the
+     * first flush after the handle is closed. Reads and pure cache operations are unaffected.
+     *
+     * <p>Intended for a live backend cutover: freeze, flush everything else, copy, rebind, release.
+     * <b>Always use try-with-resources</b> (or try/finally):
+     *
+     * <pre>{@code
+     * try (CachingManager.FreezeHandle freeze = manager.freezeWrites()) {
+     *     copyToTheNewBackend();
+     * }   // released here - the retained dirty set drains on the next flush
+     * }</pre>
+     *
+     * <p>A leaked handle is silent and unrecoverable: every future flush of this manager dies quietly
+     * and the dirty set grows in memory until the process restarts.
+     *
+     * <p>The freeze covers only this manager's own persistence paths. Code that collects dirty entities
+     * itself and persists them elsewhere must consult {@link #isFrozen()} <em>before</em> clearing their
+     * dirty flags - once cleared, the write is already unrecoverable and no later check can retain it.
+     *
+     * <p>One freeze at a time. Use {@link #tryFreezeWrites()} where "already frozen" is an expected
+     * answer rather than an error.
+     *
+     * @throws IllegalStateException if this manager is already frozen
+     */
+    public FreezeHandle freezeWrites() {
+        return tryFreezeWrites().orElseThrow(() -> new IllegalStateException("the manager of '" + collection
+                + "' is already frozen; one freeze at a time"));
+    }
+
+    /**
+     * The non-throwing {@link #freezeWrites()}: takes the freeze and returns its handle, or
+     * {@link Optional#empty()} when this manager is already frozen.
+     *
+     * <p>Taking the freeze is atomic, so two callers racing to start the same exclusive operation can
+     * never both win. That makes this usable as the guard itself ("is someone already doing this?")
+     * instead of an {@link #isFrozen()} check followed by a separate freeze, which would let both
+     * racers through.
+     */
+    public Optional<FreezeHandle> tryFreezeWrites() {
+        synchronized (freezeLock) {
+            if (frozen) {
+                return Optional.empty();
+            }
+            frozen = true;
+        }
+        return Optional.of(new FreezeHandle(this));
+    }
+
+    /** Whether a freeze handle is currently open - i.e. this manager's persistence is suspended. */
+    public boolean isFrozen() {
+        return frozen;
+    }
+
+    private void unfreeze() {
+        synchronized (freezeLock) {
+            frozen = false;
+        }
+    }
+
+    /**
+     * Whether a suppressed write has a channel to drain through once the freeze is released. Both
+     * halves are required: the value must be dirty-trackable (so it can be marked) <b>and</b> land in a
+     * cache cell, because {@link #flushDirty()} scans cells - a value marked dirty outside the cache is
+     * one nothing would ever find, let alone persist.
+     */
+    private boolean canDeferWrite() {
+        return dirtyAccessor != null && options.policy().cacheable();
+    }
+
+    /**
+     * Refuses a frozen write that could not be drained. Reporting success for it would be a false
+     * durable write: the caller would believe the entity is safe while nothing would ever persist it.
+     */
+    private IllegalStateException frozenSaveRefused() {
+        return new IllegalStateException("cannot save " + type.getSimpleName() + " into the frozen manager of '"
+                + collection + "': a frozen save is deferred through the dirty set, and this one has no way to"
+                + " drain (" + (dirtyAccessor == null
+                        ? "the type is not dirty-trackable"
+                        : "this manager does not cache values, so a flush would never see it")
+                + "). Release the freeze before saving.");
+    }
+
+    /**
+     * The frozen {@link #saveAndCache} path: publish the value into its cell and mark it dirty rather
+     * than writing it, so the write lands on the first flush after the freeze is released.
+     */
+    private CompletableFuture<Void> deferWrite(K key, V value, long stamp) {
+        if (!canDeferWrite()) {
+            return failedFuture(frozenSaveRefused());
+        }
+        updateInPlace(key, value, stamp);
+        dirtyAccessor.markDirty(value);
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /** The frozen {@link #saveAllAndCache} path: {@link #deferWrite} over the batch; nothing failed, so the report is empty. */
+    private CompletableFuture<BatchSaveReport<K>> deferWrites(List<V> entities) {
+        if (!canDeferWrite()) {
+            return failedFuture(frozenSaveRefused());
+        }
+        for (V value : entities) {
+            updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet());
+            dirtyAccessor.markDirty(value);
+        }
+        return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
+    }
+
+    private static <T> CompletableFuture<T> failedFuture(Throwable ex) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        future.completeExceptionally(ex);
+        return future;
+    }
+
+    /**
+     * The open freeze of one manager: closing it releases the freeze, after which the retained dirty set
+     * drains on the next flush. Closing is idempotent, so try-with-resources on top of an explicit early
+     * release is safe.
+     */
+    public static final class FreezeHandle implements AutoCloseable {
+
+        private final CachingManager<?, ?> manager;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+
+        private FreezeHandle(CachingManager<?, ?> manager) {
+            this.manager = manager;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                manager.unfreeze();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     //  Writes (write-through) + invalidation
     // ------------------------------------------------------------------
 
@@ -321,10 +474,17 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      *
      * <p>On an {@link OptimisticLockException} the (stale) cached entry is evicted so the next read
      * reloads the current backend state; the original exception still propagates.
+     *
+     * <p>While the manager is {@link #freezeWrites() frozen} the cache is still updated but the backend
+     * write is deferred: the value is marked dirty and persists on the first flush after the freeze is
+     * released. A value that could not be drained that way fails instead - see {@link #freezeWrites()}.
      */
     public CompletableFuture<Void> saveAndCache(V value) {
         final K key = keyOf.apply(value);
         final long stamp = stampGen.incrementAndGet();
+        if (frozen) {
+            return deferWrite(key, value, stamp);
+        }
         return repository.save(value).whenComplete((ignored, ex) -> {
             if (ex == null) {
                 if (options.policy().cacheable()) {
@@ -349,10 +509,19 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      * resurrects it), by {@link #purgeExpired()}, or by LRU eviction. A failed delete just
      * invalidates (the entity may still exist, so the next read reloads it).
      *
+     * <p>Fails while the manager is {@link #freezeWrites() frozen}: unlike a save, a delete carries no
+     * dirty state that could hold it until the freeze lifts, so deferring it would mean inventing a
+     * write-ahead log - and completing it would break the freeze.
+     *
      * @return whether the entity existed in the backend
      */
     public CompletableFuture<Boolean> deleteAndEvict(K key) {
         final long stamp = stampGen.incrementAndGet();
+        if (frozen) {
+            return failedFuture(new IllegalStateException("cannot delete from the frozen manager of '" + collection
+                    + "': a delete cannot be deferred (there is no dirty state to retain it). Release the freeze"
+                    + " before deleting."));
+        }
         return repository.delete(key).whenComplete((existed, ex) -> {
             if (ex == null) {
                 store.tombstone(key, stamp);
@@ -414,11 +583,18 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      * {@link OptimisticLockException} on an entity evicts its (stale) cell so the next read reloads
      * the backend; any other error leaves the cell untouched. The future completes normally - inspect
      * the report.
+     *
+     * <p>While the manager is {@link #freezeWrites() frozen} every entity is deferred exactly as in
+     * {@link #saveAndCache} and the report comes back empty (nothing failed - the batch simply has not
+     * been written yet, and drains on the first flush after the freeze is released).
      */
     public CompletableFuture<BatchSaveReport<K>> saveAllAndCache(Collection<V> values) {
         List<V> entities = new ArrayList<>(values);
         if (entities.isEmpty()) {
             return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
+        }
+        if (frozen) {
+            return deferWrites(entities);
         }
         return repository.saveAll(entities).handle((ignored, batchError) -> {
             if (batchError == null) {
@@ -470,8 +646,15 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      *
      * <p>A value re-dirtied by another thread <em>during</em> the flush re-sets its own flag, so it is
      * simply picked up by the next flush: a flush is at-least-once, never lossy.
+     *
+     * <p>While the manager is {@link #freezeWrites() frozen} this is a no-op returning an empty report:
+     * no flag is cleared, so the whole dirty set survives the window and drains on the first flush after
+     * the freeze is released.
      */
     public CompletableFuture<BatchSaveReport<K>> flushDirty() {
+        if (frozen) {
+            return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
+        }
         List<V> dirty = new ArrayList<>();
         for (CacheEntry<V> cell : store.valuesSnapshot()) {
             V value = cell.getValue();
