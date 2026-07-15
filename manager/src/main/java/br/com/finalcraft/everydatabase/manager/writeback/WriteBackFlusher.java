@@ -23,10 +23,11 @@ import java.util.logging.Level;
 /**
  * The generic write-back persist + conflict-resolution engine over a {@link CachingManager}: it
  * persists an already-collected dirty set in ONE batch, reacts to the per-key
- * {@link BatchSaveReport} (transient error -&gt; re-mark dirty; optimistic-lock conflict -&gt; adopt
- * the stored winner under the live instance's lock; success -&gt; {@code onPersisted}), and always
- * re-installs the SAME live instance as the canonical cached cell so references held by other code
- * stay flushable.
+ * {@link BatchSaveReport} (transient error -&gt; re-mark dirty; optimistic-lock conflict -&gt;
+ * {@code resolveConflict} settles it under the live instance's lock, where taking on the stored
+ * winner is only ONE of the outcomes - see its javadoc for the branches; success -&gt;
+ * {@code onPersisted}), and always re-installs the SAME live instance as the canonical cached cell
+ * so references held by other code stay flushable.
  *
  * <p>This is the piece every mutate-in-memory/flush-later consumer would otherwise re-implement, and
  * the subtle part is the last step: {@code saveAllAndCache} evicts a conflicted cell, so without the
