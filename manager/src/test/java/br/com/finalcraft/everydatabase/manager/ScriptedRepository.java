@@ -19,26 +19,58 @@ import java.util.stream.Stream;
  * A minimal in-memory {@link Repository} for tests, with scripted per-key save failures - so a
  * batch write-back can be driven into the optimistic-lock and transient-error paths without a real
  * versioned backend (none of the no-Docker backends enforce optimistic locking).
+ *
+ * <p>Reads are scriptable too ({@link #failFind}, {@link #beforeFind}), because a conflict
+ * resolution re-reads the winner: that read is both a failure path of its own and the window in
+ * which a racing thread gets to touch the live instance.
  */
-class ScriptedRepository<K, V> implements Repository<K, V> {
+public class ScriptedRepository<K, V> implements Repository<K, V> {
 
     private final Map<K, V> data = new ConcurrentHashMap<>();
     private final Map<K, Supplier<? extends RuntimeException>> saveFailures = new ConcurrentHashMap<>();
+    private final Map<K, Supplier<? extends RuntimeException>> saveThrows = new ConcurrentHashMap<>();
     private final Map<K, Supplier<? extends RuntimeException>> deleteFailures = new ConcurrentHashMap<>();
+    private final Map<K, Supplier<? extends RuntimeException>> findFailures = new ConcurrentHashMap<>();
+    private final Map<K, Runnable> findCallbacks = new ConcurrentHashMap<>();
     private final Function<V, K> keyOf;
 
-    ScriptedRepository(Function<V, K> keyOf) {
+    public ScriptedRepository(Function<V, K> keyOf) {
         this.keyOf = keyOf;
     }
 
     /** Makes {@code save}/{@code saveAll} fail for {@code key} with the supplied exception. */
-    void failSave(K key, Supplier<? extends RuntimeException> exception) {
+    public void failSave(K key, Supplier<? extends RuntimeException> exception) {
         saveFailures.put(key, exception);
     }
 
+    /**
+     * Makes {@code save} THROW for {@code key} instead of returning a failed future - a repository
+     * breaking the async contract, which is what drives a manager into rethrowing from a batch write
+     * back at its caller.
+     */
+    public void throwOnSave(K key, Supplier<? extends RuntimeException> exception) {
+        saveThrows.put(key, exception);
+    }
+
     /** Makes {@code delete} fail for {@code key} with the supplied exception. */
-    void failDelete(K key, Supplier<? extends RuntimeException> exception) {
+    public void failDelete(K key, Supplier<? extends RuntimeException> exception) {
         deleteFailures.put(key, exception);
+    }
+
+    /** Makes {@code find} fail for {@code key} with the supplied exception. */
+    public void failFind(K key, Supplier<? extends RuntimeException> exception) {
+        findFailures.put(key, exception);
+    }
+
+    /** Runs {@code action} on the next {@code find} of {@code key}, before it answers - the hook a
+     *  test uses to land a concurrent change while the winner is being re-read. Runs once. */
+    public void beforeFind(K key, Runnable action) {
+        findCallbacks.put(key, action);
+    }
+
+    /** Stores {@code entity} directly, bypassing the scripted failures - seeds the stored winner. */
+    public void put(V entity) {
+        data.put(keyOf.apply(entity), entity);
     }
 
     private static <T> CompletableFuture<T> failed(Throwable t) {
@@ -50,6 +82,10 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> save(V entity) {
         K key = keyOf.apply(entity);
+        Supplier<? extends RuntimeException> thrown = saveThrows.get(key);
+        if (thrown != null) {
+            throw thrown.get();
+        }
         Supplier<? extends RuntimeException> failure = saveFailures.get(key);
         if (failure != null) {
             return failed(failure.get());
@@ -61,7 +97,8 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
         for (V entity : entities) {
-            if (saveFailures.containsKey(keyOf.apply(entity))) {
+            K key = keyOf.apply(entity);
+            if (saveFailures.containsKey(key) || saveThrows.containsKey(key)) {
                 return failed(new RuntimeException("scripted batch failure"));   // forces the per-entity retry
             }
         }
@@ -81,6 +118,14 @@ class ScriptedRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Optional<V>> find(K key) {
+        Runnable callback = findCallbacks.remove(key);
+        if (callback != null) {
+            callback.run();
+        }
+        Supplier<? extends RuntimeException> failure = findFailures.get(key);
+        if (failure != null) {
+            return failed(failure.get());
+        }
         return CompletableFuture.completedFuture(Optional.ofNullable(data.get(key)));
     }
 
