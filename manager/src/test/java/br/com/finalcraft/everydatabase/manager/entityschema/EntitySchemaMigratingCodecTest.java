@@ -207,6 +207,55 @@ class EntitySchemaMigratingCodecTest {
     }
 
     // ==================================================================
+    //  Decode: the decorator delegates to the inner codec, never a private tree-binding
+    // ==================================================================
+
+    @Test
+    @DisplayName("the migrated path binds through the inner codec, so a custom decode still runs")
+    void migratedPathDelegatesToTheInnerDecode() {
+        registerTalismanChain();
+        LifecycleCodec inner = new LifecycleCodec();
+        Codec<Talisman> wrapped = EntitySchemaMigratingCodec.wrap(Talisman.class, inner, "uuid");
+
+        Talisman decoded = wrapped.decode(payload(inner, legacyTalisman()));
+
+        assertEquals(1, inner.decodeCalls, "the migrated tree must be bound through the inner codec, not a private treeToValue");
+        assertSame(inner.lastDecoded, decoded, "the wrapper must return the instance the inner codec produced");
+        assertEquals(3, decoded.getSchemaVersion(), "the chain still reached the current version");
+        assertEquals("neutral", decoded.getElement(), "the v2 step still landed");
+        assertEquals(1007, decoded.getMight(),
+                "power(7) renamed to might by the chain, then +1000 from the inner codec's post-load hook");
+    }
+
+    @Test
+    @DisplayName("an already-current payload with a chain still decodes through the inner codec")
+    void currentPayloadWithAChainStillDelegatesToTheInnerDecode() {
+        registerTalismanChain();
+        LifecycleCodec inner = new LifecycleCodec();
+        Codec<Talisman> wrapped = EntitySchemaMigratingCodec.wrap(Talisman.class, inner, "uuid");
+
+        Talisman decoded = wrapped.decode(inner.encode(new Talisman(KEY, 7, "fire", 3)));
+
+        assertEquals(1, inner.decodeCalls, "no upcast, but the inner decode must still run - not be replaced by a tree-binding");
+        assertSame(inner.lastDecoded, decoded);
+        assertEquals(3, decoded.getSchemaVersion(), "an already-current payload is not re-migrated");
+        assertEquals(1007, decoded.getMight(), "+1000 proves the inner codec's post-load hook fired on the no-upcast path");
+    }
+
+    @Test
+    @DisplayName("the no-chain path decodes through the inner codec too")
+    void noChainPathDelegatesToTheInnerDecode() {
+        LifecycleCodec inner = new LifecycleCodec();
+        Codec<Talisman> wrapped = EntitySchemaMigratingCodec.wrap(Talisman.class, inner, "uuid");
+
+        Talisman decoded = wrapped.decode(inner.encode(new Talisman(KEY, 7, "fire", 1)));
+
+        assertEquals(1, inner.decodeCalls);
+        assertSame(inner.lastDecoded, decoded);
+        assertEquals(1007, decoded.getMight());
+    }
+
+    // ==================================================================
     //  Decode: protected fields
     // ==================================================================
 
@@ -361,6 +410,45 @@ class EntitySchemaMigratingCodecTest {
             return node.get("power");
         } catch (Exception e) {
             throw new IllegalStateException("unreadable payload", e);
+        }
+    }
+
+    /**
+     * A custom inner codec whose {@code decode} does MORE than a plain {@code readValue}: it counts
+     * its invocations and fires a post-load side effect on the freshly bound entity - standing in for
+     * the lifecycle hooks / {@code @JsonIgnore} field reconstruction a real consumer codec performs.
+     * A decorator that bound the migrated tree itself (e.g. {@code mapper.treeToValue}) would bypass
+     * all of it; delegating to {@link #decode} is the only way this side effect survives, which is
+     * exactly what the delegation tests pin.
+     */
+    private static final class LifecycleCodec implements Codec<Talisman>, ObjectMapperAware {
+
+        private final JacksonJsonCodec<Talisman> delegate = new JacksonJsonCodec<>(Talisman.class);
+        int decodeCalls;
+        Talisman lastDecoded;
+
+        @Override
+        public byte[] encode(Talisman value) {
+            return delegate.encode(value);
+        }
+
+        @Override
+        public Talisman decode(byte[] data) {
+            Talisman value = delegate.decode(data);
+            decodeCalls++;
+            value.empower(1000); // a post-load hook a plain tree-binding would never reach
+            lastDecoded = value;
+            return value;
+        }
+
+        @Override
+        public String contentType() {
+            return delegate.contentType();
+        }
+
+        @Override
+        public ObjectMapper objectMapper() {
+            return delegate.objectMapper();
         }
     }
 }

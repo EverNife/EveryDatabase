@@ -114,13 +114,25 @@ public final class EntitySchemaMigratingCodec<V> implements Codec<V>, ObjectMapp
         }
         ObjectNode node = (ObjectNode) tree;
         boolean upcast = EntitySchemaMigrations.migrateNode(type, node, protectedIdentityFields);
+        if (!upcast) {
+            return inner.decode(data); // already latest: the original bytes serve, inner owns decode (cheapest path)
+        }
+        byte[] migrated;
+        try {
+            migrated = mapper.writeValueAsBytes(node); // re-encode only the actually-migrated row
+        } catch (Exception e) {
+            throw new EntitySchemaMigrationException(type, "failed to re-encode the migrated payload", e);
+        }
+        // Delegate to inner so a custom-decode codec (lifecycle hooks, re-binding) survives the migrated path;
+        // binding the migrated tree straight to the POJO would bypass it, dropping anything the inner does
+        // beyond a plain readValue.
         V value;
         try {
-            value = mapper.treeToValue(node, type);
+            value = inner.decode(migrated);
         } catch (Exception e) {
             throw new EntitySchemaMigrationException(type, "failed to bind the migrated payload to the entity type", e);
         }
-        if (upcast && dirtyAccessor != null) {
+        if (dirtyAccessor != null) {
             dirtyAccessor.markDirty(value); // re-persist the migrated shape on the next flush
         }
         return value;
