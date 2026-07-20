@@ -30,9 +30,6 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  * order alongside a reordered payload - so sorting on write destroys it permanently, on
  * the very first save.
  *
- * <p>Callers who want key-sorted, byte-deterministic output opt in explicitly with
- * {@link #canonicalMapOrder(ObjectMapper)}.
- *
  * <p>Because the read contract is fixed - and the date module reads <em>both</em> the
  * numeric (epoch) and ISO-8601 forms on input - any profile can read what any other
  * profile wrote. Switching the write profile of an existing collection therefore never
@@ -50,9 +47,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  *
  * <p>{@code MapperFeature}-based knobs (e.g. alphabetical <em>property</em> sorting) are
  * deliberately omitted: mutating them on an already-built {@link ObjectMapper} is
- * deprecated in Jackson 2.x. (Map-entry ordering is a {@code SerializationFeature},
- * not a {@code MapperFeature}, so {@link #canonicalMapOrder(ObjectMapper)} is safe to
- * apply this way.)
+ * deprecated in Jackson 2.x.
  */
 public final class JacksonConfig {
 
@@ -68,8 +63,7 @@ public final class JacksonConfig {
      * older schema (carrying since-removed fields) still deserialises.
      *
      * <p>It sets no write-side option: in particular it does not reorder {@code Map}
-     * entries, so every profile preserves a map's iteration (insertion) order. See
-     * {@link #canonicalMapOrder(ObjectMapper)} for the opt-in that sorts by key.
+     * entries, so every profile preserves a map's iteration (insertion) order.
      *
      * @param mapper the mapper to configure (mutated in place)
      * @return the same {@code mapper}, for chaining
@@ -78,34 +72,6 @@ public final class JacksonConfig {
         mapper.registerModule(new JavaTimeModule());
         mapper.registerModule(new Jdk8Module());
         mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-        return mapper;
-    }
-
-    /**
-     * Opt-in add-on: emit {@code Map} entries sorted by key, so the same logical content
-     * produces identical bytes regardless of the {@code Map} implementation or insertion
-     * order. Composes over any profile:
-     * {@code JacksonConfig.canonicalMapOrder(JacksonConfig.storageSafe(new JsonMapper()))}.
-     *
-     * <p><b>Destructive where order is data.</b> Sorting is applied on write and the
-     * original order is never stored anywhere, so applying this to entities whose map
-     * order carries meaning - numbered text segments, ordered slots, step sequences -
-     * corrupts that data permanently at the first save, with no way to recover it. Use it
-     * only when the map is a pure lookup table and deterministic, diff-friendly bytes are
-     * worth more than the ordering.
-     *
-     * <p>A map whose key type is <em>not</em> {@link Comparable} is emitted unordered
-     * rather than failing the write ({@code FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY} is
-     * disabled), so such an entity still serialises instead of throwing
-     * {@code InvalidDefinitionException} at encode time (which would surface as a
-     * {@code CodecException} on save).
-     *
-     * @param mapper the mapper to configure (mutated in place)
-     * @return the same {@code mapper}, for chaining
-     */
-    public static <M extends ObjectMapper> M canonicalMapOrder(M mapper) {
-        mapper.enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
-        mapper.disable(SerializationFeature.FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY);
         return mapper;
     }
 

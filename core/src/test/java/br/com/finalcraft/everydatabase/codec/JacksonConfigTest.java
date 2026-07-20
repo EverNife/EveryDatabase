@@ -20,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -264,21 +263,23 @@ class JacksonConfigTest {
     }
 
     @Test
-    @DisplayName("canonicalMapOrder: a Map with a non-Comparable key type still serialises (ordering skipped)")
+    @DisplayName("a Map with a non-Comparable key type serialises under every write profile")
     void nonComparableMapKey_serialisesWithoutFailing() throws Exception {
         NonComparableMapHolder h = new NonComparableMapHolder();
         h.m = new LinkedHashMap<>();
         h.m.put(new NonComparableKey("b"), 1);
         h.m.put(new NonComparableKey("a"), 2);
 
-        // Ordering by key is only attempted under canonicalMapOrder. Without its paired disable of
-        // FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY this would throw InvalidDefinitionException ("Cannot
-        // order Map entries by key of incomparable type"), which encode() surfaces as a CodecException
-        // on save. It must serialise instead (unordered).
-        String json = JacksonConfig.canonicalMapOrder(JacksonConfig.storageSafe(new JsonMapper()))
-            .writeValueAsString(h);
-        assertTrue(json.contains("\"a\":2") && json.contains("\"b\":1"),
-            "both entries must be present (order not asserted): " + json);
+        // Key ordering is never attempted, so the incomparable key type is a non-event: were a
+        // profile to enable it, this would throw InvalidDefinitionException ("Cannot order Map
+        // entries by key of incomparable type"), which encode() surfaces as a CodecException on save.
+        for (ObjectMapper m : new ObjectMapper[]{
+                JacksonConfig.storageSafe(new JsonMapper()),
+                JacksonConfig.compact(new JsonMapper())}) {
+            String json = m.writeValueAsString(h);
+            assertTrue(json.contains("\"a\":2") && json.contains("\"b\":1"),
+                "both entries must be present (order not asserted): " + json);
+        }
     }
 
     @Test
@@ -404,34 +405,6 @@ class JacksonConfigTest {
         assertTrue(json.indexOf("\"1\"") < json.indexOf("\"2\""), json);
         assertEquals(List.of("3", "1", "2"),
             new ArrayList<>(m.readValue(json, AnyGetterHolder.class).getExtras().keySet()));
-    }
-
-    // ================================================================================
-    //  canonicalMapOrder - the opt-in that trades insertion order for determinism
-    // ================================================================================
-
-    @Test
-    @DisplayName("canonicalMapOrder sorts by key, so a LinkedHashMap and a TreeMap emit identical bytes")
-    void canonicalMapOrder_sortsByKeyAndIsMapImplementationAgnostic() throws Exception {
-        ObjectMapper canonical = JacksonConfig.canonicalMapOrder(JacksonConfig.storageSafe(new JsonMapper()));
-
-        StringMapHolder linked = new StringMapHolder();
-        linked.segments.put("zulu", "Z");
-        linked.segments.put("alpha", "A");
-        linked.segments.put("mike", "M");
-
-        StringMapHolder tree = new StringMapHolder();
-        tree.segments = new TreeMap<>(linked.segments);
-
-        String fromLinked = canonical.writeValueAsString(linked);
-        assertEquals(fromLinked, canonical.writeValueAsString(tree),
-            "canonical output must not depend on the Map implementation");
-        assertTrue(fromLinked.indexOf("\"alpha\"") < fromLinked.indexOf("\"mike\""), fromLinked);
-        assertTrue(fromLinked.indexOf("\"mike\"") < fromLinked.indexOf("\"zulu\""), fromLinked);
-
-        // The default profile is untouched by the opt-in and still writes insertion order.
-        String plain = JacksonConfig.storageSafe(new JsonMapper()).writeValueAsString(linked);
-        assertTrue(plain.indexOf("\"zulu\"") < plain.indexOf("\"alpha\""), plain);
     }
 
     // ================================================================================
