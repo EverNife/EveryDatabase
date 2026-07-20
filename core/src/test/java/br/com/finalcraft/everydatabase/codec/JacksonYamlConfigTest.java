@@ -13,8 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The YAML mirror of {@link JacksonConfigTest}: the {@link JacksonConfig} profiles apply
  * the same rules to a {@link YAMLMapper} (since {@code YAMLMapper extends ObjectMapper}),
- * so dates, {@code Optional}, null/absent dropping and canonical key ordering behave
- * identically - only the surface syntax differs (YAML block style vs JSON).
+ * so dates, {@code Optional}, null/absent dropping and map order behave identically -
+ * only the surface syntax differs (YAML block style vs JSON).
  *
  * <p>Reuses {@link JacksonConfigTest#sample()} / {@link JacksonConfigTest.EventDTO} so the
  * exact same object is compared across both formats.
@@ -31,7 +31,7 @@ class JacksonYamlConfigTest {
     // ================================================================================
 
     @Test
-    @DisplayName("baseReadContract -> numeric/array dates, nulls kept, map ordered by key")
+    @DisplayName("baseReadContract -> numeric/array dates, nulls kept, map in insertion order")
     void baseReadContract_yaml() throws Exception {
         assertEquals("""
             ---
@@ -57,14 +57,14 @@ class JacksonYamlConfigTest {
             optInt: 5
             nullName: null
             counts:
-              errors: 2
               ok: 40
+              errors: 2
             """.stripTrailing(),
             yaml(JacksonConfig.baseReadContract(new YAMLMapper())).stripTrailing());
     }
 
     @Test
-    @DisplayName("storageSafe -> ISO-8601 dates, nulls kept, map ordered by key")
+    @DisplayName("storageSafe -> ISO-8601 dates, nulls kept, map in insertion order")
     void storageSafe_yaml() throws Exception {
         assertEquals("""
             ---
@@ -82,14 +82,14 @@ class JacksonYamlConfigTest {
             optInt: 5
             nullName: null
             counts:
-              errors: 2
               ok: 40
+              errors: 2
             """.stripTrailing(),
             yaml(JacksonConfig.storageSafe(new YAMLMapper())).stripTrailing());
     }
 
     @Test
-    @DisplayName("compact -> ISO dates, drops null and absent (Optional.empty), map ordered by key")
+    @DisplayName("compact -> ISO dates, drops null and absent (Optional.empty), map in insertion order")
     void compact_yaml() throws Exception {
         assertEquals("""
             ---
@@ -105,8 +105,8 @@ class JacksonYamlConfigTest {
             optionalPresent: "yes"
             optInt: 5
             counts:
-              errors: 2
               ok: 40
+              errors: 2
             """.stripTrailing(),
             yaml(JacksonConfig.compact(new YAMLMapper())).stripTrailing());
     }
@@ -145,12 +145,12 @@ class JacksonYamlConfigTest {
     }
 
     @Test
-    @DisplayName("compact YAML drops null and empty Optional; map keys stay ordered")
-    void compact_dropsAndOrders() throws Exception {
+    @DisplayName("compact YAML drops null and empty Optional; map keeps its insertion order")
+    void compact_dropsNullsAndKeepsMapOrder() throws Exception {
         String out = yaml(JacksonConfig.compact(new YAMLMapper()));
         assertFalse(out.contains("nullName"), out);
         assertFalse(out.contains("optionalEmpty"), out);
-        assertTrue(out.indexOf("errors:") < out.indexOf("ok:"), out);
+        assertTrue(out.indexOf("ok:") < out.indexOf("errors:"), out);
     }
 
     @Test

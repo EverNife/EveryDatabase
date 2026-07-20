@@ -14,21 +14,24 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  * {@link JacksonJsonCodec} and {@link JacksonYamlCodec} default mappers are built
  * with {@link #storageSafe(ObjectMapper)}.
  *
- * <h2>Shared foundation: read contract + canonical map ordering</h2>
+ * <h2>Shared foundation: the read contract</h2>
  *
- * <p>Every profile first applies {@link #baseReadContract(ObjectMapper)}, which sets:
- * <ul>
- *   <li>the frozen <b>read contract</b> - the {@code java.time}
- *       ({@link JavaTimeModule}) and {@code Optional} ({@link Jdk8Module}) datatype
- *       modules, plus tolerance of unknown properties; and</li>
- *   <li>canonical <b>map ordering</b> ({@link SerializationFeature#ORDER_MAP_ENTRIES_BY_KEYS}):
- *       map entries with a {@link Comparable} key type are emitted sorted by key, so the
- *       same logical content produces identical bytes regardless of the {@code Map}
- *       implementation or insertion order (deterministic, diff-friendly output on every
- *       profile). A map whose key type is <em>not</em> {@code Comparable} is emitted
- *       unordered rather than failing the write ({@code FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY}
- *       is disabled), so such an entity still serialises.</li>
- * </ul>
+ * <p>Every profile first applies {@link #baseReadContract(ObjectMapper)}, which sets the
+ * frozen <b>read contract</b> - the {@code java.time} ({@link JavaTimeModule}) and
+ * {@code Optional} ({@link Jdk8Module}) datatype modules, plus tolerance of unknown
+ * properties.
+ *
+ * <h2>Map entries keep their insertion order</h2>
+ *
+ * <p>No profile reorders {@code Map} entries: they are written in the order the map
+ * iterates, which for a {@link java.util.LinkedHashMap} is the insertion order. That
+ * matters because a map's order is frequently part of the data itself (numbered text
+ * segments, ordered menu slots, step sequences) and nothing ever persists the original
+ * order alongside a reordered payload - so sorting on write destroys it permanently, on
+ * the very first save.
+ *
+ * <p>Callers who want key-sorted, byte-deterministic output opt in explicitly with
+ * {@link #canonicalMapOrder(ObjectMapper)}.
  *
  * <p>Because the read contract is fixed - and the date module reads <em>both</em> the
  * numeric (epoch) and ISO-8601 forms on input - any profile can read what any other
@@ -47,8 +50,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  *
  * <p>{@code MapperFeature}-based knobs (e.g. alphabetical <em>property</em> sorting) are
  * deliberately omitted: mutating them on an already-built {@link ObjectMapper} is
- * deprecated in Jackson 2.x. (Map-entry ordering above is a {@code SerializationFeature},
- * not a {@code MapperFeature}, so it is safe to set this way.)
+ * deprecated in Jackson 2.x. (Map-entry ordering is a {@code SerializationFeature},
+ * not a {@code MapperFeature}, so {@link #canonicalMapOrder(ObjectMapper)} is safe to
+ * apply this way.)
  */
 public final class JacksonConfig {
 
@@ -61,9 +65,11 @@ public final class JacksonConfig {
      * - registers the {@code java.time} ({@link JavaTimeModule}) and {@code Optional}
      * ({@link Jdk8Module}) datatype modules and disables
      * {@link DeserializationFeature#FAIL_ON_UNKNOWN_PROPERTIES} so data written by an
-     * older schema (carrying since-removed fields) still deserialises - plus the one
-     * universal <b>write</b> default, {@link SerializationFeature#ORDER_MAP_ENTRIES_BY_KEYS},
-     * so map entries are emitted in a canonical, deterministic key order on every profile.
+     * older schema (carrying since-removed fields) still deserialises.
+     *
+     * <p>It sets no write-side option: in particular it does not reorder {@code Map}
+     * entries, so every profile preserves a map's iteration (insertion) order. See
+     * {@link #canonicalMapOrder(ObjectMapper)} for the opt-in that sorts by key.
      *
      * @param mapper the mapper to configure (mutated in place)
      * @return the same {@code mapper}, for chaining
@@ -72,11 +78,33 @@ public final class JacksonConfig {
         mapper.registerModule(new JavaTimeModule());
         mapper.registerModule(new Jdk8Module());
         mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+        return mapper;
+    }
+
+    /**
+     * Opt-in add-on: emit {@code Map} entries sorted by key, so the same logical content
+     * produces identical bytes regardless of the {@code Map} implementation or insertion
+     * order. Composes over any profile:
+     * {@code JacksonConfig.canonicalMapOrder(JacksonConfig.storageSafe(new JsonMapper()))}.
+     *
+     * <p><b>Destructive where order is data.</b> Sorting is applied on write and the
+     * original order is never stored anywhere, so applying this to entities whose map
+     * order carries meaning - numbered text segments, ordered slots, step sequences -
+     * corrupts that data permanently at the first save, with no way to recover it. Use it
+     * only when the map is a pure lookup table and deterministic, diff-friendly bytes are
+     * worth more than the ordering.
+     *
+     * <p>A map whose key type is <em>not</em> {@link Comparable} is emitted unordered
+     * rather than failing the write ({@code FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY} is
+     * disabled), so such an entity still serialises instead of throwing
+     * {@code InvalidDefinitionException} at encode time (which would surface as a
+     * {@code CodecException} on save).
+     *
+     * @param mapper the mapper to configure (mutated in place)
+     * @return the same {@code mapper}, for chaining
+     */
+    public static <M extends ObjectMapper> M canonicalMapOrder(M mapper) {
         mapper.enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
-        // Canonical ordering only sorts when the map's key type is Comparable. Without disabling this
-        // fail-fast, an entity carrying a Map with a non-Comparable key type throws
-        // InvalidDefinitionException at encode() time (surfaced as a CodecException on save). Degrade
-        // gracefully instead: Comparable keys are still ordered, incomparable ones just skip ordering.
         mapper.disable(SerializationFeature.FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY);
         return mapper;
     }
@@ -85,7 +113,8 @@ public final class JacksonConfig {
      * The default profile: round-trip fidelity and schema-evolution tolerance. On top of
      * {@link #baseReadContract(ObjectMapper)}, dates and durations serialise as ISO-8601
      * text (not numeric arrays/epochs), so the output is portable and human-readable.
-     * Null properties are kept.
+     * Null properties are kept, and {@code Map} entries keep their insertion order, so a
+     * decoded entity re-encodes to the same bytes it was read from.
      *
      * <p>This is the mapper used by {@link JacksonJsonCodec} and {@link JacksonYamlCodec}
      * when the caller supplies no custom mapper.
@@ -102,7 +131,7 @@ public final class JacksonConfig {
 
     /**
      * The space-saving profile: identical to {@link #storageSafe(ObjectMapper)} - same
-     * ISO-8601 dates and canonical key ordering - but drops every property whose value is
+     * ISO-8601 dates and same map order - but drops every property whose value is
      * {@code null} or an <em>absent</em> {@code Optional} ({@link JsonInclude.Include#NON_ABSENT}).
      * Empty collections, empty strings and {@code 0} are kept; only "no value" is omitted.
      *

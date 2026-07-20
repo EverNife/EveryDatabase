@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.codec;
 
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -11,11 +13,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,10 +33,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code LocalDate}/{@code LocalDateTime} (zoneless -&gt; array/ISO), {@code Duration},
  * legacy {@code java.util.Date} and {@code java.sql.Timestamp} (-&gt; epoch millis/ISO),
  * present/empty {@code Optional}, {@code OptionalInt}, a {@code null} property, and a
- * {@code Map} whose insertion order is non-alphabetical (to prove canonical key ordering).
+ * {@code Map} whose insertion order is non-alphabetical (to prove insertion order survives).
  *
- * <p>All three profiles share the same foundation: the read contract and <b>canonical map
- * ordering</b> (entries always sorted by key). They differ only in date form
+ * <p>All three profiles share the same foundation: the read contract, and <b>no map
+ * reordering</b> (entries are written in iteration order). They differ only in date form
  * (base = Jackson numeric/array defaults; storageSafe/compact = ISO-8601) and in whether
  * null/absent properties are dropped (only compact, via {@code NON_ABSENT}).
  *
@@ -84,7 +89,7 @@ class JacksonConfigTest {
         d.optInt = OptionalInt.of(5);
         d.nullName = null;
         d.counts = new LinkedHashMap<>();
-        d.counts.put("ok", 40);      // non-alphabetical insertion proves the canonical key ordering
+        d.counts.put("ok", 40);      // non-alphabetical insertion proves the order is not sorted away
         d.counts.put("errors", 2);
         return d;
     }
@@ -98,12 +103,12 @@ class JacksonConfigTest {
     }
 
     // ================================================================================
-    //  baseReadContract - read contract + canonical map ordering; Jackson's date defaults
+    //  baseReadContract - read contract only; Jackson's date defaults
     // ================================================================================
 
     @Test
-    @DisplayName("baseReadContract -> numeric/array dates, nulls kept, map ordered by key")
-    void baseReadContract_writesJacksonDateDefaultsButOrdersMap() throws Exception {
+    @DisplayName("baseReadContract -> numeric/array dates, nulls kept, map in insertion order")
+    void baseReadContract_writesJacksonDateDefaultsAndKeepsMapOrder() throws Exception {
         String json = JacksonConfig.baseReadContract(new JsonMapper()).writeValueAsString(sample());
 
         assertJsonEquals("""
@@ -121,27 +126,27 @@ class JacksonConfigTest {
               "optionalEmpty": null,
               "optInt": 5,
               "nullName": null,
-              "counts": { "errors": 2, "ok": 40 }
+              "counts": { "ok": 40, "errors": 2 }
             }
             """, json);
 
         // An Instant is a NUMBER here (epoch seconds.nanos), NOT an array - arrays are only
         // for the zoneless local types (LocalDate/LocalDateTime).
         assertTrue(json.contains("\"instant\":1782397800.000000000"), json);
-        // Map ordering is universal (set in baseReadContract): canonical, errors before ok,
-        // regardless of the LinkedHashMap insertion order (ok, errors).
-        assertTrue(json.indexOf("\"errors\"") < json.indexOf("\"ok\""), json);
+        // No profile reorders maps: the LinkedHashMap insertion order (ok, errors) survives
+        // verbatim - alphabetical order would have put errors first.
+        assertTrue(json.indexOf("\"ok\"") < json.indexOf("\"errors\""), json);
         // base keeps nulls (no NON_ABSENT).
         assertTrue(json.contains("\"nullName\":null"), json);
     }
 
     // ================================================================================
-    //  storageSafe (the default) - ISO dates, nulls kept, map ordered by key
+    //  storageSafe (the default) - ISO dates, nulls kept, map in insertion order
     // ================================================================================
 
     @Test
-    @DisplayName("storageSafe -> ISO-8601 dates/duration, nulls kept, map ordered by key")
-    void storageSafe_isoDatesOrderedMap() throws Exception {
+    @DisplayName("storageSafe -> ISO-8601 dates/duration, nulls kept, map in insertion order")
+    void storageSafe_isoDatesKeepsMapOrder() throws Exception {
         String json = JacksonConfig.storageSafe(new JsonMapper()).writeValueAsString(sample());
 
         assertJsonEquals("""
@@ -159,18 +164,18 @@ class JacksonConfigTest {
               "optionalEmpty": null,
               "optInt": 5,
               "nullName": null,
-              "counts": { "errors": 2, "ok": 40 }
+              "counts": { "ok": 40, "errors": 2 }
             }
             """, json);
 
         assertTrue(json.contains("\"instant\":\"2026-06-25T14:30:00Z\""), json);
         assertTrue(json.contains("\"duration\":\"PT1M30S\""), json);
-        assertTrue(json.indexOf("\"errors\"") < json.indexOf("\"ok\""), json);
+        assertTrue(json.indexOf("\"ok\"") < json.indexOf("\"errors\""), json);
         assertTrue(json.contains("\"nullName\":null"), json);
     }
 
     // ================================================================================
-    //  compact = storageSafe minus null/absent (same ISO dates + same key ordering)
+    //  compact = storageSafe minus null/absent (same ISO dates + same map order)
     // ================================================================================
 
     @Test
@@ -178,7 +183,7 @@ class JacksonConfigTest {
     void compact_isoDatesDropsNullAndAbsent() throws Exception {
         String json = JacksonConfig.compact(new JsonMapper()).writeValueAsString(sample());
 
-        // Same ISO dates and key order as storageSafe; "nullName" and "optionalEmpty" are gone.
+        // Same ISO dates and map order as storageSafe; "nullName" and "optionalEmpty" are gone.
         assertJsonEquals("""
             {
               "name": "Deploy",
@@ -192,12 +197,12 @@ class JacksonConfigTest {
               "timestamp": "2026-06-25T14:30:00.000+00:00",
               "optionalPresent": "yes",
               "optInt": 5,
-              "counts": { "errors": 2, "ok": 40 }
+              "counts": { "ok": 40, "errors": 2 }
             }
             """, json);
 
         assertTrue(json.contains("\"instant\":\"2026-06-25T14:30:00Z\""), json);
-        assertTrue(json.indexOf("\"errors\"") < json.indexOf("\"ok\""), json);
+        assertTrue(json.indexOf("\"ok\"") < json.indexOf("\"errors\""), json);
     }
 
     // ================================================================================
@@ -235,15 +240,15 @@ class JacksonConfigTest {
     }
 
     @Test
-    @DisplayName("every profile orders map keys canonically, regardless of insertion order")
-    void everyProfileOrdersMapKeys() throws Exception {
+    @DisplayName("every profile preserves map insertion order by default")
+    void everyProfilePreservesMapInsertionOrder() throws Exception {
         for (ObjectMapper m : new ObjectMapper[]{
                 JacksonConfig.baseReadContract(new JsonMapper()),
                 JacksonConfig.storageSafe(new JsonMapper()),
                 JacksonConfig.compact(new JsonMapper())}) {
             String json = m.writeValueAsString(sample());
-            assertTrue(json.indexOf("\"errors\"") < json.indexOf("\"ok\""),
-                "map must be key-ordered (errors before ok): " + json);
+            assertTrue(json.indexOf("\"ok\"") < json.indexOf("\"errors\""),
+                "map must keep its insertion order (ok before errors): " + json);
         }
     }
 
@@ -259,17 +264,19 @@ class JacksonConfigTest {
     }
 
     @Test
-    @DisplayName("a Map with a non-Comparable key type serialises (ordering skipped, not a hard failure)")
+    @DisplayName("canonicalMapOrder: a Map with a non-Comparable key type still serialises (ordering skipped)")
     void nonComparableMapKey_serialisesWithoutFailing() throws Exception {
         NonComparableMapHolder h = new NonComparableMapHolder();
         h.m = new LinkedHashMap<>();
         h.m.put(new NonComparableKey("b"), 1);
         h.m.put(new NonComparableKey("a"), 2);
 
-        // With ORDER_MAP_ENTRIES_BY_KEYS on and FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY still enabled this
-        // would throw InvalidDefinitionException ("Cannot order Map entries by key of incomparable type"),
-        // which encode() surfaces as a CodecException on save. It must serialise instead (unordered).
-        String json = JacksonConfig.storageSafe(new JsonMapper()).writeValueAsString(h);
+        // Ordering by key is only attempted under canonicalMapOrder. Without its paired disable of
+        // FAIL_ON_ORDER_MAP_BY_INCOMPARABLE_KEY this would throw InvalidDefinitionException ("Cannot
+        // order Map entries by key of incomparable type"), which encode() surfaces as a CodecException
+        // on save. It must serialise instead (unordered).
+        String json = JacksonConfig.canonicalMapOrder(JacksonConfig.storageSafe(new JsonMapper()))
+            .writeValueAsString(h);
         assertTrue(json.contains("\"a\":2") && json.contains("\"b\":1"),
             "both entries must be present (order not asserted): " + json);
     }
@@ -310,5 +317,141 @@ class JacksonConfigTest {
                     "reader must recover the Instant from any writer's output");
             }
         }
+    }
+
+    // ================================================================================
+    //  Map order survives a full encode -> decode round trip (the default profile)
+    // ================================================================================
+
+    static class StringMapHolder {
+        public Map<String, String> segments = new LinkedHashMap<>();
+    }
+
+    static class IntMapHolder {
+        public Map<Integer, String> byId = new LinkedHashMap<>();
+    }
+
+    @Test
+    @DisplayName("numeric-looking String keys keep their sequence through encode -> decode")
+    void numericStringKeys_keepSequenceThroughRoundTrip() throws Exception {
+        ObjectMapper m = JacksonConfig.storageSafe(new JsonMapper());
+        StringMapHolder h = new StringMapHolder();
+        List<String> inserted = new ArrayList<>();
+        for (int i = 1; i <= 12; i++) {
+            String key = String.valueOf(i);
+            inserted.add(key);
+            h.segments.put(key, "line " + i);
+        }
+
+        StringMapHolder back = m.readValue(m.writeValueAsString(h), StringMapHolder.class);
+
+        // Sorted-by-key would give 1, 10, 11, 12, 2, ... - the classic silent corruption.
+        assertEquals(inserted, new ArrayList<>(back.segments.keySet()));
+        assertEquals("line 11", back.segments.get("11"));
+    }
+
+    @Test
+    @DisplayName("alphabetic String keys inserted out of alphabetical order keep that order")
+    void alphabeticKeys_keepInsertionOrderThroughRoundTrip() throws Exception {
+        ObjectMapper m = JacksonConfig.storageSafe(new JsonMapper());
+        StringMapHolder h = new StringMapHolder();
+        List<String> inserted = List.of("zulu", "alpha", "mike", "bravo");
+        for (String key : inserted) h.segments.put(key, key.toUpperCase());
+
+        StringMapHolder back = m.readValue(m.writeValueAsString(h), StringMapHolder.class);
+
+        assertEquals(inserted, new ArrayList<>(back.segments.keySet()));
+    }
+
+    @Test
+    @DisplayName("Integer keys inserted in descending order keep that order")
+    void integerKeys_keepDescendingInsertionOrderThroughRoundTrip() throws Exception {
+        ObjectMapper m = JacksonConfig.storageSafe(new JsonMapper());
+        IntMapHolder h = new IntMapHolder();
+        List<Integer> inserted = List.of(30, 20, 10, 5);
+        for (Integer key : inserted) h.byId.put(key, "slot " + key);
+
+        IntMapHolder back = m.readValue(m.writeValueAsString(h), IntMapHolder.class);
+
+        assertEquals(inserted, new ArrayList<>(back.byId.keySet()));
+    }
+
+    /** Extra properties flattened into the enclosing object by {@link JsonAnyGetter}. */
+    static class AnyGetterHolder {
+        public String name;
+        private final Map<String, Object> extras = new LinkedHashMap<>();
+
+        @JsonAnyGetter
+        public Map<String, Object> getExtras() { return extras; }
+
+        @JsonAnySetter
+        public void put(String key, Object value) { extras.put(key, value); }
+    }
+
+    @Test
+    @DisplayName("@JsonAnyGetter entries keep their insertion order too")
+    void anyGetter_keepsInsertionOrder() throws Exception {
+        ObjectMapper m = JacksonConfig.storageSafe(new JsonMapper());
+        AnyGetterHolder h = new AnyGetterHolder();
+        h.name = "sign";
+        h.put("3", "third");
+        h.put("1", "first");
+        h.put("2", "second");
+
+        String json = m.writeValueAsString(h);
+
+        assertTrue(json.indexOf("\"3\"") < json.indexOf("\"1\""), json);
+        assertTrue(json.indexOf("\"1\"") < json.indexOf("\"2\""), json);
+        assertEquals(List.of("3", "1", "2"),
+            new ArrayList<>(m.readValue(json, AnyGetterHolder.class).getExtras().keySet()));
+    }
+
+    // ================================================================================
+    //  canonicalMapOrder - the opt-in that trades insertion order for determinism
+    // ================================================================================
+
+    @Test
+    @DisplayName("canonicalMapOrder sorts by key, so a LinkedHashMap and a TreeMap emit identical bytes")
+    void canonicalMapOrder_sortsByKeyAndIsMapImplementationAgnostic() throws Exception {
+        ObjectMapper canonical = JacksonConfig.canonicalMapOrder(JacksonConfig.storageSafe(new JsonMapper()));
+
+        StringMapHolder linked = new StringMapHolder();
+        linked.segments.put("zulu", "Z");
+        linked.segments.put("alpha", "A");
+        linked.segments.put("mike", "M");
+
+        StringMapHolder tree = new StringMapHolder();
+        tree.segments = new TreeMap<>(linked.segments);
+
+        String fromLinked = canonical.writeValueAsString(linked);
+        assertEquals(fromLinked, canonical.writeValueAsString(tree),
+            "canonical output must not depend on the Map implementation");
+        assertTrue(fromLinked.indexOf("\"alpha\"") < fromLinked.indexOf("\"mike\""), fromLinked);
+        assertTrue(fromLinked.indexOf("\"mike\"") < fromLinked.indexOf("\"zulu\""), fromLinked);
+
+        // The default profile is untouched by the opt-in and still writes insertion order.
+        String plain = JacksonConfig.storageSafe(new JsonMapper()).writeValueAsString(linked);
+        assertTrue(plain.indexOf("\"zulu\"") < plain.indexOf("\"alpha\""), plain);
+    }
+
+    // ================================================================================
+    //  Legacy data (written while the old default sorted keys) still reads back
+    // ================================================================================
+
+    @Test
+    @DisplayName("a payload whose keys were already sorted still deserialises, values intact")
+    void alphabeticallySortedPayload_stillDeserialises() throws Exception {
+        ObjectMapper m = JacksonConfig.storageSafe(new JsonMapper());
+
+        // Hand-written exactly as the key-sorting default used to emit it.
+        String legacy = "{\"segments\":{\"1\":\"line 1\",\"10\":\"line 10\",\"11\":\"line 11\",\"2\":\"line 2\"}}";
+        StringMapHolder back = m.readValue(legacy, StringMapHolder.class);
+
+        assertEquals(4, back.segments.size());
+        assertEquals("line 2", back.segments.get("2"));
+        assertEquals("line 10", back.segments.get("10"));
+        // The order it was written in is what comes back - the original insertion order was
+        // never persisted, so it is not recoverable; only the values are.
+        assertEquals(List.of("1", "10", "11", "2"), new ArrayList<>(back.segments.keySet()));
     }
 }
