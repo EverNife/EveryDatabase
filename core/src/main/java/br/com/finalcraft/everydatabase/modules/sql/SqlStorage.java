@@ -146,6 +146,20 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     }
 
     @Override
+    public SyncParticipation syncParticipation() {
+        return config.syncParticipation();
+    }
+
+    /**
+     * Machine-local when the URL names a loopback host or an embedded file and no explicit identity
+     * overrides that - the same signal {@link #backendIdentity()} uses, never a parse of its result.
+     */
+    @Override
+    public boolean isMachineLocalIdentity() {
+        return config.sharedIdentity() == null && BackendIdentities.jdbcIsMachineLocal(config.jdbcUrl());
+    }
+
+    @Override
     public StorageLogConfig getStorageLogConfig() {
         return logConfig;
     }

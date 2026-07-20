@@ -80,6 +80,17 @@ public class H2SqlStorage extends SqlStorage {
     }
 
     /**
+     * An in-memory database lives inside this JVM and no other process can reach it, so it is
+     * machine-local; a file or TCP database falls back to the URL classification the SQL base does.
+     * {@link #inMemoryIdentity} is already {@code null} when a shared identity is set, so that case
+     * correctly defers to {@code super}.
+     */
+    @Override
+    public boolean isMachineLocalIdentity() {
+        return inMemoryIdentity != null || super.isMachineLocalIdentity();
+    }
+
+    /**
      * H2 uses ANSI double-quote for identifier quoting (same as PostgreSQL).
      * Overrides the base class backtick default so the {@code _schema_migrations}
      * table and its columns are quoted correctly.

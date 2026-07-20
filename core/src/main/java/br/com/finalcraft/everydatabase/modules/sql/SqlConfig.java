@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.sql;
 
 import br.com.finalcraft.everydatabase.StorageConfig;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 
 /**
  * Configuration for the SQL (JDBC + HikariCP) storage backend.
@@ -35,9 +36,32 @@ public final class SqlConfig implements StorageConfig {
     private final String password;
     private final PoolTuning pool;
     private final String sharedIdentity;
+    private final SyncParticipation syncParticipation;
 
     /**
-     * Full constructor, with an explicit backend identity.
+     * Full constructor, with an explicit backend identity and transport participation.
+     *
+     * @param jdbcUrl           full JDBC connection URL
+     * @param username          database username
+     * @param password          database password
+     * @param pool              HikariCP pool tuning parameters
+     * @param sharedIdentity    explicit identity for the store this URL points at, or {@code null} to
+     *                          derive it from the URL (see {@link #sharedIdentity()})
+     * @param syncParticipation how this store participates in transport publishing (see
+     *                          {@link #syncParticipation()})
+     */
+    public SqlConfig(String jdbcUrl, String username, String password, PoolTuning pool,
+                     String sharedIdentity, SyncParticipation syncParticipation) {
+        this.jdbcUrl           = jdbcUrl;
+        this.username          = username;
+        this.password          = password;
+        this.pool              = pool;
+        this.sharedIdentity    = sharedIdentity;
+        this.syncParticipation = syncParticipation;
+    }
+
+    /**
+     * Constructor with an explicit backend identity.
      *
      * @param jdbcUrl        full JDBC connection URL
      * @param username       database username
@@ -47,11 +71,7 @@ public final class SqlConfig implements StorageConfig {
      *                       derive it from the URL (see {@link #sharedIdentity()})
      */
     public SqlConfig(String jdbcUrl, String username, String password, PoolTuning pool, String sharedIdentity) {
-        this.jdbcUrl        = jdbcUrl;
-        this.username       = username;
-        this.password       = password;
-        this.pool           = pool;
-        this.sharedIdentity = sharedIdentity;
+        this(jdbcUrl, username, password, pool, sharedIdentity, SyncParticipation.RECOMMENDED);
     }
 
     /**
@@ -86,6 +106,12 @@ public final class SqlConfig implements StorageConfig {
      * credential in it: the identity travels on change events and may be logged.
      */
     public String     sharedIdentity() { return sharedIdentity; }
+
+    /**
+     * How this store participates in the publish side of an explicit pub/sub cache-sync transport;
+     * never {@code null}. Defaults to {@link SyncParticipation#RECOMMENDED}.
+     */
+    public SyncParticipation syncParticipation() { return syncParticipation; }
 
     public String     jdbcUrl()  { return jdbcUrl; }
     public String     username() { return username; }

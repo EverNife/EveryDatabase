@@ -116,6 +116,28 @@ class BackendIdentitiesTest {
     }
 
     @Test
+    @DisplayName("jdbcIsMachineLocal: routable false, loopback true, embedded (no authority) true")
+    void jdbcIsMachineLocal_classification() {
+        assertFalse(BackendIdentities.jdbcIsMachineLocal("jdbc:mariadb://db.example.com:3306/mc"));
+        assertFalse(BackendIdentities.jdbcIsMachineLocal("jdbc:mariadb://root:s3cr3t@db.example.com:3306/mc?x=1"));
+        assertTrue(BackendIdentities.jdbcIsMachineLocal("jdbc:mariadb://localhost:3306/mc"));
+        assertTrue(BackendIdentities.jdbcIsMachineLocal("jdbc:mariadb://127.0.0.1:3306/mc"));
+        assertTrue(BackendIdentities.jdbcIsMachineLocal("jdbc:h2:mem:test"));
+        assertTrue(BackendIdentities.jdbcIsMachineLocal("jdbc:h2:file:./data/db"));
+    }
+
+    @Test
+    @DisplayName("mongoIsMachineLocal: any routable seed makes it shareable, an all-loopback seed list is machine-local")
+    void mongoIsMachineLocal_classification() {
+        assertFalse(BackendIdentities.mongoIsMachineLocal("mongodb://mongo.example.com:27017"));
+        assertFalse(BackendIdentities.mongoIsMachineLocal("mongodb://admin:hunter2@mongo.example.com:27017/?authSource=admin"));
+        // Mixed seed list: one routable is enough to make the deployment shareable.
+        assertFalse(BackendIdentities.mongoIsMachineLocal("mongodb://localhost:27017,mongo.example.com:27017"));
+        assertTrue(BackendIdentities.mongoIsMachineLocal("mongodb://localhost:27017"));
+        assertTrue(BackendIdentities.mongoIsMachineLocal("mongodb://127.0.0.1:27017,localhost:27018"));
+    }
+
+    @Test
     @DisplayName("the local machine discriminator is stable within a process")
     void localMachine_isStable() {
         assertEquals(BackendIdentities.localMachine(), BackendIdentities.localMachine());

@@ -171,6 +171,45 @@ public final class BackendIdentities {
     }
 
     /**
+     * Whether a JDBC URL points at a machine-local store - the same classification {@link #jdbc}
+     * applies internally, exposed on its own so a caller can learn it without also composing an
+     * identity. A URL without a {@code //authority} (an embedded H2 or SQLite file) is machine-local
+     * by definition; otherwise the host is classified by {@link #isMachineLocalHost}.
+     */
+    public static boolean jdbcIsMachineLocal(String jdbcUrl) {
+        String url = stripQuery(jdbcUrl);
+        int schemeEnd = url.indexOf("://");
+        if (schemeEnd < 0) {
+            return true;
+        }
+        String rest      = url.substring(schemeEnd + 3);
+        int pathStart    = rest.indexOf('/');
+        String authority = pathStart < 0 ? rest : rest.substring(0, pathStart);
+        String hostPart  = stripUserInfo(authority).toLowerCase(Locale.ROOT);
+        return isMachineLocalHost(hostOf(hostPart));
+    }
+
+    /**
+     * Whether a Mongo connection string points at a machine-local deployment - the same
+     * classification {@link #mongo} applies internally, exposed on its own. All hosts of the seed
+     * list must be machine-local; a single routable seed already names a shareable deployment.
+     */
+    public static boolean mongoIsMachineLocal(String connectionString) {
+        String url = stripQuery(connectionString);
+        int schemeEnd = url.indexOf("://");
+        String rest   = schemeEnd < 0 ? url : url.substring(schemeEnd + 3);
+        int pathStart = rest.indexOf('/');
+        String authority = stripUserInfo(pathStart < 0 ? rest : rest.substring(0, pathStart))
+                .toLowerCase(Locale.ROOT);
+        for (String seed : authority.split(",")) {
+            if (!isMachineLocalHost(hostOf(seed))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * The identity of a directory-backed store. Always machine-local: the same absolute path names a
      * different directory on every machine.
      */

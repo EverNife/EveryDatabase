@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.groupedfile;
 
 import br.com.finalcraft.everydatabase.StorageConfig;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.codec.JacksonYamlCodec;
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
@@ -55,6 +56,20 @@ public final class GroupedFileConfig implements StorageConfig {
 
     private final Path baseDirectory;
     private final String sharedIdentity;
+    private final SyncParticipation syncParticipation;
+
+    /**
+     * @param baseDirectory     root directory where the per-key files live
+     * @param sharedIdentity    explicit identity for the store behind this directory, or {@code null}
+     *                          to derive it (see {@link #sharedIdentity()})
+     * @param syncParticipation how this store participates in transport publishing (see
+     *                          {@link #syncParticipation()})
+     */
+    public GroupedFileConfig(Path baseDirectory, String sharedIdentity, SyncParticipation syncParticipation) {
+        this.baseDirectory     = baseDirectory;
+        this.sharedIdentity    = sharedIdentity;
+        this.syncParticipation = syncParticipation;
+    }
 
     /**
      * @param baseDirectory  root directory where the per-key files live
@@ -62,8 +77,7 @@ public final class GroupedFileConfig implements StorageConfig {
      *                       to derive it (see {@link #sharedIdentity()})
      */
     public GroupedFileConfig(Path baseDirectory, String sharedIdentity) {
-        this.baseDirectory  = baseDirectory;
-        this.sharedIdentity = sharedIdentity;
+        this(baseDirectory, sharedIdentity, SyncParticipation.RECOMMENDED);
     }
 
     /**
@@ -89,5 +103,13 @@ public final class GroupedFileConfig implements StorageConfig {
      */
     public String sharedIdentity() {
         return sharedIdentity;
+    }
+
+    /**
+     * How this store participates in the publish side of an explicit pub/sub cache-sync transport;
+     * never {@code null}. Defaults to {@link SyncParticipation#RECOMMENDED}.
+     */
+    public SyncParticipation syncParticipation() {
+        return syncParticipation;
     }
 }

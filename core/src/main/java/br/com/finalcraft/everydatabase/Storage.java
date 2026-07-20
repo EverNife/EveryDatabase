@@ -128,6 +128,43 @@ public interface Storage {
         return "storage-instance:" + BackendIdentities.jvmId() + ":" + System.identityHashCode(this);
     }
 
+    /**
+     * How this backend participates in the publish side of an explicit pub/sub cache-sync transport.
+     *
+     * <p>Read from the backend's own {@code config.syncParticipation()} by whoever overrides it, the
+     * same way {@link #backendIdentity()} is read from {@code config.sharedIdentity()}. It governs
+     * only whether a local write publishes a signal; it never affects receiving, the native
+     * change-feed path, or any non-transport behaviour.
+     *
+     * <p>Defaults to {@link SyncParticipation#RECOMMENDED}.
+     */
+    default SyncParticipation syncParticipation() {
+        return SyncParticipation.RECOMMENDED;
+    }
+
+    /**
+     * Whether this backend's identity could NEVER be reached by another instance - so a signal it
+     * would publish onto a per-store channel has no possible subscriber.
+     *
+     * <p>Answers {@code true} for a machine-local coordinate with no shared identity (a loopback
+     * database, any file directory, an in-memory store) and for a per-instance identity like the
+     * {@link #backendIdentity()} default; {@code false} for a routable coordinate, or whenever a
+     * {@code sharedIdentity} is set - the operator declaring an explicit identity makes the store
+     * shareable by decree, even if the underlying coordinate is loopback.
+     *
+     * <p>This must be answered from the SAME signal a backend uses to derive its identity (its
+     * config's coordinate plus {@code sharedIdentity}), never by parsing the string returned from
+     * {@link #backendIdentity()}: a per-instance identity carries no routable marker yet is entirely
+     * machine-local, and a freely-chosen shared identity may look machine-local by accident.
+     *
+     * <p>Defaults to {@code false}: an unclassified backend (including a third-party one) keeps the
+     * pre-existing behaviour of publishing, rather than silently going quiet and dropping a
+     * cross-instance invalidation that used to work.
+     */
+    default boolean isMachineLocalIdentity() {
+        return false;
+    }
+
     StorageLogConfig getStorageLogConfig();
 
     /**

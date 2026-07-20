@@ -100,6 +100,17 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
     }
 
     @Override
+    public SyncParticipation syncParticipation() {
+        return config.syncParticipation();
+    }
+
+    /** A directory is machine-local by definition unless an explicit identity declares it shared. */
+    @Override
+    public boolean isMachineLocalIdentity() {
+        return config.sharedIdentity() == null;
+    }
+
+    @Override
     public StorageLogConfig getStorageLogConfig() {
         return logConfig;
     }

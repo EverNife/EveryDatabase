@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.mongo;
 
 import br.com.finalcraft.everydatabase.StorageConfig;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -29,9 +30,30 @@ public final class MongoConfig implements StorageConfig {
     private final String database;
     private final Optional<Duration> connectTimeout;
     private final String sharedIdentity;
+    private final SyncParticipation syncParticipation;
 
     /**
-     * Full constructor, with an explicit backend identity.
+     * Full constructor, with an explicit backend identity and transport participation.
+     *
+     * @param connectionString  MongoDB connection string (URI format)
+     * @param database          database name to use
+     * @param connectTimeout    optional socket connect timeout; empty uses the driver default
+     * @param sharedIdentity    explicit identity for the database these coordinates point at, or
+     *                          {@code null} to derive it (see {@link #sharedIdentity()})
+     * @param syncParticipation how this store participates in transport publishing (see
+     *                          {@link #syncParticipation()})
+     */
+    public MongoConfig(String connectionString, String database, Optional<Duration> connectTimeout,
+                       String sharedIdentity, SyncParticipation syncParticipation) {
+        this.connectionString  = connectionString;
+        this.database          = database;
+        this.connectTimeout    = connectTimeout;
+        this.sharedIdentity    = sharedIdentity;
+        this.syncParticipation = syncParticipation;
+    }
+
+    /**
+     * Constructor with an explicit backend identity.
      *
      * @param connectionString MongoDB connection string (URI format)
      * @param database         database name to use
@@ -41,10 +63,7 @@ public final class MongoConfig implements StorageConfig {
      */
     public MongoConfig(String connectionString, String database, Optional<Duration> connectTimeout,
                        String sharedIdentity) {
-        this.connectionString = connectionString;
-        this.database         = database;
-        this.connectTimeout   = connectTimeout;
-        this.sharedIdentity   = sharedIdentity;
+        this(connectionString, database, connectTimeout, sharedIdentity, SyncParticipation.RECOMMENDED);
     }
 
     /**
@@ -76,6 +95,12 @@ public final class MongoConfig implements StorageConfig {
      * and may be logged.
      */
     public String              sharedIdentity()   { return sharedIdentity; }
+
+    /**
+     * How this store participates in the publish side of an explicit pub/sub cache-sync transport;
+     * never {@code null}. Defaults to {@link SyncParticipation#RECOMMENDED}.
+     */
+    public SyncParticipation   syncParticipation() { return syncParticipation; }
 
     public String              connectionString() { return connectionString; }
     public String              database()         { return database; }

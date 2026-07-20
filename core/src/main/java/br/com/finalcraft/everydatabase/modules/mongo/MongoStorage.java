@@ -121,6 +121,21 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                                           BackendIdentities.localMachine());
     }
 
+    @Override
+    public SyncParticipation syncParticipation() {
+        return config.syncParticipation();
+    }
+
+    /**
+     * Machine-local when every seed host of the connection string is loopback and no explicit
+     * identity overrides that - the same signal {@link #backendIdentity()} uses.
+     */
+    @Override
+    public boolean isMachineLocalIdentity() {
+        return config.sharedIdentity() == null
+                && BackendIdentities.mongoIsMachineLocal(config.connectionString());
+    }
+
     // ------------------------------------------------------------------
     //  Storage.getStorageLogConfig / setStorageLogConfig
     // ------------------------------------------------------------------

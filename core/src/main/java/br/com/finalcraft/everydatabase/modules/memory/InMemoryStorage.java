@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
 import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
@@ -49,6 +50,8 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
     private final String originId = "mem-" + UUID.randomUUID();
     /** Explicit identity from the config, or {@code null} for the per-instance default. */
     private final String sharedIdentity;
+    /** Transport participation from the config, or {@code RECOMMENDED} when none was given. */
+    private final SyncParticipation syncParticipation;
     /** Per-instance identity: the store lives in this object, so nothing else can name it. */
     private final String instanceIdentity = "mem:" + BackendIdentities.jvmId() + ":" + UUID.randomUUID();
     /** In-process change-feed dispatcher; repositories of this storage emit through it. */
@@ -84,9 +87,10 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
     }
 
     public InMemoryStorage(InMemoryConfig config, StorageLogConfig logConfig) {
-        this.logConfig       = logConfig;
-        this.log             = new StorageLog("memory", () -> this.logConfig);
-        this.sharedIdentity  = config != null ? config.sharedIdentity() : null;
+        this.logConfig         = logConfig;
+        this.log               = new StorageLog("memory", () -> this.logConfig);
+        this.sharedIdentity    = config != null ? config.sharedIdentity() : null;
+        this.syncParticipation = config != null ? config.syncParticipation() : SyncParticipation.RECOMMENDED;
     }
 
     // ------------------------------------------------------------------
@@ -101,6 +105,20 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
     @Override
     public String backendIdentity() {
         return sharedIdentity != null ? sharedIdentity : instanceIdentity;
+    }
+
+    @Override
+    public SyncParticipation syncParticipation() {
+        return syncParticipation;
+    }
+
+    /**
+     * The store is this instance's own heap, so unless an explicit identity declares it shared, no
+     * other instance can reach it - machine-local by construction.
+     */
+    @Override
+    public boolean isMachineLocalIdentity() {
+        return sharedIdentity == null;
     }
 
     @Override

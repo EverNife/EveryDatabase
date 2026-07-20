@@ -5,6 +5,7 @@ import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.StorageKeys;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
@@ -1336,5 +1337,15 @@ public abstract class AbstractStorageTest {
         assertFalse(identity.trim().isEmpty(), "an empty identity would match every other backend");
         assertEquals(identity, storage.backendIdentity(),
             "the identity must not change between calls - a cache-sync stamps it on every event");
+    }
+
+    @Test
+    @Order(332)
+    @DisplayName("[base] capability: syncParticipation defaults to RECOMMENDED and machine-local-ness is stable")
+    void capability_syncParticipationAndMachineLocalAreStable() {
+        assertEquals(SyncParticipation.RECOMMENDED, storage.syncParticipation(),
+            "a config that did not opt into a participation must report the RECOMMENDED default");
+        assertEquals(storage.isMachineLocalIdentity(), storage.isMachineLocalIdentity(),
+            "machine-local classification must not change between calls - it gates transport publishing");
     }
 }
