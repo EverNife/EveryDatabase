@@ -14,7 +14,13 @@ import redis.clients.jedis.JedisClientConfig;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPubSub;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -22,8 +28,27 @@ import java.util.function.Consumer;
 
 /**
  * A Redis/Valkey pub/sub implementation of {@link CacheSyncTransport} using Jedis. It carries
- * cache-invalidation signals between instances over a single channel, decoupled from the data
- * backend - so it works for any backend, including those with no native change feed.
+ * cache-invalidation signals between instances, decoupled from the data backend - so it works for
+ * any backend, including those with no native change feed.
+ *
+ * <h3>One channel per store</h3>
+ * The configured {@link JedisCacheSyncConfig#channel() channel} is a <b>prefix</b>: a signal from a
+ * store goes to {@code <channel>:<backendId>}, and an instance subscribes only to the stores its
+ * bound managers actually read. Two servers sharing a Redis but not a database therefore never even
+ * receive each other's signals - the server routes them apart, instead of every instance receiving
+ * everything and discarding most of it. A signal that names no store (a producer built before store
+ * identities existed) goes to the bare prefix, which every instance also subscribes to, so it still
+ * reaches everyone.
+ *
+ * <p><b>The subscribed set only ever grows.</b> Each {@link #subscribe(Set, ChangeListener)} adds the
+ * channels it names to the live subscription - on a connection already blocked in {@code SUBSCRIBE},
+ * incrementally - but nothing ever removes one. Re-subscribing with a smaller set does not narrow the
+ * scope; only closing the transport does. This mirrors the caller's own lifecycle, where the set of
+ * bound managers likewise never shrinks.
+ *
+ * <p>Store identities are readable by anyone who can run {@code PUBSUB CHANNELS} on the server (they
+ * carry host/path shape, never credentials). Where that matters, isolate the applications on separate
+ * Redis servers or ACL-restricted databases rather than relying on channel names being private.
  *
  * <p>Modeled on the SQL {@code LISTEN/NOTIFY} listener: a daemon thread holds a <b>dedicated</b>
  * connection blocked on {@code SUBSCRIBE} (Jedis blocks the connection for the whole subscription),
@@ -36,9 +61,15 @@ import java.util.function.Consumer;
  */
 public final class JedisCacheSyncTransport implements CacheSyncTransport {
 
+    /** Separates the configured channel prefix from the store identity it is scoped to. */
+    private static final String CHANNEL_SEPARATOR = ":";
+
     private final HostAndPort hostAndPort;
     private final JedisClientConfig clientConfig;     // carries auth (user/password), db, ssl, timeouts
-    private final String channel;
+    private final String channelBase;
+
+    /** Channels the subscriber holds (or will hold on its next connect). Grows only; never shrinks. */
+    private final Set<String> subscribedChannels = new CopyOnWriteArraySet<>();
 
     /** Stable per-instance origin id, stamped on published signals so a consumer can skip its own. */
     private final String originId = "jedis-" + UUID.randomUUID();
@@ -64,7 +95,7 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
     private JedisCacheSyncTransport(JedisCacheSyncConfig config, Consumer<Throwable> errorHandler) {
         this.hostAndPort  = new HostAndPort(config.host(), config.port());
         this.clientConfig = clientConfig(config);
-        this.channel      = config.channel();
+        this.channelBase  = config.channel();
         this.errorHandler = errorHandler;
         this.feed         = new ChangeFeedSupport(errorHandler);
         this.publishPool  = new JedisPool(config.poolConfig(), hostAndPort, clientConfig);
@@ -126,11 +157,37 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         return Boolean.TRUE.equals(lastConnected);
     }
 
+    /**
+     * The channel a signal from {@code backendId} travels on. A signal that names no store falls back
+     * to the bare prefix, which every subscriber also listens to.
+     */
+    static String channelFor(String channelBase, String backendId) {
+        if (backendId == null || backendId.isEmpty()) {
+            return channelBase;
+        }
+        return channelBase + CHANNEL_SEPARATOR + backendId;
+    }
+
+    /**
+     * The channels a subscriber reading {@code backendIds} must hold. Always includes the bare prefix,
+     * so a signal from a producer that names no store still arrives.
+     */
+    static Set<String> channelsFor(String channelBase, Set<String> backendIds) {
+        Set<String> channels = new LinkedHashSet<>();
+        channels.add(channelBase);
+        if (backendIds != null) {
+            for (String backendId : backendIds) {
+                channels.add(channelFor(channelBase, backendId));
+            }
+        }
+        return channels;
+    }
+
     @Override
     public void publish(ChangeEvent event) {
         String payload = ChangePayload.encode(mapper, event);
         try (Jedis jedis = publishPool.getResource()) {
-            jedis.publish(channel, payload);
+            jedis.publish(channelFor(channelBase, event.backendId()), payload);
             publishCount.increment();
         } catch (Exception e) {
             // A failed publish must never break the write it follows; cache freshness self-heals.
@@ -139,15 +196,52 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         }
     }
 
+    /**
+     * Subscribes without naming any store, so only the bare prefix is held: this instance receives
+     * signals that name no store, but none of the per-store traffic. For the scoped form the caller
+     * must say which stores it reads - see {@link #subscribe(Set, ChangeListener)}.
+     */
     @Override
     public ChangeSubscription subscribe(ChangeListener listener) {
+        return subscribe(Collections.emptySet(), listener);
+    }
+
+    @Override
+    public ChangeSubscription subscribe(Set<String> backendIds, ChangeListener listener) {
         if (closed) {
             // Fail fast instead of returning a live-looking subscription that never delivers.
             throw new IllegalStateException("transport is closed");
         }
         ChangeSubscription subscription = feed.subscribe(listener);
-        ensureSubscriberStarted();
+        widenSubscription(channelsFor(channelBase, backendIds));
         return subscription;
+    }
+
+    /**
+     * Adds any channel of {@code wanted} not held yet, then makes sure the subscriber is running. When
+     * the connection is already blocked in {@code SUBSCRIBE}, the new channels are added to it in
+     * place; otherwise the (re)connect picks them up from the set, which it always reads fresh.
+     */
+    private synchronized void widenSubscription(Set<String> wanted) {
+        List<String> added = new ArrayList<>();
+        for (String channel : wanted) {
+            if (subscribedChannels.add(channel)) {
+                added.add(channel);
+            }
+        }
+        // Publishing the set before reading pubSub is what makes this safe against the subscriber
+        // thread, which does the opposite: it publishes pubSub before reading the set. Either the
+        // connect sees the new channels, or it is already live and gets them here - never neither.
+        JedisPubSub ps = pubSub;
+        if (!added.isEmpty() && ps != null) {
+            try {
+                ps.subscribe(added.toArray(new String[0]));
+            } catch (Exception e) {
+                // The channels are already in the set, so the next reconnect subscribes them anyway.
+                reportError(e);
+            }
+        }
+        ensureSubscriberStarted();
     }
 
     @Override
@@ -204,7 +298,9 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                 };
                 pubSub = ps;
 
-                jedis.subscribe(ps, channel);   // BLOCKS until unsubscribe() or a dropped connection
+                // Read the channels AFTER publishing pubSub, so a widenSubscription() racing this
+                // connect either lands in the array below or finds a live pubSub to add itself to.
+                jedis.subscribe(ps, currentChannels());   // BLOCKS until unsubscribe() or a dropped connection
                 if (running) {
                     // subscribe() returned WITHOUT throwing while still running: a server-side
                     // unsubscribe/RESET drained the last channel. Back off so a server that keeps doing
@@ -230,6 +326,14 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                 pubSub = null;
             }
         }
+    }
+
+    /** The channels to (re)subscribe on connect; the bare prefix alone if nothing was named yet. */
+    private String[] currentChannels() {
+        if (subscribedChannels.isEmpty()) {
+            return new String[] { channelBase };
+        }
+        return subscribedChannels.toArray(new String[0]);
     }
 
     private void dispatch(String payload) {

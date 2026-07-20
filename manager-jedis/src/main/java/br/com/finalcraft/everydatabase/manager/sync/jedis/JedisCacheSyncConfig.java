@@ -22,16 +22,20 @@ import redis.clients.jedis.JedisPoolConfig;
  *         .build();
  * }</pre>
  *
- * <p>{@link #channel()} is the pub/sub channel every collection publishes to; the default is
- * {@value #DEFAULT_CHANNEL}. Pub/sub channels are <b>global per server</b> (not scoped by database
- * index), so when several independent applications share one server, give each its own channel via
- * {@link Builder#channel(String)} / {@link #withChannel(String)} so their signals do not cross.
+ * <p>{@link #channel()} is the <b>prefix</b> of the pub/sub channels this application uses; the
+ * default is {@value #DEFAULT_CHANNEL}. A signal is published to {@code <channel>:<backendId>}, one
+ * channel per data store, so an instance receives only the stores it reads (a signal that names no
+ * store goes to the bare prefix, which every instance also listens to). Pub/sub channels are
+ * <b>global per server</b> (not scoped by database index), so when several independent applications
+ * share one server, give each its own prefix via {@link Builder#channel(String)} /
+ * {@link #withChannel(String)} so their signals do not cross - and pick prefixes where none is a
+ * prefix of another, since the store identity is appended in plain text.
  */
 public final class JedisCacheSyncConfig {
 
     /** Default Redis/Valkey port. */
     public static final int DEFAULT_PORT = 6379;
-    /** Default pub/sub channel for cache-sync signals. */
+    /** Default pub/sub channel prefix for cache-sync signals. */
     public static final String DEFAULT_CHANNEL = "everydatabase:changes";
     /** Default connect/socket timeout (matches Jedis's own default). */
     public static final int DEFAULT_TIMEOUT_MS = 2000;
@@ -76,7 +80,7 @@ public final class JedisCacheSyncConfig {
         this(builder(host, port).password(password).database(database).channel(channel));
     }
 
-    /** Returns a copy of these settings with a different channel. */
+    /** Returns a copy of these settings with a different channel prefix. */
     public JedisCacheSyncConfig withChannel(String newChannel) {
         return toBuilder().channel(newChannel).build();
     }
@@ -141,6 +145,7 @@ public final class JedisCacheSyncConfig {
         public Builder password(String password)      { this.password = password; return this; }
         public Builder database(int database)         { this.database = database; return this; }
 
+        /** The prefix of this application's pub/sub channels; see the class javadoc. */
         public Builder channel(String channel) {
             if (channel == null || channel.isEmpty()) {
                 throw new IllegalArgumentException("channel must not be null/empty");

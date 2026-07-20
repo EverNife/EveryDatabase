@@ -4,16 +4,22 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for the Jedis transport that need <b>no</b> server: config defaults/builder and the
- * closed-transport guard. (The end-to-end pub/sub contract lives in {@link AbstractJedisCacheSyncTest}
- * and its Valkey/Redis subclasses, which self-skip without Docker.)
+ * Unit tests for the Jedis transport that need <b>no</b> server: config defaults/builder, the
+ * per-store channel derivation, and the closed-transport guard. (The end-to-end pub/sub contract lives
+ * in {@link AbstractJedisCacheSyncTest} and its Valkey/Redis subclasses, which self-skip without
+ * Docker.)
  */
 @DisplayName("JedisCacheSyncTransport - unit (no server)")
 class JedisCacheSyncTransportTest {
@@ -74,6 +80,40 @@ class JedisCacheSyncTransportTest {
         } finally {
             transport.close();
         }
+    }
+
+    @Test
+    void a_signal_travels_on_the_channel_of_the_store_it_came_from() {
+        assertEquals("app:changes:sql:jdbc:mysql://db.internal:3306/game",
+                JedisCacheSyncTransport.channelFor("app:changes", "sql:jdbc:mysql://db.internal:3306/game"));
+        assertEquals("app:changes:memory:node-7",
+                JedisCacheSyncTransport.channelFor("app:changes", "memory:node-7"));
+        // Two applications keep their own prefix, so the same store never shares a channel across them.
+        assertNotEquals(JedisCacheSyncTransport.channelFor("app-a", "memory:node-7"),
+                JedisCacheSyncTransport.channelFor("app-b", "memory:node-7"));
+    }
+
+    @Test
+    void a_signal_naming_no_store_travels_on_the_bare_prefix() {
+        assertEquals("app:changes", JedisCacheSyncTransport.channelFor("app:changes", null));
+        assertEquals("app:changes", JedisCacheSyncTransport.channelFor("app:changes", ""));
+    }
+
+    @Test
+    void a_subscriber_holds_the_bare_prefix_plus_one_channel_per_store() {
+        // Nothing named yet: only the prefix, so a producer that names no store still reaches us.
+        assertEquals(Collections.singleton("app"),
+                JedisCacheSyncTransport.channelsFor("app", Collections.emptySet()));
+
+        assertEquals(new LinkedHashSet<>(Arrays.asList("app", "app:store-a")),
+                JedisCacheSyncTransport.channelsFor("app", Collections.singleton("store-a")));
+
+        assertEquals(new LinkedHashSet<>(Arrays.asList("app", "app:store-a", "app:store-b")),
+                JedisCacheSyncTransport.channelsFor("app", new LinkedHashSet<>(Arrays.asList("store-a", "store-b"))));
+
+        // A store the instance does not read contributes no channel: that is the traffic saving.
+        assertFalse(JedisCacheSyncTransport.channelsFor("app", Collections.singleton("store-a"))
+                .contains("app:store-b"));
     }
 
     @Test
