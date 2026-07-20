@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.manager.sync;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 
 /**
  * Fail-fast guard for the one misrouting optimistic locking cannot catch by itself: a versioned
@@ -43,5 +44,31 @@ public final class SyncBindGuard {
                 + " last-write-wins). With multi-instance writes intended, concurrent writes would"
                 + " silently drop one side. Route it to an enforcing backend (MySQL/MariaDB,"
                 + " PostgreSQL, MongoDB), or drop the multi-instance intent.");
+    }
+
+    /**
+     * Throws when a store asks to {@link SyncParticipation#ALWAYS} publish on a transport but its
+     * identity is machine-local - it would publish onto a per-store channel no other machine
+     * subscribes to, so the signal is silently lost. Otherwise a no-op.
+     *
+     * <p>Unlike {@link #check}, this is not a check the consumer opts into: {@code CacheSync} calls
+     * it automatically while wiring the publish hook, because the fatal combination is entirely about
+     * what {@code CacheSync} is about to do (publish or not) and all the inputs are available exactly
+     * there. A machine-local store with an explicit {@code sharedIdentity} is not machine-local by
+     * this test (the operator declared it shareable), so that combination is allowed through.
+     *
+     * @param what    a human-readable id of the entity/collection being bound (for the message)
+     * @param storage the backend it is being bound to
+     * @throws IllegalStateException on {@code ALWAYS} + machine-local identity
+     */
+    public static void checkParticipation(String what, Storage storage) {
+        if (storage.syncParticipation() != SyncParticipation.ALWAYS || !storage.isMachineLocalIdentity()) {
+            return;
+        }
+        throw new IllegalStateException(what + " sets syncParticipation=ALWAYS but its backend is"
+                + " machine-local (a loopback database, a file directory, or an in-memory store with no"
+                + " sharedIdentity), so it would publish onto a per-store channel no other machine can"
+                + " subscribe to - the signal would be silently lost. Give the backend an explicit"
+                + " sharedIdentity to declare it shared, or use RECOMMENDED/NEVER.");
     }
 }

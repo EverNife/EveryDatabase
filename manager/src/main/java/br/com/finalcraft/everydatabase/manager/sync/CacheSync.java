@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.manager.sync;
 
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
 import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
@@ -511,12 +512,25 @@ public final class CacheSync implements AutoCloseable {
         return backendId + '\u0000' + collection;
     }
 
-    /** Makes {@code binding}'s manager publish a signal to {@code transport} on every local write. */
+    /**
+     * Makes {@code binding}'s manager publish a signal to {@code transport} on every local write -
+     * unless its backend opts out of publishing. A machine-local backend under the default
+     * {@code RECOMMENDED} stays silent (its signal could reach no peer); a {@code NEVER} backend
+     * never publishes; an {@code ALWAYS} machine-local backend without a shared identity fails fast.
+     * Receiving is unaffected either way - it is wired independently of this hook.
+     */
     private <K> void installPublishHook(Binding<K> binding, CacheSyncTransport transport) {
         CachingManager<K, ?> manager = binding.manager;
+        Storage storage = manager.storage();
+        SyncBindGuard.checkParticipation(manager.collection(), storage);
+        SyncParticipation participation = storage.syncParticipation();
+        if (participation == SyncParticipation.NEVER
+                || (participation == SyncParticipation.RECOMMENDED && storage.isMachineLocalIdentity())) {
+            return;
+        }
         String collection = manager.collection();
         String originId = transport.originId();
-        String backendId = manager.storage().backendIdentity();
+        String backendId = storage.backendIdentity();
         manager.setLocalWriteListener((op, key) ->
                 transport.publish(new ChangeEvent(collection, key.toString(), op, ChangeEvent.UNKNOWN_VERSION,
                         originId, backendId)));

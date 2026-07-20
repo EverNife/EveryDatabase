@@ -5,6 +5,7 @@ import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.Storages;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
@@ -278,7 +279,9 @@ class CacheSyncTest {
 
     @Test
     void via_transport_publishes_a_signal_on_each_local_write() {
-        InMemoryStorage storage = Storages.createInMemory();
+        // A shareable store: a machine-local one under the RECOMMENDED default would not publish
+        // (proven separately below), which is not what this test is about - it pins the publish plumbing.
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("store-pub"));
         storage.init().join();
         RefRegistry registry = new RefRegistry();
         CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
@@ -731,6 +734,119 @@ class CacheSyncTest {
             cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
 
             assertEquals("store-a", transport.published.get(0).backendId());
+        }
+        storage.close().join();
+    }
+
+    // ------------------------------------------------------------------
+    //  Participation tri-state: which stores publish, and that none of it touches receiving
+    // ------------------------------------------------------------------
+
+    /** Builds a manager over the given in-memory config, wires it through a fake transport. */
+    private CacheSync bindOver(InMemoryStorage storage, FakeTransport transport,
+                               CachingManager<UUID, Guild> cache) {
+        return CacheSync.attach(storage).via(transport).bind(cache).start();
+    }
+
+    private CachingManager<UUID, Guild> guildManager(InMemoryStorage storage, String collection) {
+        RefRegistry registry = new RefRegistry();
+        return new CachingManager<>(guildDescriptor(registry, collection), storage, CachePolicy.always(), registry);
+    }
+
+    @Test
+    void recommended_default_does_not_publish_on_a_machine_local_backend() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig());   // machine-local, RECOMMENDED
+        storage.init().join();
+        CachingManager<UUID, Guild> cache = guildManager(storage, "guilds");
+        FakeTransport transport = new FakeTransport();
+        try (CacheSync sync = bindOver(storage, transport, cache)) {
+            cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
+            assertTrue(transport.published.isEmpty(),
+                    "a machine-local store under RECOMMENDED must not publish - no peer could match it");
+        }
+        storage.close().join();
+    }
+
+    @Test
+    void recommended_default_publishes_on_a_shareable_backend() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("shared-x"));   // shareable
+        storage.init().join();
+        CachingManager<UUID, Guild> cache = guildManager(storage, "guilds");
+        FakeTransport transport = new FakeTransport();
+        try (CacheSync sync = bindOver(storage, transport, cache)) {
+            cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
+            assertEquals(1, transport.published.size(),
+                    "a shareable store keeps publishing under the default - today's behaviour, preserved");
+        }
+        storage.close().join();
+    }
+
+    @Test
+    void always_with_a_shared_identity_publishes_and_does_not_throw() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("shared-x", SyncParticipation.ALWAYS));
+        storage.init().join();
+        CachingManager<UUID, Guild> cache = guildManager(storage, "guilds");
+        FakeTransport transport = new FakeTransport();
+        assertDoesNotThrow(() -> {
+            try (CacheSync sync = bindOver(storage, transport, cache)) {
+                cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
+                assertEquals(1, transport.published.size(), "ALWAYS on a shareable store publishes");
+            }
+        });
+        storage.close().join();
+    }
+
+    @Test
+    void always_on_a_machine_local_backend_without_shared_identity_fails_fast_at_bind() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig(null, SyncParticipation.ALWAYS));
+        storage.init().join();
+        CachingManager<UUID, Guild> cache = guildManager(storage, "guilds");
+        FakeTransport transport = new FakeTransport();
+
+        IllegalStateException fatal = assertThrows(IllegalStateException.class, () ->
+                CacheSync.attach(storage).via(transport).bind(cache).start());
+        assertTrue(fatal.getMessage().contains("guilds"), "the message names the collection");
+        assertTrue(fatal.getMessage().contains("sharedIdentity"), "the message points at the fix");
+        assertTrue(transport.published.isEmpty(), "nothing was published before the failure");
+        storage.close().join();
+    }
+
+    @Test
+    void never_does_not_publish_even_on_a_shareable_backend() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("shared-x", SyncParticipation.NEVER));
+        storage.init().join();
+        CachingManager<UUID, Guild> cache = guildManager(storage, "guilds");
+        FakeTransport transport = new FakeTransport();
+        try (CacheSync sync = bindOver(storage, transport, cache)) {
+            cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
+            assertTrue(transport.published.isEmpty(), "NEVER must not publish, shareable or not");
+        }
+        storage.close().join();
+    }
+
+    @Test
+    void a_non_publishing_manager_still_receives_and_invalidates() {
+        // NEVER on a shareable store: it must not publish, but it MUST still receive - suppressing
+        // publish is not suppressing subscribe.
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("shared-x", SyncParticipation.NEVER));
+        storage.init().join();
+        CachingManager<UUID, Guild> cache = guildManager(storage, "guilds");
+        FakeTransport transport = new FakeTransport();
+        UUID id = UUID.randomUUID();
+        try (CacheSync sync = bindOver(storage, transport, cache)) {
+            cache.saveAndCache(new Guild(id, "cached")).join();
+            assertTrue(cache.peek(id).isPresent());
+            assertTrue(transport.published.isEmpty(), "NEVER does not publish its own write");
+
+            // A foreign instance publishes for the same store+collection: this manager invalidates.
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 2, "other-instance", "shared-x"));
+            assertFalse(cache.peek(id).isPresent(), "a non-publishing manager still receives and invalidates");
+
+            // And a foreign delete evicts.
+            cache.saveAndCache(new Guild(id, "again")).join();
+            assertTrue(cache.peek(id).isPresent());
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.DELETE, 3, "other-instance", "shared-x"));
+            assertFalse(cache.peek(id).isPresent(), "a non-publishing manager still receives and evicts");
         }
         storage.close().join();
     }

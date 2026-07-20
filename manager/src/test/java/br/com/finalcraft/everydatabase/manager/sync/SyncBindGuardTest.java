@@ -5,7 +5,9 @@ import br.com.finalcraft.everydatabase.HealthStatus;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.Storages;
+import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
+import br.com.finalcraft.everydatabase.modules.memory.InMemoryConfig;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.manager.testdata.Bank;
 import br.com.finalcraft.everydatabase.manager.testdata.Quest;
@@ -116,5 +118,58 @@ class SyncBindGuardTest {
                 SyncBindGuard.check("banks", plainDescriptor(), enforcingStorage(), true));
         assertDoesNotThrow(() ->
                 SyncBindGuard.check("banks", plainDescriptor(), enforcingStorage(), false));
+    }
+
+    // ------------------------------------------------------------------
+    //  checkParticipation: the ALWAYS + machine-local fail-fast
+    // ------------------------------------------------------------------
+
+    /** A storage answering only the two participation signals; everything else refuses. */
+    private static Storage participationStorage(SyncParticipation participation, boolean machineLocal) {
+        return new Storage() {
+            @Override public SyncParticipation syncParticipation() { return participation; }
+            @Override public boolean isMachineLocalIdentity() { return machineLocal; }
+            @Override public CompletableFuture<Void> init() { throw new UnsupportedOperationException(); }
+            @Override public CompletableFuture<Void> close() { throw new UnsupportedOperationException(); }
+            @Override public CompletableFuture<HealthStatus> health() { throw new UnsupportedOperationException(); }
+            @Override public <K, V> Repository<K, V> repository(EntityDescriptor<K, V> d) { throw new UnsupportedOperationException(); }
+            @Override public StorageLogConfig getStorageLogConfig() { throw new UnsupportedOperationException(); }
+            @Override public Storage setStorageLogConfig(StorageLogConfig config) { throw new UnsupportedOperationException(); }
+        };
+    }
+
+    @Test
+    void always_on_a_machine_local_backend_without_shared_identity_is_refused() {
+        IllegalStateException fatal = assertThrows(IllegalStateException.class, () ->
+                SyncBindGuard.checkParticipation("guilds", participationStorage(SyncParticipation.ALWAYS, true)));
+
+        assertTrue(fatal.getMessage().contains("guilds"),
+                "the message must name the collection being bound");
+        assertTrue(fatal.getMessage().contains("sharedIdentity"),
+                "the message must point at the fix - declaring a shared identity");
+    }
+
+    @Test
+    void always_on_a_machine_local_backend_with_shared_identity_binds() {
+        // A real InMemory with a sharedIdentity reports isMachineLocalIdentity() == false, so ALWAYS
+        // is legitimate - the operator declared the store shareable.
+        Storage shared = Storages.createInMemory(new InMemoryConfig("shared-x", SyncParticipation.ALWAYS));
+        assertFalse(shared.isMachineLocalIdentity(), "a shared identity must make the store shareable");
+        assertDoesNotThrow(() -> SyncBindGuard.checkParticipation("guilds", shared));
+    }
+
+    @Test
+    void always_on_a_shareable_backend_binds() {
+        assertDoesNotThrow(() ->
+                SyncBindGuard.checkParticipation("guilds", participationStorage(SyncParticipation.ALWAYS, false)));
+    }
+
+    @Test
+    void recommended_and_never_never_fail_regardless_of_machine_local_ness() {
+        // The fail-fast is exclusive to ALWAYS: every other participation binds under either identity.
+        for (SyncParticipation p : new SyncParticipation[]{SyncParticipation.RECOMMENDED, SyncParticipation.NEVER}) {
+            assertDoesNotThrow(() -> SyncBindGuard.checkParticipation("guilds", participationStorage(p, true)));
+            assertDoesNotThrow(() -> SyncBindGuard.checkParticipation("guilds", participationStorage(p, false)));
+        }
     }
 }
