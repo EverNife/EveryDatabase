@@ -30,6 +30,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -176,7 +177,7 @@ public abstract class AbstractMultiBackendJedisCacheSyncTest {
         if (mongoReachable(mongoUrl)) {
             String mongoId = "mbex-mongo-" + suffix;
             backends.add(new Backend("mongo",
-                    () -> new MongoStorage(new MongoConfig(mongoUrl, "everydatabase_mbex", java.util.Optional.empty(), mongoId))));
+                    () -> new MongoStorage(new MongoConfig(mongoUrl, "everydatabase_mbex", Optional.empty(), mongoId))));
         }
 
         return backends;

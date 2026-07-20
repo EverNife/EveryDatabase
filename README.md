@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-1.0.9-informational)
+![Version](https://img.shields.io/badge/version-1.1.0-informational)
 
 </div>
 
@@ -87,10 +87,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.9'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.9'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.1.0'
 }
 ```
 
@@ -98,13 +98,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.9'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.0.9') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.1.0') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -124,7 +124,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.0.9</version>
+  <version>1.1.0</version>
 </dependency>
 ```
 
@@ -253,7 +253,7 @@ Discover them with `instanceof` — the compiler stops you from using transactio
 
 > **Codec tip:** `new JacksonJsonCodec<>(Type.class)` emits **compact** JSON (smallest payload — what a database wants). Use `JacksonJsonCodec.pretty(Type.class)` for indented, human-readable output — handy with `LocalFileStorage` when you want to read the files by eye.
 
-> **Default mapper (`JacksonConfig`):** the built-in codecs are batteries-included — the `java.time` and `Optional` modules registered, dates as **ISO-8601** text (not epochs), map entries in **canonical key order** (deterministic, diff-friendly bytes), and unknown properties **tolerated** on read (a field removed in newer code won't break old data). Need a custom `ObjectMapper`? Pass it to `new JacksonJsonCodec<>(Type.class, mapper)`, or apply a profile to your own: `JacksonConfig.storageSafe(mapper)` (the default) or `JacksonConfig.compact(mapper)` (same, but **drops null/absent** via `NON_ABSENT`). Every profile shares one frozen *read* contract, so any profile reads what any other wrote.
+> **Default mapper (`JacksonConfig`):** the built-in codecs are batteries-included — the `java.time` and `Optional` modules registered, dates as **ISO-8601** text (not epochs), `Map` entries written in **insertion order** (no profile reorders them by key), and unknown properties **tolerated** on read (a field removed in newer code won't break old data). Need a custom `ObjectMapper`? Pass it to `new JacksonJsonCodec<>(Type.class, mapper)`, or apply a profile to your own: `JacksonConfig.storageSafe(mapper)` (the default) or `JacksonConfig.compact(mapper)` (same, but **drops null/absent** via `NON_ABSENT`). Every profile shares one frozen *read* contract, so any profile reads what any other wrote.
 
 > **Collection names** must match `^[a-zA-Z][a-zA-Z0-9_]*$` — the safe intersection of identifier rules across every backend (no quoting ever needed). Names starting with `_` are reserved for EveryDatabase-internal metadata, so your collections can never collide with the framework's. That rejection *is* the guarantee: because a regular descriptor can never be named `_anything`, the framework's own metadata needs no escaping and no opt-out. Reserved today: **`_schema_migrations`** (the [migration](#schema-migrations) ledger) and **`_entity_schema_sweeps`** (the [payload-sweep](#entity-payload-schema-everydatabase-manager) marker). The framework builds those through `EntityDescriptor.builder(...).reserved()`, which swaps the rule to `^_[a-zA-Z][a-zA-Z0-9_]*$` — **application code must not call it**: a reserved collection may be read, rewritten or dropped by the framework at any time.
 
@@ -805,8 +805,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.9'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.9'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 ```
 
 ```java
@@ -891,9 +891,9 @@ When several instances share one backend, a write on one leaves the others' cach
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.0.9'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.9'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.9'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.1.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
 ```
 
 ```java
@@ -910,6 +910,8 @@ CacheSync sync = CacheSync.attach(storage)
 ```
 
 Each manager publishes a tiny signal (collection + key + op — **never** entity content) on every local write; the other instances invalidate/evict the matching key. The local in-memory cache stays the source of live objects — the transport only signals *"reload"*, so it never breaks the identity map. Delivery is fire-and-forget (at-least-once, unordered, lossy), so pair it with a `ttl(...)` policy as a self-healing safety net. Only manager-mediated writes (`saveAndCache` / `deleteAndEvict` / `saveAllAndCache`) propagate — a raw `repository().save()` does not. The transport is a generic SPI (`CacheSyncTransport`); Jedis (Redis/Valkey) is the first implementation.
+
+Routing is scoped by **physical store**, not just collection name: every `Storage` has a stable `backendIdentity()`, so an event only invalidates caches that actually share the same store, and the Jedis channel is per-identity (`<channelBase>:<backendId>`). A `sharedIdentity(String)` override on every `*Config`, plus a `SyncParticipation` tri-state (`RECOMMENDED`/`ALWAYS`/`NEVER`), control this. **One gotcha when simulating "two instances" over the same local backend in dev/test:** under the default `RECOMMENDED`, a machine-local backend (H2 `mem:`, local files, SQL/Mongo on `localhost`) does **not** publish on the transport — declare the **same** `sharedIdentity` on both processes (or `syncParticipation=ALWAYS`, which then requires a `sharedIdentity`) so they count as the same store. Full details on the **[Cross-Process Cache Sync](https://github.com/EverNife/EveryDatabase/wiki/Cross-Process-Cache-Sync)** wiki page.
 
 ---
 

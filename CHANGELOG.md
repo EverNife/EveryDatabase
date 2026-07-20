@@ -6,6 +6,62 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 `everydatabase-manager` and `everydatabase-manager-jedis` under the group
 `br.com.finalcraft.everydatabase`.
 
+## [1.1.0] — 2026-07-20
+
+Two independent correctness fixes, each verified against the running code before it
+became a change: `Map` iteration order is no longer destroyed on write, and the
+pub/sub cache-sync transport no longer cross-invalidates caches across unrelated
+physical stores.
+
+### Changed
+- **Map insertion order is now preserved by default in every Jackson codec profile.**
+  `JacksonConfig` no longer enables `SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS`
+  on any profile (`baseReadContract`/`storageSafe`/`compact`), so a `Map` is written
+  in the order it iterates instead of being reordered by key. The previous default
+  silently reordered any `Comparable`-keyed map (and `@JsonAnyGetter` output) on the
+  first write.
+
+  > **⚠️ Data note:** data already written under the old default — with its `Map`
+  > order reshuffled — is **irrecoverable**. The original iteration order was never
+  > persisted anywhere, so this fix stops the loss from the next write onward; it does
+  > not restore order lost in rows saved before the upgrade.
+
+### Removed
+- The `JacksonConfig.canonicalMapOrder` helper was removed entirely. EveryDatabase no
+  longer offers canonical (key-sorted) `Map` serialization in any form — not as a
+  default, not as an opt-in profile. A consumer who wants key-sorted bytes enables
+  `ORDER_MAP_ENTRIES_BY_KEYS` on their own `ObjectMapper` and passes it to the codec
+  (`new JacksonJsonCodec<>(Type.class, mapper)`), owning the consequences.
+
+### Added
+- **Backend identity — the pub/sub cache-sync transport now scopes by physical store.**
+  Every `Storage` answers `backendIdentity()` (a `default` method, following the same
+  idiom as `enforcesOptimisticLock()`), a stable identity of the physical store that
+  never contains credentials. `CacheSync` routes each event by `(backendId, collection)`
+  so a change only invalidates caches that share the same store, not merely the same
+  collection name. On the Jedis transport the Redis/Valkey channel is now
+  per-identity (`<channelBase>:<backendId>`, with the old `channel()` value becoming the
+  prefix), so the broker itself routes only the traffic a store's subscribers care about.
+  A `ChangeEvent` now carries a nullable `backendId`; a missing one applies to every
+  manager of the collection (backward-compatible routing).
+- **`SyncParticipation` (`RECOMMENDED`/`ALWAYS`/`NEVER`)** and a `sharedIdentity(String)`
+  override on every `*Config` (`SqlConfig`/`MongoConfig`/`LocalFileConfig`/
+  `GroupedFileConfig`/`InMemoryConfig`). `sharedIdentity`, when set, *is* the backend
+  identity — the escape hatch for declaring that two textually different backends (two
+  `localhost:3306`, two file directories) are the same physical store. `syncParticipation`
+  gates only the transport's publish side; `SyncBindGuard.checkParticipation` fails fast
+  at bind time when a machine-local backend declares `ALWAYS` without a `sharedIdentity`.
+
+  > **⚠️ Behavior note (transport pub/sub only):** under the default `RECOMMENDED`,
+  > a **machine-local** backend (SQL/Mongo on `localhost`, H2 `mem:`, any local file
+  > directory) no longer publishes on the pub/sub transport — correct traffic savings
+  > for the common single-process case. Two local processes that sync via Redis/Valkey
+  > over such a backend must now declare the **same** `sharedIdentity` on both, or
+  > `syncParticipation=ALWAYS` (which itself requires a `sharedIdentity` on a
+  > machine-local backend, or the bind fails fast with `IllegalStateException`). The
+  > native change-feed path (Mongo Change Streams, PostgreSQL `LISTEN/NOTIFY`) is
+  > unchanged.
+
 ## [1.0.9] — 2026-07-15
 
 ### Added
