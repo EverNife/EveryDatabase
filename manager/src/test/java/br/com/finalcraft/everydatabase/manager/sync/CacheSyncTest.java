@@ -19,6 +19,7 @@ import br.com.finalcraft.everydatabase.manager.observ.CacheSyncMode;
 import br.com.finalcraft.everydatabase.manager.observ.CacheSyncObserver;
 import br.com.finalcraft.everydatabase.manager.observ.CacheSyncStats;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
+import br.com.finalcraft.everydatabase.modules.memory.InMemoryConfig;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
@@ -519,8 +520,235 @@ class CacheSyncTest {
     }
 
     // ------------------------------------------------------------------
+    //  Routing by physical store: a shared channel is not a shared database
+    // ------------------------------------------------------------------
+
+    @Test
+    void two_instances_of_the_same_store_still_invalidate_each_other() {
+        TransportBus bus = new TransportBus();
+        Instance writer = new Instance("shared-store", "guilds", bus);
+        Instance reader = new Instance("shared-store", "guilds", bus);
+
+        UUID id = UUID.randomUUID();
+        writer.cache.saveAndCache(new Guild(id, "v1")).join();
+        reader.cache.saveAndCache(new Guild(id, "v1")).join();
+        assertTrue(reader.cache.peek(id).isPresent());
+
+        try (CacheSync w = writer.start(); CacheSync r = reader.start()) {
+            writer.cache.saveAndCache(new Guild(id, "v2")).join();
+
+            assertFalse(reader.cache.peek(id).isPresent(),
+                "both managers read the same physical store, so the write must invalidate the other cache");
+        }
+        writer.close();
+        reader.close();
+    }
+
+    @Test
+    void a_write_in_another_store_does_not_invalidate_this_one() {
+        TransportBus bus = new TransportBus();
+        Instance writer = new Instance("store-a", "guilds", bus);
+        Instance reader = new Instance("store-b", "guilds", bus);
+
+        UUID id = UUID.randomUUID();
+        reader.cache.saveAndCache(new Guild(id, "mine")).join();
+        assertTrue(reader.cache.peek(id).isPresent());
+
+        try (CacheSync w = writer.start(); CacheSync r = reader.start()) {
+            writer.cache.saveAndCache(new Guild(id, "theirs")).join();
+
+            assertTrue(reader.cache.peek(id).isPresent(),
+                "the two managers share a channel and a collection name, but not a database");
+        }
+        writer.close();
+        reader.close();
+    }
+
+    @Test
+    void a_write_in_a_different_kind_of_backend_does_not_invalidate_this_one() {
+        TransportBus bus = new TransportBus();
+        Instance sql = new Instance("sql:jdbc:mariadb://db.example.com:3306/mc", "guilds", bus);
+        Instance mongo = new Instance("mongo:mongodb://mongo.example.com:27017/mc", "guilds", bus);
+
+        UUID id = UUID.randomUUID();
+        mongo.cache.saveAndCache(new Guild(id, "mongo")).join();
+
+        try (CacheSync a = sql.start(); CacheSync b = mongo.start()) {
+            sql.cache.saveAndCache(new Guild(id, "sql")).join();
+
+            assertTrue(mongo.cache.peek(id).isPresent(),
+                "the same collection name in two kinds of backend is two different collections");
+        }
+        sql.close();
+        mongo.close();
+    }
+
+    @Test
+    void a_delete_in_another_store_does_not_evict_this_cache() {
+        TransportBus bus = new TransportBus();
+        Instance writer = new Instance("store-a", "guilds", bus);
+        Instance reader = new Instance("store-b", "guilds", bus);
+
+        UUID id = UUID.randomUUID();
+        reader.cache.saveAndCache(new Guild(id, "mine")).join();
+
+        try (CacheSync w = writer.start(); CacheSync r = reader.start()) {
+            writer.cache.saveAndCache(new Guild(id, "theirs")).join();
+            writer.cache.deleteAndEvict(id).join();
+
+            assertTrue(reader.cache.peek(id).isPresent(),
+                "an eviction driven by another database would destroy a live cell for good");
+        }
+        writer.close();
+        reader.close();
+    }
+
+    @Test
+    void a_delete_in_the_same_store_still_evicts() {
+        TransportBus bus = new TransportBus();
+        Instance writer = new Instance("shared-store", "guilds", bus);
+        Instance reader = new Instance("shared-store", "guilds", bus);
+
+        UUID id = UUID.randomUUID();
+        reader.cache.saveAndCache(new Guild(id, "v1")).join();
+
+        try (CacheSync w = writer.start(); CacheSync r = reader.start()) {
+            writer.cache.saveAndCache(new Guild(id, "v1")).join();
+            writer.cache.deleteAndEvict(id).join();
+
+            assertFalse(reader.cache.peek(id).isPresent(), "the row really is gone from the shared store");
+        }
+        writer.close();
+        reader.close();
+    }
+
+    @Test
+    void start_accepts_the_same_collection_name_on_different_backends() {
+        InMemoryStorage storeA = Storages.createInMemory(new InMemoryConfig("store-a"));
+        InMemoryStorage storeB = Storages.createInMemory(new InMemoryConfig("store-b"));
+        storeA.init().join();
+        storeB.init().join();
+        RefRegistry regA = new RefRegistry();
+        RefRegistry regB = new RefRegistry();
+        CachingManager<UUID, Guild> a = new CachingManager<>(guildDescriptor(regA, "guilds"), storeA, CachePolicy.always(), regA);
+        CachingManager<UUID, Guild> b = new CachingManager<>(guildDescriptor(regB, "guilds"), storeB, CachePolicy.always(), regB);
+
+        FakeTransport transport = new FakeTransport();
+        // Same collection name, two different databases: an event names the store it came from, so
+        // neither manager can be routed the other's signal - there is nothing ambiguous to reject.
+        try (CacheSync sync = CacheSync.auto().via(transport).bind(a).bind(b).start()) {
+            UUID id = UUID.randomUUID();
+            a.saveAndCache(new Guild(id, "a")).join();
+            b.saveAndCache(new Guild(id, "b")).join();
+
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 1, "other", "store-a"));
+
+            assertFalse(a.peek(id).isPresent(), "the signal names store-a, so manager A is invalidated");
+            assertTrue(b.peek(id).isPresent(), "manager B reads another database and is untouched");
+        }
+
+        storeA.close().join();
+        storeB.close().join();
+    }
+
+    @Test
+    void an_event_naming_no_store_reaches_every_manager_of_that_collection() {
+        InMemoryStorage storeA = Storages.createInMemory(new InMemoryConfig("store-a"));
+        InMemoryStorage storeB = Storages.createInMemory(new InMemoryConfig("store-b"));
+        storeA.init().join();
+        storeB.init().join();
+        RefRegistry regA = new RefRegistry();
+        RefRegistry regB = new RefRegistry();
+        CachingManager<UUID, Guild> a = new CachingManager<>(guildDescriptor(regA, "guilds"), storeA, CachePolicy.always(), regA);
+        CachingManager<UUID, Guild> b = new CachingManager<>(guildDescriptor(regB, "guilds"), storeB, CachePolicy.always(), regB);
+
+        FakeTransport transport = new FakeTransport();
+        try (CacheSync sync = CacheSync.auto().via(transport).bind(a).bind(b).start()) {
+            UUID id = UUID.randomUUID();
+            a.saveAndCache(new Guild(id, "a")).join();
+            b.saveAndCache(new Guild(id, "b")).join();
+
+            // The five-argument form is what every producer written before backend identities emits.
+            transport.deliver(new ChangeEvent("guilds", id.toString(), ChangeOp.SAVE, 1, "other"));
+
+            assertFalse(a.peek(id).isPresent(), "an unattributed event must not be dropped");
+            assertFalse(b.peek(id).isPresent(), "an unattributed event applies to every manager of the collection");
+        }
+
+        storeA.close().join();
+        storeB.close().join();
+    }
+
+    @Test
+    void a_published_signal_carries_the_store_it_happened_in() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("store-a"));
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+        FakeTransport transport = new FakeTransport();
+
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).bind(cache).start()) {
+            cache.saveAndCache(new Guild(UUID.randomUUID(), "v1")).join();
+
+            assertEquals("store-a", transport.published.get(0).backendId());
+        }
+        storage.close().join();
+    }
+
+    // ------------------------------------------------------------------
     //  Test doubles
     // ------------------------------------------------------------------
+
+    /**
+     * One application instance: its own store, its own cache and its own transport endpoint on a
+     * shared bus - the shape of the problem, where several servers share a pub/sub channel without
+     * necessarily sharing a database.
+     */
+    private final class Instance {
+        private final InMemoryStorage storage;
+        private final CachingManager<UUID, Guild> cache;
+        private final CacheSyncTransport endpoint;
+
+        Instance(String backendIdentity, String collection, TransportBus bus) {
+            this.storage = Storages.createInMemory(new InMemoryConfig(backendIdentity));
+            this.storage.init().join();
+            RefRegistry registry = new RefRegistry();
+            this.cache = new CachingManager<>(guildDescriptor(registry, collection), storage,
+                    CachePolicy.always(), registry);
+            this.endpoint = bus.endpoint();
+        }
+
+        CacheSync start() {
+            return CacheSync.attach(storage).via(endpoint).bind(cache).start();
+        }
+
+        void close() {
+            storage.close().join();
+        }
+    }
+
+    /** A pub/sub channel shared by several transport endpoints: what one publishes, all receive. */
+    private static final class TransportBus {
+        private final List<ChangeFeedSupport> endpoints = new ArrayList<>();
+        private final AtomicInteger nextOrigin = new AtomicInteger();
+
+        CacheSyncTransport endpoint() {
+            ChangeFeedSupport feed = new ChangeFeedSupport();
+            endpoints.add(feed);
+            String originId = "bus-endpoint-" + nextOrigin.incrementAndGet();
+            return new CacheSyncTransport() {
+                @Override public String originId() { return originId; }
+                @Override public void publish(ChangeEvent event) {
+                    for (ChangeFeedSupport other : endpoints) {
+                        other.emit(event);
+                    }
+                }
+                @Override public ChangeSubscription subscribe(ChangeListener listener) { return feed.subscribe(listener); }
+                @Override public void onConnectionStateChanged(Consumer<Boolean> listener) { }
+                @Override public void close() { feed.closeAll(); }
+            };
+        }
+    }
 
     /**
      * A {@link ChangeFeedStorage} that delegates real storage to an inner {@link InMemoryStorage}

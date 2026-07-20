@@ -59,7 +59,11 @@ import java.util.function.Function;
  *       wrote it (its cache was already refreshed write-through). {@link #includeOwnOrigin()}
  *       disables the skip (several caches over one storage in one process, or in-process tests). When
  *       the source cannot attribute origin (Mongo oplog) the field is empty and the skip never fires.</li>
- *   <li><b>Route by collection</b> to a bound manager; unmapped collections are ignored.</li>
+ *   <li><b>Route by store and collection</b> to a bound manager; unmapped ones are ignored. An event
+ *       that names the store it came from ({@link ChangeEvent#backendId()}) only reaches managers
+ *       reading that same store, so instances sharing a pub/sub channel without sharing a database
+ *       no longer invalidate - or, worse, evict - each other's caches. An event that names no store
+ *       reaches every manager of that collection, which is what its producer meant.</li>
  *   <li><b>Parse the key</b> back to {@code K} and apply: {@code SAVE -> invalidate}, {@code DELETE ->
  *       evict}. An unparseable key is handed to {@link #onError} and skipped - never thrown into the
  *       source delivery thread.</li>
@@ -364,7 +368,7 @@ public final class CacheSync implements AutoCloseable {
 
     /**
      * Sets up the one explicit transport as the push source for every bound manager (used in both attach
-     * and auto mode; the transport is backend-agnostic and routes by collection).
+     * and auto mode; the transport is backend-agnostic and routes by store and collection).
      */
     private void setupTransport(List<Binding<?>> all) {
         // A transport is a PUSH source: assume it is connected as soon as it is wired, and let the
@@ -461,22 +465,33 @@ public final class CacheSync implements AutoCloseable {
     }
 
     /**
-     * Indexes a group's bindings by collection name, resolving each one's key parser. Rejects a
-     * duplicate collection: events route purely by collection name, so two managers under the same
-     * name would route ambiguously (and one would silently never be invalidated) - fail fast at start.
+     * Indexes a group's bindings by the store they live in plus their collection name, resolving each
+     * one's key parser. Two managers may share a collection name as long as their backends are
+     * different physical stores - a signal names both, so neither routes ambiguously. Only a genuine
+     * duplicate (same store, same collection) is rejected, since there one of the two would silently
+     * never be invalidated.
      */
     private static Map<String, Bound<?>> buildByCollection(List<Binding<?>> groupBindings) {
         Map<String, Bound<?>> byCollection = new HashMap<>();
         for (Binding<?> binding : groupBindings) {
-            String collection = binding.manager.collection();
-            Bound<?> previous = byCollection.putIfAbsent(collection, binding.resolve());
+            Bound<?> bound = binding.resolve();
+            Bound<?> previous = byCollection.putIfAbsent(routeKey(bound.backendId, bound.collection), bound);
             if (previous != null) {
                 throw new IllegalStateException(
-                    "two bound managers share collection '" + collection + "'; cache-sync routes purely "
-                    + "by collection name, so it must be unique across all managers bound to one CacheSync");
+                    "two bound managers share collection '" + bound.collection + "' on the same backend ("
+                    + bound.backendId + "); cache-sync routes by backend and collection, so that pair must "
+                    + "be unique across all managers bound to one CacheSync");
             }
         }
         return byCollection;
+    }
+
+    /**
+     * The routing key of one manager. The separator is a NUL, which neither an identity nor a
+     * collection name can contain, so two different pairs never collapse into one key.
+     */
+    private static String routeKey(String backendId, String collection) {
+        return backendId + '\u0000' + collection;
     }
 
     /** Makes {@code binding}'s manager publish a signal to {@code transport} on every local write. */
@@ -484,8 +499,10 @@ public final class CacheSync implements AutoCloseable {
         CachingManager<K, ?> manager = binding.manager;
         String collection = manager.collection();
         String originId = transport.originId();
+        String backendId = manager.storage().backendIdentity();
         manager.setLocalWriteListener((op, key) ->
-                transport.publish(new ChangeEvent(collection, key.toString(), op, ChangeEvent.UNKNOWN_VERSION, originId)));
+                transport.publish(new ChangeEvent(collection, key.toString(), op, ChangeEvent.UNKNOWN_VERSION,
+                        originId, backendId)));
     }
 
     // ------------------------------------------------------------------
@@ -508,14 +525,21 @@ public final class CacheSync implements AutoCloseable {
         }
     }
 
-    /** A bound manager plus the resolved parser that recovers its key type from the event string key. */
+    /**
+     * A bound manager, the resolved parser that recovers its key type from the event string key, and
+     * the store it reads from - the pair {@code (backendId, collection)} an event is routed by.
+     */
     private static final class Bound<K> {
         private final CachingManager<K, ?> manager;
         private final Function<String, K> keyParser;
+        private final String backendId;
+        private final String collection;
 
         Bound(CachingManager<K, ?> manager, Function<String, K> keyParser) {
             this.manager = manager;
             this.keyParser = keyParser;
+            this.backendId = manager.storage().backendIdentity();
+            this.collection = manager.collection();
         }
 
         boolean apply(ChangeEvent event, Consumer<Throwable> errorHandler) {
@@ -561,12 +585,30 @@ public final class CacheSync implements AutoCloseable {
                     return; // our own write; this cache was already refreshed write-through
                 }
             }
-            Bound<?> bound = byCollection.get(event.collection());
-            if (bound == null) {
-                signalsUnmapped.increment();
+            String backendId = event.backendId();
+            if (backendId != null && !backendId.isEmpty()) {
+                deliver(event, byCollection.get(routeKey(backendId, event.collection())));
                 return;
             }
-            if (bound.apply(event, errorHandler)) {
+            // The producer did not name a store. That is every producer written before the field
+            // existed, and every native feed (already scoped to one storage), so the only safe reading
+            // is the pre-existing one: the event concerns every manager of that collection.
+            boolean delivered = false;
+            for (Bound<?> bound : byCollection.values()) {
+                if (bound.collection.equals(event.collection())) {
+                    deliver(event, bound);
+                    delivered = true;
+                }
+            }
+            if (!delivered) {
+                signalsUnmapped.increment();
+            }
+        }
+
+        private void deliver(ChangeEvent event, Bound<?> bound) {
+            if (bound == null) {
+                signalsUnmapped.increment();
+            } else if (bound.apply(event, errorHandler)) {
                 signalsApplied.increment();
             } else {
                 parseFailures.increment();
