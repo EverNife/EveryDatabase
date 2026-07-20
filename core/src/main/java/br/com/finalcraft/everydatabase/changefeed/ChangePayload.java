@@ -14,15 +14,34 @@ import java.util.function.Consumer;
  *
  * <p>Kept tiny (some transports cap the payload, e.g. a PostgreSQL {@code NOTIFY} is ~8000 bytes):
  * the field names are single letters - {@code c} collection, {@code k} key, {@code op} operation,
- * {@code v} version, {@code o} origin id ({@code o} is omitted when null).
+ * {@code v} version, {@code o} origin id, {@code b} backend identity ({@code o} and {@code b} are
+ * omitted when null).
+ *
+ * <p>Reading is tolerant of a missing {@code b}: a payload written before the field existed decodes
+ * to a {@link ChangeEvent} with no backend identity, which consumers treat as "applies everywhere" -
+ * exactly what such a producer meant.
  */
 public final class ChangePayload {
 
     private ChangePayload() {}
 
-    /** Encodes the event's fields to the compact JSON form. */
+    /** Encodes the event's fields to the compact JSON form, without a backend identity. */
     public static String encode(ObjectMapper mapper, String collection, String key,
                                 ChangeOp op, long version, String originId) {
+        return write(mapper, node(mapper, collection, key, op, version, originId, null));
+    }
+
+    /**
+     * Convenience overload that encodes a whole {@link ChangeEvent}, including its backend identity
+     * when the event carries one.
+     */
+    public static String encode(ObjectMapper mapper, ChangeEvent event) {
+        return write(mapper, node(mapper, event.collection(), event.key(), event.op(),
+                                  event.version(), event.originId(), event.backendId()));
+    }
+
+    private static ObjectNode node(ObjectMapper mapper, String collection, String key,
+                                   ChangeOp op, long version, String originId, String backendId) {
         ObjectNode node = mapper.createObjectNode();
         node.put("c", collection);
         node.put("k", key);
@@ -31,16 +50,18 @@ public final class ChangePayload {
         if (originId != null) {
             node.put("o", originId);
         }
+        if (backendId != null) {
+            node.put("b", backendId);
+        }
+        return node;
+    }
+
+    private static String write(ObjectMapper mapper, ObjectNode node) {
         try {
             return mapper.writeValueAsString(node);
         } catch (Exception e) {
             throw new IllegalStateException("failed to encode change payload", e);
         }
-    }
-
-    /** Convenience overload that encodes a whole {@link ChangeEvent}. */
-    public static String encode(ObjectMapper mapper, ChangeEvent event) {
-        return encode(mapper, event.collection(), event.key(), event.op(), event.version(), event.originId());
     }
 
     /** Parses a payload back to a {@link ChangeEvent}, or {@code null} if it is malformed. */
@@ -67,7 +88,8 @@ public final class ChangePayload {
             ChangeOp op = ChangeOp.valueOf(opName);
             long version = node.path("v").asLong(ChangeEvent.UNKNOWN_VERSION);
             String origin = node.path("o").asText(null);
-            return new ChangeEvent(collection, key, op, version, origin);
+            String backendId = node.path("b").asText(null);
+            return new ChangeEvent(collection, key, op, version, origin, backendId);
         } catch (Exception e) {
             if (onInvalid != null) {
                 onInvalid.accept(e.getClass().getSimpleName()

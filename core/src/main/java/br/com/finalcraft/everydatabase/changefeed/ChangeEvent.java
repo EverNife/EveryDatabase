@@ -25,6 +25,10 @@ import java.util.function.Function;
  *   <li>{@link #originId()} - the {@link ChangeFeedStorage#originId()} of the instance that
  *       produced the change, or {@code null}/empty when the source cannot attribute it (a Mongo
  *       oplog event, a database trigger). Lets a consumer skip its own writes.</li>
+ *   <li>{@link #backendId()} - the identity of the physical store the change happened in
+ *       ({@code Storage.backendIdentity()}), or {@code null} when the source does not stamp it. Lets
+ *       a consumer reading a shared channel ignore a change that happened in a store it does not
+ *       use. A native feed leaves it {@code null}: it is already scoped to one storage.</li>
  * </ul>
  *
  * <p>Carries counts/identifiers, never entity values - the same privacy posture as the logging
@@ -40,8 +44,10 @@ public final class ChangeEvent {
     private final ChangeOp op;
     private final long version;
     private final String originId;
+    private final String backendId;
 
-    public ChangeEvent(String collection, String key, ChangeOp op, long version, String originId) {
+    public ChangeEvent(String collection, String key, ChangeOp op, long version, String originId,
+                       String backendId) {
         this.collection = Objects.requireNonNull(collection, "collection");
         this.key        = Objects.requireNonNull(key, "key");
         this.op         = Objects.requireNonNull(op, "op");
@@ -49,6 +55,12 @@ public final class ChangeEvent {
         // consumer ever sees and can reliably test with `version >= 0` for "real version present".
         this.version    = version < UNKNOWN_VERSION ? UNKNOWN_VERSION : version;
         this.originId   = originId;
+        this.backendId  = backendId;
+    }
+
+    /** An event from a source that does not name the store it happened in. */
+    public ChangeEvent(String collection, String key, ChangeOp op, long version, String originId) {
+        this(collection, key, op, version, originId, null);
     }
 
     /**
@@ -81,6 +93,14 @@ public final class ChangeEvent {
     /** The producing instance's origin id, or {@code null}/empty when unattributed. */
     public String originId()   { return originId; }
 
+    /**
+     * The identity of the store the change happened in, or {@code null} when the source does not
+     * stamp one. A consumer that cannot tell which store an event came from must treat it as
+     * relevant to every store it watches - that is the behaviour of every producer written before
+     * the field existed.
+     */
+    public String backendId()  { return backendId; }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -90,12 +110,13 @@ public final class ChangeEvent {
                 && collection.equals(that.collection)
                 && key.equals(that.key)
                 && op == that.op
-                && Objects.equals(originId, that.originId);
+                && Objects.equals(originId, that.originId)
+                && Objects.equals(backendId, that.backendId);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(collection, key, op, version, originId);
+        return Objects.hash(collection, key, op, version, originId, backendId);
     }
 
     @Override
@@ -103,6 +124,7 @@ public final class ChangeEvent {
         return "ChangeEvent{" + op + " " + collection + "/" + key
                 + (version >= 0 ? " v" + version : "")
                 + (originId != null && !originId.isEmpty() ? " from " + originId : "")
+                + (backendId != null && !backendId.isEmpty() ? " at " + backendId : "")
                 + "}";
     }
 }
