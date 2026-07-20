@@ -25,7 +25,11 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -680,6 +684,42 @@ class CacheSyncTest {
     }
 
     @Test
+    void managers_sharing_one_store_scope_the_transport_to_that_single_store() {
+        InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("store-a"));
+        storage.init().join();
+        RefRegistry guildRegistry = new RefRegistry();
+        RefRegistry clanRegistry = new RefRegistry();
+        CachingManager<UUID, Guild> guilds = new CachingManager<>(guildDescriptor(guildRegistry, "guilds"), storage, CachePolicy.always(), guildRegistry);
+        CachingManager<UUID, Guild> clans = new CachingManager<>(guildDescriptor(clanRegistry, "clans"), storage, CachePolicy.always(), clanRegistry);
+
+        FakeTransport transport = new FakeTransport();
+        try (CacheSync sync = CacheSync.auto().via(transport).bind(guilds).bind(clans).start()) {
+            // Two collections, one database: the transport only ever needs signals from that one store.
+            assertEquals(Collections.singleton("store-a"), transport.scopedBackendIds);
+        }
+        storage.close().join();
+    }
+
+    @Test
+    void managers_on_different_stores_scope_the_transport_to_both_of_them() {
+        InMemoryStorage storeA = Storages.createInMemory(new InMemoryConfig("store-a"));
+        InMemoryStorage storeB = Storages.createInMemory(new InMemoryConfig("store-b"));
+        storeA.init().join();
+        storeB.init().join();
+        RefRegistry regA = new RefRegistry();
+        RefRegistry regB = new RefRegistry();
+        CachingManager<UUID, Guild> a = new CachingManager<>(guildDescriptor(regA, "guilds"), storeA, CachePolicy.always(), regA);
+        CachingManager<UUID, Guild> b = new CachingManager<>(guildDescriptor(regB, "clans"), storeB, CachePolicy.always(), regB);
+
+        FakeTransport transport = new FakeTransport();
+        try (CacheSync sync = CacheSync.auto().via(transport).bind(a).bind(b).start()) {
+            assertEquals(new HashSet<>(Arrays.asList("store-a", "store-b")), transport.scopedBackendIds);
+        }
+        storeA.close().join();
+        storeB.close().join();
+    }
+
+    @Test
     void a_published_signal_carries_the_store_it_happened_in() {
         InMemoryStorage storage = Storages.createInMemory(new InMemoryConfig("store-a"));
         storage.init().join();
@@ -779,6 +819,7 @@ class CacheSyncTest {
         private final List<ChangeEvent> published = new ArrayList<>();
         private final ChangeFeedSupport feed = new ChangeFeedSupport();
         private volatile Consumer<Boolean> connectionListener;
+        private volatile Set<String> scopedBackendIds;   // what the caller asked to be scoped to
 
         void deliver(ChangeEvent event) { feed.emit(event); }
         void fireConnectivity(boolean connected) {
@@ -791,6 +832,10 @@ class CacheSyncTest {
         @Override public String originId() { return "fake-transport"; }
         @Override public void publish(ChangeEvent event) { published.add(event); }
         @Override public ChangeSubscription subscribe(ChangeListener listener) { return feed.subscribe(listener); }
+        @Override public ChangeSubscription subscribe(Set<String> backendIds, ChangeListener listener) {
+            this.scopedBackendIds = backendIds;
+            return subscribe(listener);
+        }
         @Override public void onConnectionStateChanged(Consumer<Boolean> listener) { this.connectionListener = listener; }
         @Override public void close() { feed.closeAll(); }
     }

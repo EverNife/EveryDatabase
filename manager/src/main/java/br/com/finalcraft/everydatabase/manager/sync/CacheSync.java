@@ -13,8 +13,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
@@ -393,7 +395,8 @@ public final class CacheSync implements AutoCloseable {
             transport.onConnectionStateChanged(connected -> onTransportConnectivity(connected, fallback));
         }
         Map<String, Bound<?>> byCollection = buildByCollection(all);
-        subscriptions.add(transport.subscribe(new PushGroup(transport.originId(), byCollection)::onChange));
+        subscriptions.add(transport.subscribe(backendIdsOf(byCollection),
+                new PushGroup(transport.originId(), byCollection)::onChange));
         for (Binding<?> binding : all) {
             installPublishHook(binding, transport);
         }
@@ -484,6 +487,20 @@ public final class CacheSync implements AutoCloseable {
             }
         }
         return byCollection;
+    }
+
+    /**
+     * The distinct stores the bound managers read from. A transport able to scope its channel by store
+     * needs this to subscribe to those stores alone; one that cannot simply ignores it.
+     */
+    private static Set<String> backendIdsOf(Map<String, Bound<?>> byCollection) {
+        Set<String> backendIds = new LinkedHashSet<>();
+        for (Bound<?> bound : byCollection.values()) {
+            if (bound.backendId != null && !bound.backendId.isEmpty()) {
+                backendIds.add(bound.backendId);
+            }
+        }
+        return backendIds;
     }
 
     /**

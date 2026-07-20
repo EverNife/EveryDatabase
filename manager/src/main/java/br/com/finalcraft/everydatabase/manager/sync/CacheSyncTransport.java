@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
 import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 
+import java.util.Set;
 import java.util.function.Consumer;
 
 /**
@@ -38,6 +39,25 @@ public interface CacheSyncTransport extends AutoCloseable {
 
     /** Registers {@code listener} to receive signals from the channel. Close the handle to stop delivery. */
     ChangeSubscription subscribe(ChangeListener listener);
+
+    /**
+     * Registers {@code listener} and tells the transport <b>which stores</b> the caller actually reads,
+     * so an implementation able to scope its channel by store can subscribe to those alone instead of
+     * receiving every signal on the bus and discarding most of them.
+     *
+     * <p>{@code backendIds} holds the distinct {@code Storage.backendIdentity()} values of the managers
+     * bound to this transport. It is computed once, when the caller starts, and never recomputed: an
+     * implementation may therefore treat the set it receives as additive - the scope only ever grows
+     * over the life of a transport, it never shrinks.
+     *
+     * <p>The default implementation ignores {@code backendIds} and delegates to
+     * {@link #subscribe(ChangeListener)}, which keeps the single-channel behaviour every transport had
+     * before this method existed. A transport that wants the traffic saving overrides it; one that
+     * cannot scope its channel (or does not care to) is free to leave it alone.
+     */
+    default ChangeSubscription subscribe(Set<String> backendIds, ChangeListener listener) {
+        return subscribe(listener);
+    }
 
     /**
      * Optional: registers a {@code listener} notified when the transport connects ({@code true}) or
