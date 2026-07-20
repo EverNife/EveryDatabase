@@ -12,6 +12,7 @@ import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionScope;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.util.BackendIdentities;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -126,6 +127,22 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     @Override
     public boolean enforcesOptimisticLock() {
         return true;
+    }
+
+    /**
+     * Derived from the JDBC URL alone - never from the credentials, which the URL's user info and
+     * query string are stripped of. A URL naming a routable host identifies the same database from
+     * anywhere; one naming {@code localhost} (or an embedded file) is qualified with a machine
+     * discriminator, so two servers each running their own database behind the same URL do not
+     * claim one identity. Every dialect shares this derivation - the URL's own prefix
+     * ({@code jdbc:mariadb:} vs {@code jdbc:postgresql:}) already keeps them apart.
+     */
+    @Override
+    public String backendIdentity() {
+        String explicit = config.sharedIdentity();
+        return explicit != null
+                ? explicit
+                : BackendIdentities.jdbc("sql", config.jdbcUrl(), BackendIdentities.localMachine());
     }
 
     @Override

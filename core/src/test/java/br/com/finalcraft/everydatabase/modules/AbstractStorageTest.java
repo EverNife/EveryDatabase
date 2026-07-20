@@ -1325,4 +1325,16 @@ public abstract class AbstractStorageTest {
         assertEquals(expectedEnforcesOptimisticLock(), storage.enforcesOptimisticLock(),
             "the capability must report what this backend really does with a stale versioned write");
     }
+
+    @Test
+    @Order(331)
+    @DisplayName("[base] capability: backendIdentity is non-empty and stable for one storage")
+    void capability_backendIdentityIsStable() {
+        String identity = storage.backendIdentity();
+
+        assertNotNull(identity, "every backend must answer an identity");
+        assertFalse(identity.trim().isEmpty(), "an empty identity would match every other backend");
+        assertEquals(identity, storage.backendIdentity(),
+            "the identity must not change between calls - a cache-sync stamps it on every event");
+    }
 }

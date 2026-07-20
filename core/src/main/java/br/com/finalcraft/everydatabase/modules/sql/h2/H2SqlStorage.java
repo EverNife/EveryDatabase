@@ -8,10 +8,12 @@ import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import br.com.finalcraft.everydatabase.modules.sql.SqlRepository;
 import br.com.finalcraft.everydatabase.modules.sql.SqlStorage;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import br.com.finalcraft.everydatabase.util.BackendIdentities;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * H2-backed {@link Storage} that works in all three
@@ -42,8 +44,20 @@ public class H2SqlStorage extends SqlStorage {
         this(config, StorageLogConfig.defaults());
     }
 
+    /**
+     * Identity of an in-memory database, or {@code null} when this instance is file/TCP backed and
+     * the URL derivation applies. An in-memory database lives inside one JVM: two storages on the
+     * same {@code mem:} URL really do share it, while no other process can ever reach it - so the
+     * identity is the URL scoped to this JVM, never a coordinate another process could match.
+     */
+    private final String inMemoryIdentity;
+
     public H2SqlStorage(SqlConfig config, StorageLogConfig logConfig) {
         super(config, logConfig, "h2");
+        String url = config.jdbcUrl() == null ? "" : config.jdbcUrl().toLowerCase(Locale.ROOT);
+        this.inMemoryIdentity = config.sharedIdentity() == null && url.startsWith("jdbc:h2:mem:")
+                ? "h2-mem:" + BackendIdentities.jvmId() + ":" + url
+                : null;
     }
 
     /**
@@ -54,6 +68,15 @@ public class H2SqlStorage extends SqlStorage {
     @Override
     public boolean enforcesOptimisticLock() {
         return false;
+    }
+
+    /**
+     * A {@code mem:} database is identified per JVM (see {@link #inMemoryIdentity}); a file or TCP
+     * one falls back to the URL derivation every SQL dialect shares.
+     */
+    @Override
+    public String backendIdentity() {
+        return inMemoryIdentity != null ? inMemoryIdentity : super.backendIdentity();
     }
 
     /**

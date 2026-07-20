@@ -104,11 +104,11 @@ public final class Storages {
 
     /**
      * Creates an {@link InMemoryStorage}. Data is lost when the JVM exits.
-     * The {@link InMemoryConfig} parameter is unused but kept for API symmetry;
+     * The only setting the {@link InMemoryConfig} carries is the explicit backend identity;
      * see {@link #createInMemory()} for a no-arg overload.
      */
     public static InMemoryStorage createInMemory(InMemoryConfig config) {
-        return new InMemoryStorage();
+        return new InMemoryStorage(config);
     }
 
     /**

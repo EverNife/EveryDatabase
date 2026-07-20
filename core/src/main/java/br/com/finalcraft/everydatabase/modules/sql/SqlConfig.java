@@ -34,6 +34,25 @@ public final class SqlConfig implements StorageConfig {
     private final String username;
     private final String password;
     private final PoolTuning pool;
+    private final String sharedIdentity;
+
+    /**
+     * Full constructor, with an explicit backend identity.
+     *
+     * @param jdbcUrl        full JDBC connection URL
+     * @param username       database username
+     * @param password       database password
+     * @param pool           HikariCP pool tuning parameters
+     * @param sharedIdentity explicit identity for the store this URL points at, or {@code null} to
+     *                       derive it from the URL (see {@link #sharedIdentity()})
+     */
+    public SqlConfig(String jdbcUrl, String username, String password, PoolTuning pool, String sharedIdentity) {
+        this.jdbcUrl        = jdbcUrl;
+        this.username       = username;
+        this.password       = password;
+        this.pool           = pool;
+        this.sharedIdentity = sharedIdentity;
+    }
 
     /**
      * Full constructor.
@@ -44,10 +63,7 @@ public final class SqlConfig implements StorageConfig {
      * @param pool     HikariCP pool tuning parameters
      */
     public SqlConfig(String jdbcUrl, String username, String password, PoolTuning pool) {
-        this.jdbcUrl  = jdbcUrl;
-        this.username = username;
-        this.password = password;
-        this.pool     = pool;
+        this(jdbcUrl, username, password, pool, null);
     }
 
     /**
@@ -56,6 +72,20 @@ public final class SqlConfig implements StorageConfig {
     public SqlConfig(String jdbcUrl, String username, String password) {
         this(jdbcUrl, username, password, PoolTuning.defaults());
     }
+
+    /**
+     * An explicit identity for the physical store, or {@code null} to derive one from the URL.
+     *
+     * <p>Set it when the derived identity would be wrong: several servers reaching one shared
+     * database through coordinates that differ textually (a host name on one, its IP on another, a
+     * tunnel on a third) derive different identities and would stop invalidating each other's
+     * caches. Give all of them the same string and they name one store again.
+     *
+     * <p>When present it IS the identity, verbatim - no type prefix, no machine discriminator - so
+     * two different backend kinds can deliberately be told they share a store. Never put a
+     * credential in it: the identity travels on change events and may be logged.
+     */
+    public String     sharedIdentity() { return sharedIdentity; }
 
     public String     jdbcUrl()  { return jdbcUrl; }
     public String     username() { return username; }

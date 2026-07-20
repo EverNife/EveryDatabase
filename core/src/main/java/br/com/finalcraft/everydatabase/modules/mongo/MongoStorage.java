@@ -16,6 +16,7 @@ import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionScope;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.util.BackendIdentities;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoException;
@@ -103,6 +104,21 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     @Override
     public boolean enforcesOptimisticLock() {
         return true;
+    }
+
+    /**
+     * Derived from the connection string's host list plus the database name - never from the user
+     * info a Mongo URI may embed ({@code mongodb://user:pass@host}), which is stripped along with
+     * the options. A seed list of routable hosts identifies the same deployment from anywhere; an
+     * all-loopback one is qualified with a machine discriminator.
+     */
+    @Override
+    public String backendIdentity() {
+        String explicit = config.sharedIdentity();
+        return explicit != null
+                ? explicit
+                : BackendIdentities.mongo("mongo", config.connectionString(), config.database(),
+                                          BackendIdentities.localMachine());
     }
 
     // ------------------------------------------------------------------

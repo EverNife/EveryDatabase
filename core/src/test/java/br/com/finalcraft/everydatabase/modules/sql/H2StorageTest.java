@@ -275,6 +275,38 @@ class H2StorageTest extends AbstractTransactionalStorageTest {
         assertNotNull(warn.error(), "The WARN event must carry the decode exception");
     }
 
+    @Test
+    @DisplayName("backendIdentity never exposes the configured credentials")
+    void backendIdentity_neverContainsCredentials() {
+        SqlConfig config = new SqlConfig(
+            "jdbc:mariadb://db.example.com:3306/mc?user=admin&password=s3cr3t", "admin", "s3cr3t", TEST_POOL);
+
+        String identity = new H2SqlStorage(config).backendIdentity();
+
+        assertFalse(identity.contains("s3cr3t"), identity);
+        assertFalse(identity.contains("admin"), identity);
+    }
+
+    @Test
+    @DisplayName("two storages on the same database report the same identity, a different one does not")
+    void backendIdentity_followsThePhysicalDatabase() {
+        Storage sameDatabase = openExtraStorageOnSameDatabase();
+        Storage otherDatabase = new H2SqlStorage(new SqlConfig(
+            "jdbc:h2:mem:some_other_database;DB_CLOSE_DELAY=-1", "sa", "", TEST_POOL));
+
+        assertEquals(storage.backendIdentity(), sameDatabase.backendIdentity());
+        assertNotEquals(storage.backendIdentity(), otherDatabase.backendIdentity());
+    }
+
+    @Test
+    @DisplayName("an explicit sharedIdentity replaces the derived one verbatim")
+    void backendIdentity_explicitOverrideWins() {
+        SqlConfig config = new SqlConfig(
+            currentTestDbUrl, "sa", "", TEST_POOL, "the-one-shared-store");
+
+        assertEquals("the-one-shared-store", new H2SqlStorage(config).backendIdentity());
+    }
+
     /** Opens a direct JDBC connection to the current test database and reports whether a column exists. */
     private boolean indexColumnPresent(String table, String column) throws Exception {
         try (Connection conn = DriverManager.getConnection(currentTestDbUrl, "sa", "")) {

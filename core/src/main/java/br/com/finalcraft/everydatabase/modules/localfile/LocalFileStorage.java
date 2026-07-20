@@ -11,6 +11,7 @@ import br.com.finalcraft.everydatabase.schema.MigrationContext;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.util.BackendIdentities;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.type.CollectionType;
 
@@ -81,6 +82,21 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     // ------------------------------------------------------------------
     //  Storage.getStorageLogConfig / setStorageLogConfig
     // ------------------------------------------------------------------
+
+    /**
+     * Derived from the canonical base directory plus a machine discriminator: the same absolute
+     * path names a different store on every machine, so the path alone would make two servers with
+     * an identical layout look like one. A genuinely shared directory (a network mount) is declared
+     * through the config's explicit identity.
+     */
+    @Override
+    public String backendIdentity() {
+        String explicit = config.sharedIdentity();
+        return explicit != null
+                ? explicit
+                : BackendIdentities.directory("localfile", config.baseDirectory(),
+                                              BackendIdentities.localMachine());
+    }
 
     @Override
     public StorageLogConfig getStorageLogConfig() {

@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.util.BackendIdentities;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -93,6 +94,38 @@ public interface Storage {
      */
     default boolean enforcesOptimisticLock() {
         return false;
+    }
+
+    /**
+     * A stable identifier of the <b>physical store</b> this storage talks to.
+     *
+     * <p>Contract:
+     * <ul>
+     *   <li>Two {@code Storage} instances pointing at the SAME physical store report the SAME
+     *       identity - even in different processes, on different machines.</li>
+     *   <li>Two instances pointing at DIFFERENT stores never report the same identity, including the
+     *       ambiguous case where their coordinates are textually equal but machine-local (two servers
+     *       each running their own database on {@code localhost:3306/mc}, or each with their own data
+     *       directory at {@code /home/mc/data}) - such coordinates carry a machine discriminator.</li>
+     *   <li>The identity NEVER contains a credential. It is stamped on change events and may be
+     *       logged, so a username or password must never reach it.</li>
+     * </ul>
+     *
+     * <p>It answers a question rather than adding behaviour, so it is a method and not a marker
+     * interface - the same reasoning as {@link #enforcesOptimisticLock()}, and for the same practical
+     * reason: a subclass must be able to answer differently from its superclass (the H2 backend
+     * reports a per-instance identity for an in-memory URL where the SQL base derives one from the
+     * URL).
+     *
+     * <p>Consumers use it to scope cache-invalidation signals that travel over a shared pub/sub
+     * channel: a signal is only applied to a manager whose backend reports the same identity.
+     *
+     * <p>Defaults to a <b>per-instance</b> identity, which never matches another process. A third
+     * party {@code Storage} that does not override this therefore fails to the safe side: its
+     * signals are never applied to a store that only looks alike.
+     */
+    default String backendIdentity() {
+        return "storage-instance:" + BackendIdentities.jvmId() + ":" + System.identityHashCode(this);
     }
 
     StorageLogConfig getStorageLogConfig();

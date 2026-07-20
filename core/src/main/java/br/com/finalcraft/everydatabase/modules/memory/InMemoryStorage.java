@@ -18,6 +18,7 @@ import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionScope;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.util.BackendIdentities;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -46,6 +47,10 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
 
     /** Stable per-instance origin id, stamped on emitted change events. */
     private final String originId = "mem-" + UUID.randomUUID();
+    /** Explicit identity from the config, or {@code null} for the per-instance default. */
+    private final String sharedIdentity;
+    /** Per-instance identity: the store lives in this object, so nothing else can name it. */
+    private final String instanceIdentity = "mem:" + BackendIdentities.jvmId() + ":" + UUID.randomUUID();
     /** In-process change-feed dispatcher; repositories of this storage emit through it. */
     private final ChangeFeedSupport changeFeed = new ChangeFeedSupport();
 
@@ -71,13 +76,32 @@ public final class InMemoryStorage implements Storage, TransactionalStorage, Sch
     }
 
     public InMemoryStorage(StorageLogConfig logConfig) {
-        this.logConfig = logConfig;
-        this.log       = new StorageLog("memory", () -> this.logConfig);
+        this(null, logConfig);
+    }
+
+    public InMemoryStorage(InMemoryConfig config) {
+        this(config, StorageLogConfig.defaults());
+    }
+
+    public InMemoryStorage(InMemoryConfig config, StorageLogConfig logConfig) {
+        this.logConfig       = logConfig;
+        this.log             = new StorageLog("memory", () -> this.logConfig);
+        this.sharedIdentity  = config != null ? config.sharedIdentity() : null;
     }
 
     // ------------------------------------------------------------------
     //  Storage.getStorageLogConfig / setStorageLogConfig
     // ------------------------------------------------------------------
+
+    /**
+     * The store is this object's own heap, so no other instance - let alone another process - can
+     * reach it: the identity is per instance unless the config declares one, which lets two
+     * in-memory storages deliberately stand in for a single physical store.
+     */
+    @Override
+    public String backendIdentity() {
+        return sharedIdentity != null ? sharedIdentity : instanceIdentity;
+    }
 
     @Override
     public StorageLogConfig getStorageLogConfig() {
