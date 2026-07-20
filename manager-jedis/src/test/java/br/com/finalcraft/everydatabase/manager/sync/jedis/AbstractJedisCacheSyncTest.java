@@ -10,6 +10,7 @@ import br.com.finalcraft.everydatabase.manager.observ.CacheSyncMode;
 import br.com.finalcraft.everydatabase.manager.observ.CacheSyncObserver;
 import br.com.finalcraft.everydatabase.manager.sync.CacheSync;
 import br.com.finalcraft.everydatabase.manager.testdata.Quest;
+import br.com.finalcraft.everydatabase.modules.sql.PoolTuning;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
@@ -82,10 +83,16 @@ public abstract class AbstractJedisCacheSyncTest {
         String collection = "quests_" + suffix;
         channel = "everydatabase:test:" + suffix;                       // unique per test: no cross-test bleed
         String dbUrl = "jdbc:h2:mem:jedissync_" + suffix + ";DB_CLOSE_DELAY=-1";
+        // Writer and reader are two handles on the SAME physical store, so give them one explicit
+        // identity: an H2 mem URL is machine-local, and under the RECOMMENDED default a machine-local
+        // store does not publish (its signal could reach no peer). Declaring the shared identity says
+        // "these two really are the same store", which is exactly what this test simulates - the writer
+        // publishes again and both derive the same per-identity channel, so the F3 scoping still routes.
+        String sharedId = "jedissync-shared-" + suffix;
 
-        writerStorage = Storages.createH2(new SqlConfig(dbUrl, "", ""));
+        writerStorage = Storages.createH2(new SqlConfig(dbUrl, "", "", PoolTuning.defaults(), sharedId));
         writerStorage.init().join();
-        readerStorage = Storages.createH2(new SqlConfig(dbUrl, "", ""));   // same in-memory DB (shared by URL)
+        readerStorage = Storages.createH2(new SqlConfig(dbUrl, "", "", PoolTuning.defaults(), sharedId));   // same in-memory DB (shared by URL)
         readerStorage.init().join();
 
         RefRegistry writerReg = new RefRegistry();

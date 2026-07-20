@@ -12,6 +12,7 @@ import br.com.finalcraft.everydatabase.manager.sync.CacheSync;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
 import br.com.finalcraft.everydatabase.modules.mongo.MongoConfig;
 import br.com.finalcraft.everydatabase.modules.mongo.MongoStorage;
+import br.com.finalcraft.everydatabase.modules.sql.PoolTuning;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
@@ -148,25 +149,34 @@ public abstract class AbstractMultiBackendJedisCacheSyncTest {
     private static List<Backend> availableBackends(String suffix) {
         List<Backend> backends = new ArrayList<>();
 
+        // Every backend here is machine-local (an H2 mem DB, or a server on localhost), which under the
+        // RECOMMENDED default does not publish. This test simulates two instances sharing one physical
+        // store, so each backend's writer/reader pair gets one explicit shared identity (distinct per
+        // backend, equal within a pair): that declares the store shareable, restores publishing, and
+        // keeps both ends on the same per-identity channel so the transport still routes.
         String h2Url = "jdbc:h2:mem:mbex_" + suffix + ";DB_CLOSE_DELAY=-1";
-        backends.add(new Backend("h2", () -> Storages.createH2(new SqlConfig(h2Url, "", ""))));
+        String h2Id = "mbex-h2-" + suffix;
+        backends.add(new Backend("h2", () -> Storages.createH2(new SqlConfig(h2Url, "", "", PoolTuning.defaults(), h2Id))));
 
         String mariaServer = "jdbc:mysql://localhost:39306";
         if (ensureSqlDatabase(mariaServer + "/", "everydatabase_mbex")) {
+            String mariaId = "mbex-mariadb-" + suffix;
             backends.add(new Backend("mariadb",
-                    () -> Storages.createSQL(new SqlConfig(mariaServer + "/everydatabase_mbex", "root", "root"))));
+                    () -> Storages.createSQL(new SqlConfig(mariaServer + "/everydatabase_mbex", "root", "root", PoolTuning.defaults(), mariaId))));
         }
 
         String pgServer = "jdbc:postgresql://localhost:39307";
         if (ensurePostgresDatabase(pgServer, "everydatabase_mbex")) {
+            String pgId = "mbex-postgres-" + suffix;
             backends.add(new Backend("postgres",
-                    () -> Storages.createPostgreSQL(new SqlConfig(pgServer + "/everydatabase_mbex", "root", "root"))));
+                    () -> Storages.createPostgreSQL(new SqlConfig(pgServer + "/everydatabase_mbex", "root", "root", PoolTuning.defaults(), pgId))));
         }
 
         String mongoUrl = "mongodb://localhost:39308/?directConnection=true";
         if (mongoReachable(mongoUrl)) {
+            String mongoId = "mbex-mongo-" + suffix;
             backends.add(new Backend("mongo",
-                    () -> new MongoStorage(new MongoConfig(mongoUrl, "everydatabase_mbex"))));
+                    () -> new MongoStorage(new MongoConfig(mongoUrl, "everydatabase_mbex", java.util.Optional.empty(), mongoId))));
         }
 
         return backends;
