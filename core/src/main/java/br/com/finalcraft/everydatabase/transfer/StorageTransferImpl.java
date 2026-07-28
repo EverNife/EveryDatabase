@@ -215,10 +215,10 @@ final class StorageTransferImpl implements StorageTransfer {
                 + " Use failIfTargetCollectionNotEmpty(false) to allow.";
             report.addError(new TransferError(srcCollection, null, new RuntimeException(msg)));
 
-            // Record zero-write stats for this collection
+            // Record zero-write stats for this collection (nothing was even read from the source)
             report.addCollectionStats(new CollectionStats(
                 srcCollection, tgtCollection,
-                sourceCount, targetCountBefore, targetCountBefore,
+                sourceCount, 0L, targetCountBefore, targetCountBefore,
                 0L, System.currentTimeMillis() - startMs
             ));
 
@@ -301,7 +301,7 @@ final class StorageTransferImpl implements StorageTransfer {
 
         report.addCollectionStats(new CollectionStats(
             srcCollection, tgtCollection,
-            sourceCount, targetCountBefore, targetCountAfter,
+            sourceCount, all.size(), targetCountBefore, targetCountAfter,
             entitiesWritten, durationMs
         ));
 
@@ -327,7 +327,9 @@ final class StorageTransferImpl implements StorageTransfer {
                 continue;
             }
             long written  = stats.entitiesWritten();
-            long expected = stats.sourceCount();
+            // What the source handed over, not what it stores: a row whose payload does not decode is
+            // counted but never read, and blaming the writer for it would hide the real problem below.
+            long expected = stats.entitiesRead();
 
             // SKIP_EXISTING: relaxed check - skipped entities reduce written count intentionally
             // All other policies: strict equality
@@ -338,6 +340,18 @@ final class StorageTransferImpl implements StorageTransfer {
             if (!ok) {
                 String msg = "Count mismatch for collection '" + stats.sourceCollection()
                     + "': expected=" + expected + " entities written, actual=" + written;
+                report.addError(new TransferError(stats.sourceCollection(), null,
+                    new RuntimeException(msg)));
+            }
+
+            // Rows the source stores but could not decode are left behind by any policy. Silence here
+            // would report a complete transfer over a collection that quietly lost rows.
+            long unreadable = stats.sourceCount() - stats.entitiesRead();
+            if (unreadable > 0) {
+                String msg = "Source collection '" + stats.sourceCollection() + "' holds "
+                    + stats.sourceCount() + " rows but only " + stats.entitiesRead()
+                    + " could be decoded; " + unreadable + " were left behind."
+                    + " Use scanAll() on the source to identify them.";
                 report.addError(new TransferError(stats.sourceCollection(), null,
                     new RuntimeException(msg)));
             }

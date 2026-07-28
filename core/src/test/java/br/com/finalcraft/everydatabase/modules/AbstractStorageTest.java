@@ -1179,6 +1179,17 @@ public abstract class AbstractStorageTest {
         return false;
     }
 
+    /**
+     * Injects a row that <em>belongs</em> to {@code collection} but whose payload does not decode, then
+     * returns {@code true}. Distinct from {@link #injectCorruptRow}: that one may fabricate storage so
+     * broken that no collection can be blamed for it, which is exactly the row {@code count()} must NOT
+     * attribute. This one is unambiguously a row of {@code collection}, so counting it is the contract.
+     * Default: this backend cannot fabricate one, so the test self-skips.
+     */
+    protected boolean injectUndecodableRow(String collection) throws Exception {
+        return false;
+    }
+
     /** Drains the whole collection through the paged scan, following the cursor to exhaustion. */
     protected List<ScanRow<TestPlayer>> drainScan(Repository<UUID, TestPlayer> repository, int pageSize) {
         List<ScanRow<TestPlayer>> out = new ArrayList<>();
@@ -1283,6 +1294,23 @@ public abstract class AbstractStorageTest {
         assertNull(bad.value(), "a failed row carries no value");
         assertNotNull(bad.error(), "a failed row carries the decode cause");
         assertNotNull(bad.key(), "a failed row still carries a best-effort identifier");
+    }
+
+    @Test
+    @Order(311)
+    @DisplayName("[base] count() counts an undecodable row that all() skips")
+    void count_countsUndecodableRow_thatAllSkips() throws Exception {
+        repo.saveAll(Arrays.asList(alice(), bob(), carol())).join();
+        Assumptions.assumeTrue(injectUndecodableRow(DESCRIPTOR.collection()),
+            "backend cannot fabricate a row that belongs to the collection but does not decode");
+
+        long counted  = repo.count().join();
+        long streamed = repo.all().join().count();
+
+        assertEquals(4L, counted, "a row that occupies storage is counted even when its payload is poisoned");
+        assertEquals(3L, streamed, "all() hands back entities, so it skips the row it cannot decode");
+        assertEquals(1, drainScan(repo, 2).stream().filter(ScanRow::isFailed).count(),
+            "scanAll is what names the row the other two only disagree about");
     }
 
     // ------------------------------------------------------------------

@@ -129,13 +129,13 @@ class GroupedFileDecodeCostTest {
     }
 
     @Test
-    @DisplayName("count() still decodes, so an undecodable row is not counted")
-    void count_unchangedThisPhase() {
+    @DisplayName("count() decodes nothing")
+    void count_decodesNothing() {
         populateSparse(3);
         codec.resetCounts();
 
         assertEquals(3L, sparseRepo().count().join(), "only the 3 populated keys hold this collection");
-        assertEquals(3, codec.decodeCount(),
-            "count() decodes what it counts, so it stays consistent with all()");
+        assertEquals(0, codec.decodeCount(),
+            "how many rows exist is a presence question - nothing is deserialised to answer it");
     }
 }

@@ -96,4 +96,14 @@ class LocalFileDecodeCostTest {
 
         assertEquals(0, codec.decodeCount(), "a presence probe must never deserialise a row");
     }
+
+    @Test
+    @DisplayName("count() decodes nothing")
+    void count_decodesNothing() {
+        codec.resetCounts();
+
+        assertEquals(KEYS, repo.count().join(), "every stored file is a row");
+        assertEquals(0, codec.decodeCount(),
+            "the directory already answers how many rows exist - opening them adds nothing");
+    }
 }

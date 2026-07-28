@@ -6,6 +6,26 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 `everydatabase-manager` and `everydatabase-manager-jedis` under the group
 `br.com.finalcraft.everydatabase`.
 
+## [Unreleased]
+
+### Changed
+- **`Repository.count()` counts stored rows, not decodable ones.** A row whose payload fails to
+  decode is now included: it occupies storage and a write to its key overwrites it, so it exists.
+  `all()` and `query()` still skip it, which makes `count() != all().count()` the signal that a
+  collection holds a poisoned row — and `scanAll()` is what names it. This aligns the file backends
+  with SQL (`SELECT COUNT(*)`) and Mongo (`countDocuments`), which always counted such rows.
+
+  The old behaviour cost a full read of the collection to answer "how many": LocalFile decoded
+  every file and GroupedFile decoded every matching sub-node, only to discard the result. Counting
+  is now a directory listing on LocalFile and a presence probe per key file on GroupedFile.
+
+- **`CollectionStats` gained `entitiesRead()`**, and `StorageTransfer`'s count verification now
+  compares what was written against what the source *handed over* rather than against
+  `sourceCount()`. A source row that cannot be decoded is reported as its own explicit transfer
+  error (naming how many were left behind) instead of surfacing as a confusing count mismatch —
+  previously such a row was invisible in the report on both sides. The `CollectionStats`
+  constructor takes the new value after `sourceCount`.
+
 ## [1.1.1] — 2026-07-28
 
 ### Changed

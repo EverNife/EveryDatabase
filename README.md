@@ -379,9 +379,9 @@ repo.saveAll(Arrays.asList(alice, bob, carol)).join();    // batched (JDBC batch
 // Read
 Optional<PlayerData> one = repo.find(id).join();
 List<PlayerData>     some = repo.findMany(Arrays.asList(id1, id2)).join();  // missing keys omitted
-Stream<PlayerData>   all  = repo.all().join();
+Stream<PlayerData>   all  = repo.all().join();               // skips rows whose payload cannot be decoded
 boolean exists            = repo.exists(id).join();
-long count                = repo.count().join();
+long count                = repo.count().join();             // counts every stored row, decodable or not
 
 // Delete
 boolean removed = repo.delete(id).join();                  // true if it existed

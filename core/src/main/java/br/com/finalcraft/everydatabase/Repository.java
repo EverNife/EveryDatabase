@@ -81,7 +81,20 @@ public interface Repository<K, V> {
     CompletableFuture<Boolean> exists(K key);
 
     /**
-     *  Total count of stored entities.
+     * Total number of rows stored for this collection.
+     *
+     * <p>A row whose stored payload does not decode <b>is counted</b>: it occupies storage and a
+     * later write to its key overwrites it, so it exists. Reads that must hand back entities -
+     * {@link #all()} and {@link #query} - skip it instead, which makes
+     * {@code count() != all().count()} the signal that the collection holds a poisoned row rather
+     * than a bug. {@link #scanAll} is what names it.
+     *
+     * <p>Cost is a row-existence probe, never a payload read: {@code SELECT COUNT(*)} on SQL,
+     * {@code countDocuments} on Mongo, a directory listing on LocalFile, a presence probe per key
+     * file on GroupedFile. Nothing is decoded.
+     *
+     * <p>Note that {@link #count(Query)} is a different question and a different cost: filtering
+     * requires reading the indexed values, and on the file backends it decodes the matches.
      */
     CompletableFuture<Long> count();
 

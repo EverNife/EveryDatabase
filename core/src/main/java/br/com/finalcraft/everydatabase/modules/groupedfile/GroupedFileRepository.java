@@ -183,14 +183,11 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 long n = 0;
                 for (Path file : store.keyFiles()) {
                     try {
-                        // Decode the sub-node to stay consistent with all(): a corrupt key file (or a
-                        // present-but-undecodable sub-node) is skipped-and-logged there and by catching
-                        // Exception here, so it never fails the whole count nor inflates it.
-                        JsonNode sub = store.readSubNode(file, collection);
-                        if (sub != null) {
-                            descriptor.codec().decode(store.mapper().writeValueAsBytes(sub));
-                            n++;
-                        }
+                        // Presence, not decodability: a sub-node this collection owns is a row even if
+                        // its payload is poisoned, and all() is what skips it. A key file too broken to
+                        // parse cannot be attributed to any collection, so it is skipped-and-logged
+                        // instead - counting it here would inflate every collection in the directory.
+                        if (store.hasSubNode(file, collection)) n++;
                     } catch (Exception e) {
                         log.skippedCorruptedRow(collection, file.getFileName().toString(), e);
                     }

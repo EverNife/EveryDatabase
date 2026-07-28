@@ -76,6 +76,17 @@ class LocalFileStorageTest extends AbstractStorageTest {
         return true;
     }
 
+    @Override
+    protected boolean injectUndecodableRow(String collection) throws IOException {
+        // Well-formed JSON in the collection's own directory, so the file is unambiguously a row -
+        // it just carries a uuid the codec cannot parse.
+        Path dir = tempDir.resolve(collection);
+        Files.createDirectories(dir);
+        Files.write(dir.resolve("poisoned.json"),
+            "{\"uuid\":\"not-a-uuid\"}".getBytes(StandardCharsets.UTF_8));
+        return true;
+    }
+
     @AfterAll
     static void handleResiduals() {
         if (!CLEAN_TEST_RESIDUALS) {
@@ -389,8 +400,8 @@ class LocalFileStorageTest extends AbstractStorageTest {
 
     @Test
     @Order(1036)
-    @DisplayName("count() and all() both skip a corrupted file with the codec extension")
-    void corruptedFile_skippedConsistentlyByCountAndAll() throws IOException {
+    @DisplayName("count() counts a corrupted file that all() skips")
+    void corruptedFile_countedButNotStreamed() throws IOException {
         repo.save(alice()).join();
         repo.save(bob()).join();
 
@@ -401,8 +412,9 @@ class LocalFileStorageTest extends AbstractStorageTest {
 
         long count = repo.count().join();
         long streamed = repo.all().join().count();
-        assertEquals(2L, count, "count() must skip the corrupted file (Alice + Bob only)");
-        assertEquals(2L, streamed, "all() must skip the corrupted file (Alice + Bob only)");
-        assertEquals(count, streamed, "count() and all() must agree in the presence of a corrupted file");
+        assertEquals(3L, count, "the corrupted file occupies a row, so count() includes it");
+        assertEquals(2L, streamed, "all() hands back entities, so it skips the row it cannot decode");
+        assertNotEquals(count, streamed,
+            "the gap between count() and all() is how a poisoned row announces itself");
     }
 }

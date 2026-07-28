@@ -302,14 +302,15 @@ class StorageTransferBuilderTest {
     @DisplayName("CollectionStats stores all fields correctly")
     void collectionStats_storesFields() {
         CollectionStats s = new CollectionStats(
-            "players", "alt_players", 100L, 0L, 100L, 100L, 250L);
+            "players", "alt_players", 100L, 98L, 0L, 98L, 98L, 250L);
 
         assertEquals("players",     s.sourceCollection());
         assertEquals("alt_players", s.targetCollection());
         assertEquals(100L,          s.sourceCount());
+        assertEquals(98L,           s.entitiesRead(), "2 stored rows did not decode");
         assertEquals(0L,            s.targetCountBefore());
-        assertEquals(100L,          s.targetCountAfter());
-        assertEquals(100L,          s.entitiesWritten());
+        assertEquals(98L,           s.targetCountAfter());
+        assertEquals(98L,           s.entitiesWritten());
         assertEquals(250L,          s.durationMs());
     }
 
@@ -347,8 +348,8 @@ class StorageTransferBuilderTest {
     @DisplayName("TransferReport.Builder.addCollectionStats() accumulates totalEntities")
     void transferReport_addCollectionStats_accumulatesTotalEntities() {
         TransferReport.Builder rb = TransferReport.builder(System.currentTimeMillis());
-        rb.addCollectionStats(new CollectionStats("a", "a", 50L, 0L, 50L, 50L, 10L));
-        rb.addCollectionStats(new CollectionStats("b", "b", 30L, 0L, 30L, 30L, 5L));
+        rb.addCollectionStats(new CollectionStats("a", "a", 50L, 50L, 0L, 50L, 50L, 10L));
+        rb.addCollectionStats(new CollectionStats("b", "b", 30L, 30L, 0L, 30L, 30L, 5L));
         TransferReport report = rb.build();
 
         assertEquals(80L, report.totalEntities(), "totalEntities must be sum of entitiesWritten");
@@ -361,7 +362,7 @@ class StorageTransferBuilderTest {
     @DisplayName("TransferReport.collections() is keyed by source collection name")
     void transferReport_collections_keyedBySourceCollection() {
         TransferReport.Builder rb = TransferReport.builder(System.currentTimeMillis());
-        rb.addCollectionStats(new CollectionStats("players", "alt_players", 10L, 0L, 10L, 10L, 1L));
+        rb.addCollectionStats(new CollectionStats("players", "alt_players", 10L, 10L, 0L, 10L, 10L, 1L));
         TransferReport report = rb.build();
 
         assertTrue(report.collections().containsKey("players"),
@@ -374,7 +375,7 @@ class StorageTransferBuilderTest {
     @DisplayName("TransferReport is immutable: collections() and errors() cannot be modified")
     void transferReport_isImmutable() {
         TransferReport.Builder rb = TransferReport.builder(System.currentTimeMillis());
-        rb.addCollectionStats(new CollectionStats("players", "players", 5L, 0L, 5L, 5L, 1L));
+        rb.addCollectionStats(new CollectionStats("players", "players", 5L, 5L, 0L, 5L, 5L, 1L));
         TransferReport report = rb.build();
 
         assertThrows(UnsupportedOperationException.class,

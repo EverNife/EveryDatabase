@@ -102,6 +102,16 @@ class GroupedFileStorageTest extends AbstractStorageTest {
         return true;
     }
 
+    @Override
+    protected boolean injectUndecodableRow(String collection) throws IOException {
+        // A key file that parses fine and declares this collection, so the row is unambiguously ours -
+        // only the payload under it is unreadable. Contrast with injectCorruptRow, whose file cannot be
+        // attributed to any collection at all.
+        Files.write(tempDir.resolve("poisoned.json"),
+            ("{\"" + collection + "\":{\"uuid\":\"not-a-uuid\"}}").getBytes(StandardCharsets.UTF_8));
+        return true;
+    }
+
     // Two collections sharing the SAME key space (UUID) - the grouping case.
     static final EntityDescriptor<UUID, TestPlayer> PLAYER_DATA =
         EntityDescriptor.builder(UUID.class, TestPlayer.class)

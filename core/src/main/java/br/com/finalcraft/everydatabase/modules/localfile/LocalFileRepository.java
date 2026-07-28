@@ -349,24 +349,14 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             try {
                 if (!Files.exists(collectionDir)) return 0L;
                 String ext = "." + fileExtension();
-                List<Path> files;
+                // One file with the codec's extension is one row, decodable or not - the same set
+                // all() and scanAll() enumerate. Opening them to check would make counting cost a
+                // full read of the collection to answer a question the directory already answers.
                 try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                    files = paths
+                    return paths
                         .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
-                        .collect(Collectors.toList());
+                        .count();
                 }
-                long valid = 0L;
-                for (Path path : files) {
-                    try {
-                        // Decode to stay consistent with all(): a corrupted file is skipped-and-logged
-                        // there, so it must not inflate the count here (count() == all().count()).
-                        descriptor.codec().decode(Files.readAllBytes(path));
-                        valid++;
-                    } catch (Exception e) {
-                        log.skippedCorruptedRow(descriptor.collection(), path.getFileName().toString(), e);
-                    }
-                }
-                return valid;
             } catch (IOException e) {
                 throw log.errored(StorageOp.COUNT, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to count entities", e));

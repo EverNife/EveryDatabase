@@ -9,9 +9,10 @@ package br.com.finalcraft.everydatabase.transfer;
  *
  * <p>The count fields allow the caller to verify the transfer:
  * <pre>
- * long expected = stats.sourceCount();
+ * long expected = stats.entitiesRead();
  * long actual   = stats.targetCountAfter() - stats.targetCountBefore();
  * // actual == expected means a clean transfer; actual < expected with SKIP_EXISTING is normal.
+ * // sourceCount() > entitiesRead() means the source holds rows that could not be decoded at all.
  * </pre>
  */
 public final class CollectionStats {
@@ -19,6 +20,7 @@ public final class CollectionStats {
     private final String sourceCollection;
     private final String targetCollection;
     private final long sourceCount;
+    private final long entitiesRead;
     private final long targetCountBefore;
     private final long targetCountAfter;
     private final long entitiesWritten;
@@ -28,6 +30,7 @@ public final class CollectionStats {
             String sourceCollection,
             String targetCollection,
             long sourceCount,
+            long entitiesRead,
             long targetCountBefore,
             long targetCountAfter,
             long entitiesWritten,
@@ -35,6 +38,7 @@ public final class CollectionStats {
         this.sourceCollection  = sourceCollection;
         this.targetCollection  = targetCollection;
         this.sourceCount       = sourceCount;
+        this.entitiesRead      = entitiesRead;
         this.targetCountBefore = targetCountBefore;
         this.targetCountAfter  = targetCountAfter;
         this.entitiesWritten   = entitiesWritten;
@@ -48,10 +52,20 @@ public final class CollectionStats {
     public String targetCollection() { return targetCollection; }
 
     /**
-     * Number of entities in the source collection at the moment the transfer started.
+     * Number of rows stored in the source collection at the moment the transfer started.
      * Snapshot taken via {@code sourceRepo.count()} before any writes.
+     *
+     * <p>This counts rows, not transferable entities: a row whose payload does not decode is
+     * included here and excluded from {@link #entitiesRead()}. A gap between the two is the source
+     * holding data no transfer can carry over.
      */
     public long sourceCount() { return sourceCount; }
+
+    /**
+     * Number of entities the source actually handed over, via {@code sourceRepo.all()} - the real
+     * upper bound on what could be written. Equal to {@link #sourceCount()} on a healthy source.
+     */
+    public long entitiesRead() { return entitiesRead; }
 
     /**
      * Number of entities already in the target collection <em>before</em> this transfer wrote anything.
@@ -67,7 +81,7 @@ public final class CollectionStats {
 
     /**
      * Number of entities actually passed to {@code targetRepo.saveAll()} across all batches.
-     * With {@link ErrorPolicy#SKIP_EXISTING} this may be less than {@link #sourceCount()}.
+     * With {@link ErrorPolicy#SKIP_EXISTING} this may be less than {@link #entitiesRead()}.
      */
     public long entitiesWritten() { return entitiesWritten; }
 
@@ -77,7 +91,9 @@ public final class CollectionStats {
     @Override
     public String toString() {
         return "CollectionStats{" + sourceCollection + " -> " + targetCollection
-            + ", written=" + entitiesWritten + "/" + sourceCount
+            + ", written=" + entitiesWritten + "/" + entitiesRead
+            + (sourceCount != entitiesRead ? " (of " + sourceCount + " stored, "
+                                             + (sourceCount - entitiesRead) + " unreadable)" : "")
             + ", targetBefore=" + targetCountBefore + ", targetAfter=" + targetCountAfter
             + ", " + durationMs + "ms}";
     }
