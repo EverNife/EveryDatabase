@@ -170,8 +170,9 @@ final class KeyFileStore {
      * @throws IOException if the file cannot be read or is not well-formed up to the answer
      */
     boolean hasSubNode(Path file, String collection) throws IOException {
-        if (!Files.exists(file)) return false;
-        try (JsonParser parser = mapper.getFactory().createParser(Files.readAllBytes(file))) {
+        byte[] bytes = readIfPresent(file);
+        if (bytes == null) return false;
+        try (JsonParser parser = mapper.getFactory().createParser(bytes)) {
             return seekField(parser, collection);
         }
     }
@@ -187,9 +188,23 @@ final class KeyFileStore {
      * @throws IOException if the file cannot be read or is not well-formed up to the sub-node
      */
     JsonNode readSubNode(Path file, String collection) throws IOException {
-        if (!Files.exists(file)) return null;
-        try (JsonParser parser = mapper.getFactory().createParser(Files.readAllBytes(file))) {
+        byte[] bytes = readIfPresent(file);
+        if (bytes == null) return null;
+        try (JsonParser parser = mapper.getFactory().createParser(bytes)) {
             return seekField(parser, collection) ? parser.readValueAsTree() : null;
+        }
+    }
+
+    /**
+     * The file's bytes, or {@code null} when it does not exist. Letting the read itself report the
+     * absence keeps a scan to one syscall per file: an existence check before it would be both a
+     * second syscall and a lie, since the file can vanish in between either way.
+     */
+    private static byte[] readIfPresent(Path file) throws IOException {
+        try {
+            return Files.readAllBytes(file);
+        } catch (NoSuchFileException e) {
+            return null;
         }
     }
 
