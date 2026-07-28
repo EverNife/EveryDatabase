@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.query;
 import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.codec.JacksonConfig;
 import br.com.finalcraft.everydatabase.codec.ObjectMapperAware;
+import br.com.finalcraft.everydatabase.codec.TreeCodec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -57,10 +58,26 @@ public final class IndexValueExtractor {
     }
 
     /**
-     * Converts {@code entity} to a tree using the mapper {@code codec} serialises with
-     * (see {@link #mapperFor(Codec)}).
+     * Converts {@code entity} to a tree the way {@code codec} itself would: through
+     * {@link TreeCodec#encodeTree} when the codec builds trees directly, otherwise through the
+     * mapper it serialises with (see {@link #mapperFor(Codec)}).
+     *
+     * <p>Asking the codec first matters for correctness, not speed: a codec that produces trees
+     * without exposing an {@code ObjectMapper} would otherwise be indexed through the fallback
+     * mapper, and the indexed form of a field could disagree with the persisted one.
      */
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public static JsonNode toTree(Object entity, Codec<?> codec) {
+        if (entity == null) return null;
+        if (codec instanceof TreeCodec) {
+            try {
+                return ((TreeCodec) codec).encodeTree(entity);
+            } catch (Exception e) {
+                throw new RuntimeException(
+                    "IndexValueExtractor: cannot inspect entity of type "
+                    + entity.getClass().getName() + " via its codec's tree form", e);
+            }
+        }
         return toTree(entity, mapperFor(codec));
     }
 

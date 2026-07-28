@@ -8,6 +8,7 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
 import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
 import br.com.finalcraft.everydatabase.codec.CodecException;
+import br.com.finalcraft.everydatabase.codec.TreeCodec;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.IndexValueExtractor;
@@ -63,16 +64,23 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
      */
     private final Map<String, Map<Object, Set<K>>> indexes;
 
+    /** The codec's tree fast-path, or {@code null} when it only speaks bytes. See {@link #deepCopy}. */
+    private final TreeCodec<V> treeCodec;
+
     InMemoryRepository(EntityDescriptor<K, V> descriptor, StorageLog log) {
         this(descriptor, log, null, null);
     }
 
+    @SuppressWarnings("unchecked")
     InMemoryRepository(EntityDescriptor<K, V> descriptor, StorageLog log,
                        ChangeFeedSupport changeFeed, String originId) {
         this.descriptor = descriptor;
         this.log        = log;
         this.changeFeed = changeFeed;
         this.originId   = originId;
+        this.treeCodec  = descriptor.codec() instanceof TreeCodec
+            ? (TreeCodec<V>) descriptor.codec()
+            : null;
 
         this.hintsByPath = new HashMap<>();
         this.indexes     = new ConcurrentHashMap<>();
@@ -189,8 +197,18 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         return CompletableFuture.completedFuture(null);
     }
 
+    /**
+     * Detaches the caller's instance from the stored one, so a later mutation of either cannot leak
+     * into the other. The copy goes through the codec on purpose: it keeps this backend's isolation
+     * identical to what a persistent backend gives for free, including whatever the codec drops.
+     *
+     * <p>A codec that speaks trees copies through one, since the serialised bytes would be built and
+     * parsed only to be thrown away.
+     */
     private V deepCopy(V entity) {
-        return descriptor.codec().decode(descriptor.codec().encode(entity));
+        return treeCodec != null
+            ? treeCodec.decodeTree(treeCodec.encodeTree(entity))
+            : descriptor.codec().decode(descriptor.codec().encode(entity));
     }
 
     @Override

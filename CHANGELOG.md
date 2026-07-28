@@ -8,6 +8,22 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
+### Added
+- **`TreeCodec`** — an optional codec capability (same idiom as `ObjectMapperAware`) for converting
+  directly to and from a Jackson tree. `JacksonJsonCodec` and `JacksonYamlCodec` implement it;
+  anything else keeps working through `encode`/`decode`.
+
+  It exists for the backends that already hold a tree: GroupedFile embeds each entity as a sub-node
+  of a shared document, and InMemory round-trips entities to isolate the caller's instance from the
+  stored one. Both used to serialise that tree to bytes purely so the codec could parse it straight
+  back — bytes that were never stored and never transmitted. SQL and Mongo are deliberately
+  untouched: they persist the encoded bytes, so for them there is no round-trip to remove.
+
+  `IndexValueExtractor.toTree` now asks the codec for its tree form before falling back to a mapper.
+  That one is a correctness fix, not a speed one: a codec that builds trees without exposing an
+  `ObjectMapper` was previously indexed through the fallback mapper, so its indexed values could
+  disagree with what it persisted.
+
 ### Changed
 - **`Repository.count()` counts stored rows, not decodable ones.** A row whose payload fails to
   decode is now included: it occupies storage and a write to its key overwrites it, so it exists.

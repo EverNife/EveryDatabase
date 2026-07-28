@@ -1,5 +1,6 @@
 package br.com.finalcraft.everydatabase.codec;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -20,7 +21,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
  *
  * @param <V> the entity type
  */
-public final class JacksonJsonCodec<V> implements Codec<V>, ObjectMapperAware {
+public final class JacksonJsonCodec<V> implements Codec<V>, ObjectMapperAware, TreeCodec<V> {
 
     private static final ObjectMapper STORAGE_SAFE_MAPPER =
         JacksonConfig.storageSafe(new JsonMapper());
@@ -74,6 +75,24 @@ public final class JacksonJsonCodec<V> implements Codec<V>, ObjectMapperAware {
             return mapper.readValue(data, type);
         } catch (Exception e) {
             throw new CodecException("Failed to decode " + type.getSimpleName() + " from JSON", e);
+        }
+    }
+
+    @Override
+    public JsonNode encodeTree(V value) throws CodecException {
+        try {
+            return mapper.valueToTree(value);
+        } catch (Exception e) {
+            throw new CodecException("Failed to encode " + type.getSimpleName() + " to a JSON tree", e);
+        }
+    }
+
+    @Override
+    public V decodeTree(JsonNode node) throws CodecException {
+        try {
+            return mapper.treeToValue(node, type);
+        } catch (Exception e) {
+            throw new CodecException("Failed to decode " + type.getSimpleName() + " from a JSON tree", e);
         }
     }
 

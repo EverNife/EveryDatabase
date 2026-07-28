@@ -1,6 +1,7 @@
 package br.com.finalcraft.everydatabase.codec;
 
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileStorage;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 
@@ -18,7 +19,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
  *
  * @param <V> the entity type
  */
-public final class JacksonYamlCodec<V> implements Codec<V>, ObjectMapperAware {
+public final class JacksonYamlCodec<V> implements Codec<V>, ObjectMapperAware, TreeCodec<V> {
 
     private static final ObjectMapper DEFAULT_MAPPER = JacksonConfig.storageSafe(new YAMLMapper());
 
@@ -57,6 +58,28 @@ public final class JacksonYamlCodec<V> implements Codec<V>, ObjectMapperAware {
             return mapper.readValue(data, type);
         } catch (Exception e) {
             throw new CodecException("Failed to decode " + type.getSimpleName() + " from YAML", e);
+        }
+    }
+
+    /**
+     * The tree model is format-neutral - a {@link YAMLMapper} builds and reads the same
+     * {@code jackson-databind} nodes a JSON mapper does, without emitting any YAML.
+     */
+    @Override
+    public JsonNode encodeTree(V value) throws CodecException {
+        try {
+            return mapper.valueToTree(value);
+        } catch (Exception e) {
+            throw new CodecException("Failed to encode " + type.getSimpleName() + " to a tree", e);
+        }
+    }
+
+    @Override
+    public V decodeTree(JsonNode node) throws CodecException {
+        try {
+            return mapper.treeToValue(node, type);
+        } catch (Exception e) {
+            throw new CodecException("Failed to decode " + type.getSimpleName() + " from a tree", e);
         }
     }
 

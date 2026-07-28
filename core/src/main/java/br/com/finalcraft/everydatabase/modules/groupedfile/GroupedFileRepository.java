@@ -6,6 +6,7 @@ import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.CodecException;
+import br.com.finalcraft.everydatabase.codec.TreeCodec;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageOp;
 import br.com.finalcraft.everydatabase.query.IndexHint;
@@ -66,7 +67,13 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
     private final String                 collection;
     /** Declared index hints indexed by field path - used for query dispatch. */
     private final Map<String, IndexHint> hintsByPath;
+    /**
+     * The codec's tree fast-path, or {@code null} when it only speaks bytes. Resolved once here
+     * rather than probed per row: every read and write of this repository crosses the tree boundary.
+     */
+    private final TreeCodec<V>           treeCodec;
 
+    @SuppressWarnings("unchecked")
     GroupedFileRepository(EntityDescriptor<K, V> descriptor, KeyFileStore store, StorageLog log) {
         this.descriptor  = descriptor;
         this.store       = store;
@@ -74,6 +81,29 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         this.collection  = descriptor.collection();
         this.hintsByPath = new HashMap<>();
         for (IndexHint hint : descriptor.indexes()) this.hintsByPath.put(hint.fieldPath(), hint);
+        this.treeCodec   = descriptor.codec() instanceof TreeCodec
+            ? (TreeCodec<V>) descriptor.codec()
+            : null;
+    }
+
+    // ------------------------------------------------------------------
+    //  Codec boundary
+    //
+    //  An entity lives in the aggregate document as a sub-node, so both directions cross a tree.
+    //  A codec that speaks trees crosses it directly; one that only speaks bytes needs the document
+    //  serialised and re-parsed around it, which is what these two hide.
+    // ------------------------------------------------------------------
+
+    private V decodeSub(JsonNode sub) throws IOException {
+        return treeCodec != null
+            ? treeCodec.decodeTree(sub)
+            : descriptor.codec().decode(store.mapper().writeValueAsBytes(sub));
+    }
+
+    private JsonNode encodeSub(V entity) throws IOException {
+        return treeCodec != null
+            ? treeCodec.encodeTree(entity)
+            : store.mapper().readTree(descriptor.codec().encode(entity));
     }
 
     // ------------------------------------------------------------------
@@ -107,8 +137,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             try {
                 JsonNode sub = store.readSubNode(fileFor(key), collection);
                 if (sub == null) return Optional.empty();
-                byte[] bytes = store.mapper().writeValueAsBytes(sub);
-                return Optional.of(descriptor.codec().decode(bytes));
+                return Optional.of(decodeSub(sub));
             } catch (IOException e) {
                 throw log.errored(StorageOp.FIND, collection,
                     new RuntimeException("GroupedFile: failed to read key=" + key, e));
@@ -208,9 +237,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 for (Path file : store.keyFiles()) {
                     try {
                         JsonNode sub = store.readSubNode(file, collection);
-                        if (sub != null) {
-                            results.add(descriptor.codec().decode(store.mapper().writeValueAsBytes(sub)));
-                        }
+                        if (sub != null) results.add(decodeSub(sub));
                     } catch (Exception e) {
                         // A corrupt key file drops the whole key from the scan; log a WARN, don't fail.
                         log.skippedCorruptedRow(collection, file.getFileName().toString(), e);
@@ -308,7 +335,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             Path file = fileFor(key);
             ObjectNode root = readRoot(file);
             if (root == null || !root.has(collection)) return;   // absent - never inserts
-            root.set(collection, store.mapper().readTree(descriptor.codec().encode(entity)));
+            root.set(collection, encodeSub(entity));
             store.writeAtomic(file, store.mapper().writeValueAsBytes(root));
         } catch (IOException e) {
             throw log.errored(StorageOp.SAVE, collection,
@@ -335,7 +362,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             if (root == null) root = store.mapper().createObjectNode();
             // Parse the codec's bytes into a sub-node so the entity keeps its codec representation,
             // then re-emit the whole aggregate document in the storage's format.
-            root.set(collection, store.mapper().readTree(descriptor.codec().encode(entity)));
+            root.set(collection, encodeSub(entity));
             store.writeAtomic(file, store.mapper().writeValueAsBytes(root));
         } catch (IOException e) {
             throw log.errored(StorageOp.SAVE, collection,
@@ -403,8 +430,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                     try {
                         JsonNode sub = store.readSubNode(file, collection);
                         if (sub == null) continue;   // key holds only other collections
-                        byte[] bytes = store.mapper().writeValueAsBytes(sub);
-                        V value = descriptor.codec().decode(bytes);
+                        V value = decodeSub(sub);
                         // Carry the real storage key (from the decoded entity), not the key file name, so
                         // ScanRow.key() matches the other backends for sanitized/hashed keys.
                         rows.add(ScanRow.ok(descriptor.keyExtractor().apply(value).toString(), value));
@@ -470,7 +496,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                     try {
                         JsonNode sub = store.readSubNode(file, collection);
                         if (sub == null || !IndexValueExtractor.matchesAll(sub, query, hintsByPath)) continue;
-                        filtered.add(descriptor.codec().decode(store.mapper().writeValueAsBytes(sub)));
+                        filtered.add(decodeSub(sub));
                     } catch (Exception e) {
                         log.skippedCorruptedRow(collection, file.getFileName().toString(), e);
                     }
