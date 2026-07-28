@@ -21,6 +21,18 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
   everything, as its contract requires, and `getAll` is unchanged — a batch overlapping an
   in-flight single read still reads twice.
 
+  Two consequences of sharing a read, both intended. A caller that joins sees the row as of when
+  that read started, so an `invalidate(key)` landing mid-flight does not force a fresh read for
+  whoever joins — `refresh(key)` never joins, and is the way to demand a read that starts *now*.
+  And `missCount` is no longer a load count: concurrent misses on one key produce a single
+  `loadSuccessCount` / `loadFailureCount` increment, so expect misses to exceed loads under
+  contention (`loadFailureRate()` is per load, not per miss).
+
+- **A `Repository.find` that *throws* instead of returning a failed future now fails that read**,
+  rather than propagating out of `resolve`/`resolveCell` synchronously. Reads are uniformly
+  async again, the failure is counted like any other load failure, and the key is left free for
+  the next reader.
+
 ## [1.1.0] — 2026-07-20
 
 Two independent correctness fixes, each verified against the running code before it

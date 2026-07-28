@@ -6,6 +6,11 @@ package br.com.finalcraft.everydatabase.manager.observ;
  *
  * <p>Counts <b>manager-mediated</b> reads (resolve/peek/getAll); a {@code Ref} that has memoized its
  * cell reads the value lock-free without going through the manager, so those reads are not counted.
+ *
+ * <p>{@link #missCount()} is not a load count. Single-key loads are single-flight: concurrent misses
+ * on one key share a single backend read, and only that read increments
+ * {@link #loadSuccessCount()} / {@link #loadFailureCount()}. Expect misses to exceed loads under
+ * contention - {@link #loadFailureRate()} is a per-load rate, not a per-miss one.
  */
 public final class CacheStats {
 

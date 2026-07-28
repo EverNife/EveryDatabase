@@ -78,6 +78,18 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      * Loads currently in flight, one per key: a second miss on a key already being loaded waits on
      * that read instead of issuing its own. Single-key reads only - {@link #getAll(Collection)} keeps
      * issuing its own batch, and a batch overlapping an in-flight single read still reads twice.
+     *
+     * <p>A caller that joins sees the row as of when that read started, which has two visible
+     * consequences: an {@link #invalidate(Object)} landing mid-flight does not force a fresh read
+     * for whoever joins, and a cell installed meanwhile (a save, a seed) is kept by the keep-first
+     * cold-miss publish instead of being overwritten. {@link #refresh(Object)} never joins - it is
+     * the way to demand a read that starts now.
+     *
+     * <p><b>Never mutate this map from inside one of its own mapping functions.</b> A synchronous
+     * backend runs a load's continuation inline, and anything that continuation resolves in turn (a
+     * {@code Ref}, an alias hop) re-enters this map - which {@code ConcurrentHashMap} answers with
+     * "Recursive update" whenever the two keys share a bin. Entries are therefore published with
+     * {@code putIfAbsent} and removed from a completion callback, never through {@code compute*}.
      */
     private final ConcurrentMap<K, CompletableFuture<CacheEntry<V>>> inFlight = new ConcurrentHashMap<>();
     /** Dirty-tracking accessor for the entity type (write-back), or {@code null} when not trackable. */
@@ -174,26 +186,51 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                 shared = racedIn;
             } else {
                 shared = promise;
-                loadIntoCell(key).whenComplete((cell, failure) -> {
+                // Holding the slot is what makes this lookup the last word. A load publishes its cell
+                // BEFORE clearing its slot, so one that finished between the miss above and this
+                // putIfAbsent has already published - and with its slot gone, nothing else would say
+                // so. Looking only after taking the slot means no load can land in between; looking
+                // before it leaves exactly that gap, and the key gets read twice. The miss above
+                // stands either way: this is a miss that got lucky, not a cache hit.
+                CacheEntry<V> published = store.get(key);
+                if (serveable(published, policy)) {
                     inFlight.remove(key, promise);
-                    if (failure != null) promise.completeExceptionally(failure);
-                    else promise.complete(cell);
-                });
+                    promise.complete(published);
+                } else {
+                    try {
+                        loadIntoCell(key, published == null).whenComplete((cell, failure) -> {
+                            inFlight.remove(key, promise);
+                            if (failure != null) promise.completeExceptionally(failure);
+                            else promise.complete(cell);
+                        });
+                    } catch (Throwable thrown) {
+                        // A repository breaking the async contract by THROWING must not leave the
+                        // promise published: every later reader would join a future nobody is left to
+                        // complete. The throw becomes this read's failure, like any other load failure.
+                        inFlight.remove(key, promise);
+                        statLoadFailure.increment();
+                        promise.completeExceptionally(thrown);
+                    }
+                }
             }
         }
         return shared.thenApply(cell -> cell);
     }
 
     /**
-     * Issues the one backend read for {@code key} and publishes it into the key's cell.
+     * Issues the one backend read for {@code key} and publishes it into the key's cell. A cold miss
+     * has no cell yet; anything else (stale, or a tombstone) is a reload.
+     *
+     * <p>{@code coldMiss} is decided by the caller, from the cell lookup it made immediately before
+     * committing to this read. Re-reading the store here would widen the window in which a value
+     * saved in between turns a cold miss into a reload, and the reload's newer stamp would then
+     * overwrite that save with the row this read returns - where a cold miss keeps it.</p>
      *
      * <p>The freshness policy is deliberately not part of the in-flight identity: a load always
      * fetches the authoritative row, and the policy only decides whether the CACHED cell could have
      * been served - which was already answered before reaching here.</p>
      */
-    private CompletableFuture<CacheEntry<V>> loadIntoCell(K key) {
-        // A cold miss has no cell yet; anything else (stale, or a tombstone) is a reload.
-        final boolean coldMiss = (store.get(key) == null);
+    private CompletableFuture<CacheEntry<V>> loadIntoCell(K key, boolean coldMiss) {
         final long stamp = stampGen.incrementAndGet();
         return repository.find(key)
                 .whenComplete((opt, ex) -> { if (ex != null) statLoadFailure.increment(); })
@@ -773,7 +810,13 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         }
     }
 
-    /** Marks a cached entry stale (atomically, under the store lock): the next read reloads it. */
+    /**
+     * Marks a cached entry stale (atomically, under the store lock): the next read reloads it.
+     *
+     * <p>A read already in flight for that key is neither cancelled nor restarted, and a reader
+     * arriving while it runs joins it - so the value that lands can predate this call. Use
+     * {@link #refresh(Object)} when you need a read that starts after the invalidation.
+     */
     public void invalidate(K key) {
         statInvalidations.increment();
         store.markStale(key);

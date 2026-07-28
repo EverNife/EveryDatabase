@@ -21,7 +21,7 @@ import java.util.stream.Stream;
  * batch write-back can be driven into the optimistic-lock and transient-error paths without a real
  * versioned backend (none of the no-Docker backends enforce optimistic locking).
  *
- * <p>Reads are scriptable too ({@link #failFind}, {@link #beforeFind}), because a conflict
+ * <p>Reads are scriptable too ({@link #failFind}, {@link #throwOnFind}, {@link #beforeFind}), because a conflict
  * resolution re-reads the winner: that read is both a failure path of its own and the window in
  * which a racing thread gets to touch the live instance. {@link #deferFind} holds a read open and
  * {@link #findCount} counts them, which is how a test observes whether two readers of one key
@@ -34,6 +34,7 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
     private final Map<K, Supplier<? extends RuntimeException>> saveThrows = new ConcurrentHashMap<>();
     private final Map<K, Supplier<? extends RuntimeException>> deleteFailures = new ConcurrentHashMap<>();
     private final Map<K, Supplier<? extends RuntimeException>> findFailures = new ConcurrentHashMap<>();
+    private final Map<K, Supplier<? extends RuntimeException>> findThrows = new ConcurrentHashMap<>();
     private final Map<K, Runnable> findCallbacks = new ConcurrentHashMap<>();
     private final Map<K, CompletableFuture<Optional<V>>> deferredFinds = new ConcurrentHashMap<>();
     private final Map<K, AtomicInteger> findCalls = new ConcurrentHashMap<>();
@@ -65,6 +66,15 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
     /** Makes {@code find} fail for {@code key} with the supplied exception. */
     public void failFind(K key, Supplier<? extends RuntimeException> exception) {
         findFailures.put(key, exception);
+    }
+
+    /**
+     * Makes the next {@code find} of {@code key} THROW instead of returning a failed future - a
+     * repository breaking the async contract on the read side, which is what tells a manager's
+     * in-flight bookkeeping apart from one that only survives well-behaved failures. Runs once.
+     */
+    public void throwOnFind(K key, Supplier<? extends RuntimeException> exception) {
+        findThrows.put(key, exception);
     }
 
     /** Runs {@code action} on the next {@code find} of {@code key}, before it answers - the hook a
@@ -140,6 +150,10 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Optional<V>> find(K key) {
+        Supplier<? extends RuntimeException> thrown = findThrows.remove(key);
+        if (thrown != null) {
+            throw thrown.get();   // never answered, so it is not a counted call
+        }
         findCalls.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet();
         Runnable callback = findCallbacks.remove(key);
         if (callback != null) {
