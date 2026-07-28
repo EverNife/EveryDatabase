@@ -161,12 +161,31 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         // Single-flight: concurrent misses on the same key share ONE backend read instead of racing
         // to issue their own. The dependent future is what each caller gets, so one caller cancelling
         // its handle cannot disturb the load the others are waiting on.
-        return inFlight.computeIfAbsent(key, this::loadIntoCell).thenApply(cell -> cell);
+        //
+        // Deliberately putIfAbsent over a promise, NOT computeIfAbsent: a synchronous backend runs the
+        // load's continuation inline, and anything it resolves in turn (a Ref, an alias hop) would be
+        // a re-entrant map update from inside the mapping function - which ConcurrentHashMap answers
+        // with "Recursive update" whenever the two keys share a bin.
+        CompletableFuture<CacheEntry<V>> shared = inFlight.get(key);
+        if (shared == null) {
+            CompletableFuture<CacheEntry<V>> promise = new CompletableFuture<>();
+            CompletableFuture<CacheEntry<V>> racedIn = inFlight.putIfAbsent(key, promise);
+            if (racedIn != null) {
+                shared = racedIn;
+            } else {
+                shared = promise;
+                loadIntoCell(key).whenComplete((cell, failure) -> {
+                    inFlight.remove(key, promise);
+                    if (failure != null) promise.completeExceptionally(failure);
+                    else promise.complete(cell);
+                });
+            }
+        }
+        return shared.thenApply(cell -> cell);
     }
 
     /**
-     * Issues the one backend read for {@code key} and publishes it into the key's cell, clearing the
-     * in-flight entry when it settles (a failed load leaves nothing behind - the next caller retries).
+     * Issues the one backend read for {@code key} and publishes it into the key's cell.
      *
      * <p>The freshness policy is deliberately not part of the in-flight identity: a load always
      * fetches the authoritative row, and the policy only decides whether the CACHED cell could have
@@ -188,8 +207,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                             ? store.installColdMiss(key, value, stamp)   // keep-first, but loses to a newer delete
                             : updateInPlace(key, value, stamp);          // stamp-guarded (resurrects an older tombstone)
                     return cell.isDeleted() ? null : cell;               // a newer delete won -> treat as absent
-                })
-                .whenComplete((cell, ex) -> inFlight.remove(key));
+                });
     }
 
     /**
