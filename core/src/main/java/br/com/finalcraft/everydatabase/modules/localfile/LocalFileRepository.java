@@ -10,6 +10,7 @@ import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.codec.JacksonYamlCodec;
+import br.com.finalcraft.everydatabase.codec.ObjectMapperAware;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
@@ -470,6 +471,15 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
         return query(Query.eq(fieldPath, value));
     }
 
+    /**
+     * Scans the collection directory and returns the entities matching {@code query}.
+     *
+     * <p>A stored file <em>is</em> the codec's own output, so a condition can be tested against the
+     * tree parsed straight from disk and only the matches ever reach the codec. A file that is present
+     * but undecodable is therefore reported (skipped-and-logged) only when it matches the query - one
+     * that does not match is filtered out before its decode would have failed. An opaque codec, whose
+     * bytes are no tree at all, still decodes first (see {@link #payloadTree}).
+     */
     @Override
     public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
         if (query == null) {
@@ -491,16 +501,54 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
         QueryResultOrdering.validateOrderField(finalOptions, hintsByPath, "LocalFile");
 
         long startMs = System.currentTimeMillis();
-        return all().thenApply(stream -> {
-            List<V> filtered = new ArrayList<>();
-            stream.forEach(entity -> {
-                JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
-                if (matchesAll(tree, query)) filtered.add(entity);
-            });
-            List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
-            log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
-            return result;
-        });
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                List<V> filtered = new ArrayList<>();
+                for (Path path : collectionFiles()) {
+                    try {
+                        byte[] data   = Files.readAllBytes(path);
+                        V      entity = null;
+                        JsonNode tree = payloadTree(data);
+                        if (tree == null) {   // opaque codec: only the decoded entity yields a tree
+                            entity = descriptor.codec().decode(data);
+                            tree   = IndexValueExtractor.toTree(entity, descriptor.codec());
+                        }
+                        if (!IndexValueExtractor.matchesAll(tree, query, hintsByPath)) continue;
+                        filtered.add(entity != null ? entity : descriptor.codec().decode(data));
+                    } catch (Exception e) {
+                        log.skippedCorruptedRow(descriptor.collection(), path.getFileName().toString(), e);
+                    }
+                }
+                List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
+                log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
+                return result;
+            } catch (IOException e) {
+                throw log.errored(StorageOp.QUERY, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to query entities", e));
+            }
+        }, StorageExecutors.get());
+    }
+
+    /** The entity files of this collection (depth 1, filtered by the codec's extension). */
+    private List<Path> collectionFiles() throws IOException {
+        if (!Files.exists(collectionDir)) return Collections.emptyList();
+        String ext = "." + fileExtension();
+        try (Stream<Path> paths = Files.walk(collectionDir, 1)) {
+            return paths
+                .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
+                .collect(Collectors.toList());
+        }
+    }
+
+    /**
+     * The stored payload as the tree the codec wrote, so a query can filter a file before decoding it.
+     * {@code null} for an opaque codec - one that is neither Jackson-backed nor JSON - whose bytes are
+     * not a tree, and whose entity therefore has to be decoded before it can be matched.
+     */
+    private JsonNode payloadTree(byte[] data) throws IOException {
+        Codec<V> codec = descriptor.codec();
+        if (!(codec instanceof ObjectMapperAware) && !codec.isJsonCodec()) return null;
+        return IndexValueExtractor.mapperFor(codec).readTree(data);
     }
 
     @Override
@@ -519,35 +567,4 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor(), descriptor.codec()));
     }
 
-    private boolean matchesAll(JsonNode tree, Query query) {
-        for (Query.Condition c : query.conditions()) {
-            IndexHint hint = hintsByPath.get(c.fieldPath());
-            Object actual = IndexValueExtractor.extract(tree, hint);
-            if (!matchesCondition(actual, c, hint)) return false;
-        }
-        return true;
-    }
-
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private static boolean matchesCondition(Object actual, Query.Condition c, IndexHint hint) {
-        switch (c.op()) {
-            case EQ: {
-                Object expected = IndexValueExtractor.normalizeQueryValue(c.value(), hint);
-                return Objects.equals(actual, expected);
-            }
-            case IN:
-                for (Object v : c.inValues()) {
-                    Object normalized = IndexValueExtractor.normalizeQueryValue(v, hint);
-                    if (Objects.equals(actual, normalized)) return true;
-                }
-                return false;
-            case RANGE: {
-                Object from = IndexValueExtractor.normalizeQueryValue(c.rangeFrom(), hint);
-                Object to   = IndexValueExtractor.normalizeQueryValue(c.rangeTo(),   hint);
-                return IndexValueExtractor.rangeContains(actual, from, to);
-            }
-            default:
-                return false;
-        }
-    }
 }

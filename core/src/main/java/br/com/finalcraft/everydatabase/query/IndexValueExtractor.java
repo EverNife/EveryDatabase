@@ -11,6 +11,8 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.Map;
+import java.util.Objects;
 
 /**
  * Reads the value at an {@link IndexHint} field path from an entity, coercing it to
@@ -146,6 +148,51 @@ public final class IndexValueExtractor {
                 return null;
             default:
                 return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  In-memory matching (the scan backends' query engine)
+    // ------------------------------------------------------------------
+
+    /**
+     * Whether {@code tree} satisfies every condition of {@code query} (conditions are ANDed).
+     *
+     * <p>This is the query engine of the backends that have no real index (LocalFile, GroupedFile):
+     * they read the stored document, extract each queried field from its tree and compare with the
+     * very same coercion rules {@link #extract} and {@link #normalizeQueryValue} apply on the indexed
+     * backends, so a query answered by a scan agrees with the one answered by SQL or Mongo.
+     *
+     * <p>Every condition's field path must be present in {@code hintsByPath}: callers reject
+     * undeclared fields up front so a query keeps working when the storage is swapped.
+     *
+     * @param tree        the stored entity as a Jackson tree; {@code null} satisfies no condition
+     * @param query       the conditions to test
+     * @param hintsByPath the declared index hints, by field path
+     */
+    public static boolean matchesAll(JsonNode tree, Query query, Map<String, IndexHint> hintsByPath) {
+        for (Query.Condition c : query.conditions()) {
+            IndexHint hint = hintsByPath.get(c.fieldPath());
+            if (!matchesCondition(extract(tree, hint), c, hint)) return false;
+        }
+        return true;
+    }
+
+    private static boolean matchesCondition(Object actual, Query.Condition c, IndexHint hint) {
+        switch (c.op()) {
+            case EQ:
+                return Objects.equals(actual, normalizeQueryValue(c.value(), hint));
+            case IN:
+                for (Object v : c.inValues()) {
+                    if (Objects.equals(actual, normalizeQueryValue(v, hint))) return true;
+                }
+                return false;
+            case RANGE:
+                return rangeContains(actual,
+                    normalizeQueryValue(c.rangeFrom(), hint),
+                    normalizeQueryValue(c.rangeTo(),   hint));
+            default:
+                return false;
         }
     }
 

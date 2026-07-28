@@ -3,6 +3,9 @@ package br.com.finalcraft.everydatabase.modules.groupedfile;
 import br.com.finalcraft.everydatabase.util.FileKeyNames;
 
 import br.com.finalcraft.everydatabase.codec.Codec;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -148,6 +151,62 @@ final class KeyFileStore {
                 .filter(p -> p.getFileName().toString().endsWith(ext))
                 .collect(Collectors.toList());
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  Partial reads
+    //
+    //  An aggregate file holds every collection that shares its key, but a repository owns exactly
+    //  one of them. Materializing the whole document to ask for one sub-node makes every scan pay for
+    //  the collections it does not read - the sparser the collection, the worse. These two primitives
+    //  walk the depth-1 field names with a streaming parser instead, skipping over the values that do
+    //  not match and materializing at most the one that does.
+    // ------------------------------------------------------------------
+
+    /**
+     * Whether the key file declares {@code collection} at the top level, without building any node.
+     * {@code false} when the file is absent or its root is not an object.
+     *
+     * @throws IOException if the file cannot be read or is not well-formed up to the answer
+     */
+    boolean hasSubNode(Path file, String collection) throws IOException {
+        if (!Files.exists(file)) return false;
+        try (JsonParser parser = mapper.getFactory().createParser(Files.readAllBytes(file))) {
+            return seekField(parser, collection);
+        }
+    }
+
+    /**
+     * The sub-node stored under {@code collection}, or {@code null} when the file is absent, its root
+     * is not an object, or it holds no such field - the same "absent" contract as reading the whole
+     * root and asking for the field.
+     *
+     * <p>A malformed document repeating the field resolves to the <b>first</b> occurrence, since the
+     * scan stops there; a full tree read would instead keep the last.
+     *
+     * @throws IOException if the file cannot be read or is not well-formed up to the sub-node
+     */
+    JsonNode readSubNode(Path file, String collection) throws IOException {
+        if (!Files.exists(file)) return null;
+        try (JsonParser parser = mapper.getFactory().createParser(Files.readAllBytes(file))) {
+            return seekField(parser, collection) ? parser.readValueAsTree() : null;
+        }
+    }
+
+    /**
+     * Advances {@code parser} to the value of the depth-1 field {@code name}, skipping over the values
+     * of the fields before it. Returns {@code false} (parser exhausted) when the root is not an object
+     * or the field is not there.
+     */
+    private static boolean seekField(JsonParser parser, String name) throws IOException {
+        if (parser.nextToken() != JsonToken.START_OBJECT) return false;
+        while (parser.nextToken() == JsonToken.FIELD_NAME) {
+            boolean match = name.equals(parser.currentName());
+            parser.nextToken();          // position on the value
+            if (match) return true;
+            parser.skipChildren();       // no-op on a scalar, jumps the whole subtree otherwise
+        }
+        return false;
     }
 
     /**

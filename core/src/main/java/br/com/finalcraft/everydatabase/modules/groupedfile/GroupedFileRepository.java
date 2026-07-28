@@ -105,9 +105,9 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             ReadWriteLock lock = lockFor(key);
             lock.readLock().lock();
             try {
-                ObjectNode root = readRoot(fileFor(key));
-                if (root == null || !root.has(collection)) return Optional.empty();
-                byte[] bytes = store.mapper().writeValueAsBytes(root.get(collection));
+                JsonNode sub = store.readSubNode(fileFor(key), collection);
+                if (sub == null) return Optional.empty();
+                byte[] bytes = store.mapper().writeValueAsBytes(sub);
                 return Optional.of(descriptor.codec().decode(bytes));
             } catch (IOException e) {
                 throw log.errored(StorageOp.FIND, collection,
@@ -140,8 +140,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             ReadWriteLock lock = lockFor(key);
             lock.readLock().lock();
             try {
-                ObjectNode root = readRoot(fileFor(key));
-                return root != null && root.has(collection);
+                return store.hasSubNode(fileFor(key), collection);
             } catch (IOException e) {
                 throw log.errored(StorageOp.EXISTS, collection,
                     new RuntimeException("GroupedFile: failed to check key=" + key, e));
@@ -163,11 +162,10 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 ReadWriteLock lock = lockFor(key);
                 lock.readLock().lock();
                 try {
-                    ObjectNode root = readRoot(fileFor(key));
                     // GroupedFile does not enforce optimistic locking, so existing keys always
                     // report version 0 - matching H2 and keeping the polling substrate uniform
-                    // across non-enforcing backends (and skipping a decode of the aggregate).
-                    if (root != null && root.has(collection)) result.put(key, 0L);
+                    // across non-enforcing backends. A presence probe is all this costs.
+                    if (store.hasSubNode(fileFor(key), collection)) result.put(key, 0L);
                 } catch (IOException e) {
                     // skip unreadable/corrupt entries
                 } finally {
@@ -188,9 +186,9 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                         // Decode the sub-node to stay consistent with all(): a corrupt key file (or a
                         // present-but-undecodable sub-node) is skipped-and-logged there and by catching
                         // Exception here, so it never fails the whole count nor inflates it.
-                        ObjectNode root = readRoot(file);
-                        if (root != null && root.has(collection)) {
-                            descriptor.codec().decode(store.mapper().writeValueAsBytes(root.get(collection)));
+                        JsonNode sub = store.readSubNode(file, collection);
+                        if (sub != null) {
+                            descriptor.codec().decode(store.mapper().writeValueAsBytes(sub));
                             n++;
                         }
                     } catch (Exception e) {
@@ -212,9 +210,9 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 List<V> results = new ArrayList<>();
                 for (Path file : store.keyFiles()) {
                     try {
-                        ObjectNode root = readRoot(file);
-                        if (root != null && root.has(collection)) {
-                            results.add(descriptor.codec().decode(store.mapper().writeValueAsBytes(root.get(collection))));
+                        JsonNode sub = store.readSubNode(file, collection);
+                        if (sub != null) {
+                            results.add(descriptor.codec().decode(store.mapper().writeValueAsBytes(sub)));
                         }
                     } catch (Exception e) {
                         // A corrupt key file drops the whole key from the scan; log a WARN, don't fail.
@@ -406,9 +404,9 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 for (Path file : files) {
                     String fileName = file.getFileName().toString();
                     try {
-                        ObjectNode root = readRoot(file);
-                        if (root == null || !root.has(collection)) continue;   // key holds only other collections
-                        byte[] bytes = store.mapper().writeValueAsBytes(root.get(collection));
+                        JsonNode sub = store.readSubNode(file, collection);
+                        if (sub == null) continue;   // key holds only other collections
+                        byte[] bytes = store.mapper().writeValueAsBytes(sub);
                         V value = descriptor.codec().decode(bytes);
                         // Carry the real storage key (from the decoded entity), not the key file name, so
                         // ScanRow.key() matches the other backends for sanitized/hashed keys.
@@ -439,6 +437,15 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         return query(Query.eq(fieldPath, value));
     }
 
+    /**
+     * Scans the key files and returns the entities matching {@code query}.
+     *
+     * <p>The stored sub-node <em>is</em> the codec's own output ({@link #writeEntity} embeds
+     * {@code codec.encode(entity)} verbatim), so a condition can be tested against the tree read from
+     * disk and only the matches ever reach the codec. A sub-node that is present but undecodable is
+     * therefore reported (skipped-and-logged) only when it matches the query - one that does not match
+     * is filtered out before its decode would have failed.
+     */
     @Override
     public CompletableFuture<List<V>> query(Query query, QueryOptions options) {
         if (query == null) {
@@ -459,16 +466,26 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         QueryResultOrdering.validateOrderField(finalOptions, hintsByPath, "GroupedFile");
 
         long startMs = System.currentTimeMillis();
-        return all().thenApply(stream -> {
-            List<V> filtered = new ArrayList<>();
-            stream.forEach(entity -> {
-                JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
-                if (matchesAll(tree, query)) filtered.add(entity);
-            });
-            List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
-            log.queried(collection, query, result.size(), System.currentTimeMillis() - startMs);
-            return result;
-        });
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                List<V> filtered = new ArrayList<>();
+                for (Path file : store.keyFiles()) {
+                    try {
+                        JsonNode sub = store.readSubNode(file, collection);
+                        if (sub == null || !IndexValueExtractor.matchesAll(sub, query, hintsByPath)) continue;
+                        filtered.add(descriptor.codec().decode(store.mapper().writeValueAsBytes(sub)));
+                    } catch (Exception e) {
+                        log.skippedCorruptedRow(collection, file.getFileName().toString(), e);
+                    }
+                }
+                List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
+                log.queried(collection, query, result.size(), System.currentTimeMillis() - startMs);
+                return result;
+            } catch (IOException e) {
+                throw log.errored(StorageOp.QUERY, collection,
+                    new RuntimeException("GroupedFile: failed to query entities", e));
+            }
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -487,35 +504,4 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor(), descriptor.codec()));
     }
 
-    private boolean matchesAll(JsonNode tree, Query query) {
-        for (Query.Condition c : query.conditions()) {
-            IndexHint hint = hintsByPath.get(c.fieldPath());
-            Object actual = IndexValueExtractor.extract(tree, hint);
-            if (!matchesCondition(actual, c, hint)) return false;
-        }
-        return true;
-    }
-
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private static boolean matchesCondition(Object actual, Query.Condition c, IndexHint hint) {
-        switch (c.op()) {
-            case EQ: {
-                Object expected = IndexValueExtractor.normalizeQueryValue(c.value(), hint);
-                return Objects.equals(actual, expected);
-            }
-            case IN:
-                for (Object v : c.inValues()) {
-                    Object normalized = IndexValueExtractor.normalizeQueryValue(v, hint);
-                    if (Objects.equals(actual, normalized)) return true;
-                }
-                return false;
-            case RANGE: {
-                Object from = IndexValueExtractor.normalizeQueryValue(c.rangeFrom(), hint);
-                Object to   = IndexValueExtractor.normalizeQueryValue(c.rangeTo(),   hint);
-                return IndexValueExtractor.rangeContains(actual, from, to);
-            }
-            default:
-                return false;
-        }
-    }
 }
