@@ -6,6 +6,21 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 `everydatabase-manager` and `everydatabase-manager-jedis` under the group
 `br.com.finalcraft.everydatabase`.
 
+## [1.1.1] — 2026-07-28
+
+### Changed
+- **`CachingManager` loads are now single-flight.** Concurrent misses on the same key share one
+  `Repository.find` instead of each issuing its own: the second caller waits on the read already
+  in flight, and both converge on the same instance. Identity was never at risk (`installColdMiss`
+  is keep-first), but the duplicate read was — and the second caller used to wait on a read that
+  started later than the one it could have joined.
+
+  The freshness policy is deliberately not part of the in-flight identity: a load always fetches
+  the authoritative row, and the policy only decides whether the *cached* cell could have been
+  served, which is already answered before any load is issued. A `noCache()` read still bypasses
+  everything, as its contract requires, and `getAll` is unchanged — a batch overlapping an
+  in-flight single read still reads twice.
+
 ## [1.1.0] — 2026-07-20
 
 Two independent correctness fixes, each verified against the running code before it

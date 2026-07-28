@@ -11,6 +11,7 @@ import br.com.finalcraft.everydatabase.query.Slice;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -22,7 +23,9 @@ import java.util.stream.Stream;
  *
  * <p>Reads are scriptable too ({@link #failFind}, {@link #beforeFind}), because a conflict
  * resolution re-reads the winner: that read is both a failure path of its own and the window in
- * which a racing thread gets to touch the live instance.
+ * which a racing thread gets to touch the live instance. {@link #deferFind} holds a read open and
+ * {@link #findCount} counts them, which is how a test observes whether two readers of one key
+ * produced one backend call or two.
  */
 public class ScriptedRepository<K, V> implements Repository<K, V> {
 
@@ -32,6 +35,8 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
     private final Map<K, Supplier<? extends RuntimeException>> deleteFailures = new ConcurrentHashMap<>();
     private final Map<K, Supplier<? extends RuntimeException>> findFailures = new ConcurrentHashMap<>();
     private final Map<K, Runnable> findCallbacks = new ConcurrentHashMap<>();
+    private final Map<K, CompletableFuture<Optional<V>>> deferredFinds = new ConcurrentHashMap<>();
+    private final Map<K, AtomicInteger> findCalls = new ConcurrentHashMap<>();
     private final Function<V, K> keyOf;
 
     public ScriptedRepository(Function<V, K> keyOf) {
@@ -66,6 +71,23 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
      *  test uses to land a concurrent change while the winner is being re-read. Runs once. */
     public void beforeFind(K key, Runnable action) {
         findCallbacks.put(key, action);
+    }
+
+    /**
+     * Makes the next {@code find} of {@code key} answer only when the returned handle is completed,
+     * holding the read open - the window in which a second read of the same key either joins the
+     * load already in flight or issues one of its own.
+     */
+    public CompletableFuture<Optional<V>> deferFind(K key) {
+        CompletableFuture<Optional<V>> gate = new CompletableFuture<>();
+        deferredFinds.put(key, gate);
+        return gate;
+    }
+
+    /** How many {@code find} calls this repository has answered for {@code key}. */
+    public int findCount(K key) {
+        AtomicInteger calls = findCalls.get(key);
+        return calls == null ? 0 : calls.get();
     }
 
     /** Stores {@code entity} directly, bypassing the scripted failures - seeds the stored winner. */
@@ -118,6 +140,7 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Optional<V>> find(K key) {
+        findCalls.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet();
         Runnable callback = findCallbacks.remove(key);
         if (callback != null) {
             callback.run();
@@ -125,6 +148,10 @@ public class ScriptedRepository<K, V> implements Repository<K, V> {
         Supplier<? extends RuntimeException> failure = findFailures.get(key);
         if (failure != null) {
             return failed(failure.get());
+        }
+        CompletableFuture<Optional<V>> deferred = deferredFinds.remove(key);
+        if (deferred != null) {
+            return deferred;
         }
         return CompletableFuture.completedFuture(Optional.ofNullable(data.get(key)));
     }

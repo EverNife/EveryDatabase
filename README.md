@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-1.1.0-informational)
+![Version](https://img.shields.io/badge/version-1.1.1-informational)
 
 </div>
 
@@ -87,10 +87,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.1'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.1.0'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.1.1'
 }
 ```
 
@@ -98,13 +98,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.1'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.1.0') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.1.1') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -124,7 +124,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.1.0</version>
+  <version>1.1.1</version>
 </dependency>
 ```
 
@@ -805,8 +805,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.1'
 ```
 
 ```java
@@ -891,9 +891,9 @@ When several instances share one backend, a write on one leaves the others' cach
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.1.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.1.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.1.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.1.1'
 ```
 
 ```java

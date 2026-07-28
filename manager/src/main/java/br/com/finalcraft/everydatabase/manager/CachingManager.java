@@ -10,6 +10,8 @@ import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
@@ -72,6 +74,12 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     protected final LruCacheStore<K, V> store;
     /** Monotonic source for publication stamps (orders writes/reloads so none regress a newer one). */
     protected final AtomicLong stampGen = new AtomicLong();
+    /**
+     * Loads currently in flight, one per key: a second miss on a key already being loaded waits on
+     * that read instead of issuing its own. Single-key reads only - {@link #getAll(Collection)} keeps
+     * issuing its own batch, and a batch overlapping an in-flight single read still reads twice.
+     */
+    private final ConcurrentMap<K, CompletableFuture<CacheEntry<V>>> inFlight = new ConcurrentHashMap<>();
     /** Dirty-tracking accessor for the entity type (write-back), or {@code null} when not trackable. */
     protected final DirtyAccessor dirtyAccessor;
     /** Optional hook fired after a successful local write; used by {@code CacheSync.via(...)} to publish a signal. */
@@ -150,8 +158,23 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                         return new CacheEntry<>(opt.get());
                     });
         }
+        // Single-flight: concurrent misses on the same key share ONE backend read instead of racing
+        // to issue their own. The dependent future is what each caller gets, so one caller cancelling
+        // its handle cannot disturb the load the others are waiting on.
+        return inFlight.computeIfAbsent(key, this::loadIntoCell).thenApply(cell -> cell);
+    }
+
+    /**
+     * Issues the one backend read for {@code key} and publishes it into the key's cell, clearing the
+     * in-flight entry when it settles (a failed load leaves nothing behind - the next caller retries).
+     *
+     * <p>The freshness policy is deliberately not part of the in-flight identity: a load always
+     * fetches the authoritative row, and the policy only decides whether the CACHED cell could have
+     * been served - which was already answered before reaching here.</p>
+     */
+    private CompletableFuture<CacheEntry<V>> loadIntoCell(K key) {
         // A cold miss has no cell yet; anything else (stale, or a tombstone) is a reload.
-        final boolean coldMiss = (existing == null);
+        final boolean coldMiss = (store.get(key) == null);
         final long stamp = stampGen.incrementAndGet();
         return repository.find(key)
                 .whenComplete((opt, ex) -> { if (ex != null) statLoadFailure.increment(); })
@@ -165,7 +188,8 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
                             ? store.installColdMiss(key, value, stamp)   // keep-first, but loses to a newer delete
                             : updateInPlace(key, value, stamp);          // stamp-guarded (resurrects an older tombstone)
                     return cell.isDeleted() ? null : cell;               // a newer delete won -> treat as absent
-                });
+                })
+                .whenComplete((cell, ex) -> inFlight.remove(key));
     }
 
     /**
