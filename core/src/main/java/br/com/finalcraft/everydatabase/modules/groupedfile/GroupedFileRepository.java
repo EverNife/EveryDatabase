@@ -118,13 +118,6 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         return store.lockFor(KeyFileStore.sanitize(key));
     }
 
-    /** Reads the aggregate root for a key file, or {@code null} if the file is absent / not an object. */
-    private ObjectNode readRoot(Path file) throws IOException {
-        if (!Files.exists(file)) return null;
-        JsonNode node = store.mapper().readTree(Files.readAllBytes(file));
-        return (node != null && node.isObject()) ? (ObjectNode) node : null;
-    }
-
     // ------------------------------------------------------------------
     //  Reads
     // ------------------------------------------------------------------
@@ -135,7 +128,10 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             ReadWriteLock lock = lockFor(key);
             lock.readLock().lock();
             try {
-                JsonNode sub = store.readSubNode(fileFor(key), collection);
+                // Addressing one key: the aggregate document is memoized, because the collections
+                // that share this key are the next thing anyone asks for.
+                ObjectNode root = store.cachedRoot(fileFor(key));
+                JsonNode sub = root == null ? null : root.get(collection);
                 if (sub == null) return Optional.empty();
                 return Optional.of(decodeSub(sub));
             } catch (IOException e) {
@@ -333,10 +329,10 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         lock.writeLock().lock();
         try {
             Path file = fileFor(key);
-            ObjectNode root = readRoot(file);
+            ObjectNode root = store.mutableRoot(file);
             if (root == null || !root.has(collection)) return;   // absent - never inserts
             root.set(collection, encodeSub(entity));
-            store.writeAtomic(file, store.mapper().writeValueAsBytes(root));
+            store.writeAtomic(file, root);
         } catch (IOException e) {
             throw log.errored(StorageOp.SAVE, collection,
                 new RuntimeException("GroupedFile: failed to write key=" + key, e));
@@ -358,12 +354,12 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         lock.writeLock().lock();
         try {
             Path file = fileFor(key);
-            ObjectNode root = readRoot(file);
+            ObjectNode root = store.mutableRoot(file);
             if (root == null) root = store.mapper().createObjectNode();
-            // Parse the codec's bytes into a sub-node so the entity keeps its codec representation,
-            // then re-emit the whole aggregate document in the storage's format.
+            // The sub-node keeps the codec's own representation of the entity; the document around
+            // it is re-emitted in the storage's format.
             root.set(collection, encodeSub(entity));
-            store.writeAtomic(file, store.mapper().writeValueAsBytes(root));
+            store.writeAtomic(file, root);
         } catch (IOException e) {
             throw log.errored(StorageOp.SAVE, collection,
                 new RuntimeException("GroupedFile: failed to write key=" + key, e));
@@ -382,7 +378,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             lock.writeLock().lock();
             try {
                 Path file = fileFor(key);
-                ObjectNode root = readRoot(file);
+                ObjectNode root = store.mutableRoot(file);
                 if (root == null || !root.has(collection)) {
                     log.deleted(collection, key, false);
                     return false;
@@ -392,7 +388,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                     // Last collection for this key - drop the now-empty file rather than leave a "{}".
                     store.delete(file);
                 } else {
-                    store.writeAtomic(file, store.mapper().writeValueAsBytes(root));
+                    store.writeAtomic(file, root);
                 }
                 log.deleted(collection, key, true);
                 return true;

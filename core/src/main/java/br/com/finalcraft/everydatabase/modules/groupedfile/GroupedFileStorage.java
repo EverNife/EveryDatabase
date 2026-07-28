@@ -77,7 +77,7 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
         this.config       = config;
         this.logConfig    = logConfig;
         this.log          = new StorageLog("groupedfile", () -> this.logConfig);
-        this.keyFileStore = new KeyFileStore(config.baseDirectory());
+        this.keyFileStore = new KeyFileStore(config.baseDirectory(), config.rootCacheSize());
     }
 
     // ------------------------------------------------------------------
@@ -127,6 +127,11 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
 
     Path baseDirectory() {
         return config.baseDirectory();
+    }
+
+    /** Package-visible so tests can assert how often an aggregate document is actually parsed. */
+    KeyFileStore keyFileStore() {
+        return keyFileStore;
     }
 
     // ------------------------------------------------------------------

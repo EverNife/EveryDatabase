@@ -9,6 +9,18 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 ## [Unreleased]
 
 ### Added
+- **GroupedFile memoizes aggregate documents**, bounded by `GroupedFileConfig.rootCacheSize(int)`
+  (default 256 documents; `0` disables). A key file holds every collection sharing its key, so
+  loading one entity-root used to read and parse the same file once per collection — 20 collections
+  meant 20 parses of one document. Point reads and writes now share one parsed document; directory
+  scans deliberately do not participate, since they touch each file once.
+
+  Validity is a `(lastModifiedTime, size)` stamp checked per access, which costs one extra syscall
+  on a read that misses the memo — a workload that only ever touches one collection per key is
+  marginally better off with `rootCacheSize(0)`. Writes made through the storage refresh the memo
+  directly; an external process rewriting a file to exactly the same length within one filesystem
+  timestamp tick is the case the stamp cannot see.
+
 - **`TreeCodec`** — an optional codec capability (same idiom as `ObjectMapperAware`) for converting
   directly to and from a Jackson tree. `JacksonJsonCodec` and `JacksonYamlCodec` implement it;
   anything else keeps working through `encode`/`decode`.

@@ -12,11 +12,17 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
@@ -57,8 +63,38 @@ final class KeyFileStore {
     private volatile String       extension;  // ".json" or ".yml"
     private volatile Boolean      yaml;        // null until resolved
 
+    /** Memoized aggregate documents, LRU-bounded. Empty and unused when the cache is disabled. */
+    private final Map<Path, CachedRoot> roots;
+    private final int rootCacheSize;
+
+    /** Full parses that actually happened - the observable the cache exists to reduce. */
+    private final AtomicLong rootParses = new AtomicLong();
+
     KeyFileStore(Path baseDirectory) {
+        this(baseDirectory, GroupedFileConfig.DEFAULT_ROOT_CACHE_SIZE);
+    }
+
+    KeyFileStore(Path baseDirectory, int rootCacheSize) {
         this.baseDirectory = baseDirectory;
+        this.rootCacheSize = Math.max(0, rootCacheSize);
+        this.roots = this.rootCacheSize == 0
+            ? null
+            : Collections.synchronizedMap(new LinkedHashMap<Path, CachedRoot>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Path, CachedRoot> eldest) {
+                    return size() > KeyFileStore.this.rootCacheSize;
+                }
+            });
+    }
+
+    /** Number of aggregate documents currently memoized; {@code 0} when the cache is disabled. */
+    int cachedRootCount() {
+        return roots == null ? 0 : roots.size();
+    }
+
+    /** How many times a whole aggregate document had to be parsed since this store was created. */
+    long rootParseCount() {
+        return rootParses.get();
     }
 
     Path baseDirectory() {
@@ -170,6 +206,8 @@ final class KeyFileStore {
      * @throws IOException if the file cannot be read or is not well-formed up to the answer
      */
     boolean hasSubNode(Path file, String collection) throws IOException {
+        ObjectNode memoized = memoized(file);
+        if (memoized != null) return memoized.has(collection);
         byte[] bytes = readIfPresent(file);
         if (bytes == null) return false;
         try (JsonParser parser = mapper.getFactory().createParser(bytes)) {
@@ -188,10 +226,118 @@ final class KeyFileStore {
      * @throws IOException if the file cannot be read or is not well-formed up to the sub-node
      */
     JsonNode readSubNode(Path file, String collection) throws IOException {
+        ObjectNode memoized = memoized(file);
+        if (memoized != null) return memoized.get(collection);
         byte[] bytes = readIfPresent(file);
         if (bytes == null) return null;
         try (JsonParser parser = mapper.getFactory().createParser(bytes)) {
             return seekField(parser, collection) ? parser.readValueAsTree() : null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Whole-document reads
+    //
+    //  A key file aggregates every collection sharing its key, so anything addressing one KEY - a
+    //  point read, or the read half of a read-modify-write - is about to be asked for the same file
+    //  again by the next collection. Those go through the memo. Directory scans do not: they touch
+    //  each file once, and parsing whole documents to fill a cache nobody will hit would undo the
+    //  streaming reads above.
+    // ------------------------------------------------------------------
+
+    /**
+     * The memoized aggregate document for {@code file}, or {@code null} when the cache is off, holds
+     * nothing for it, or holds a stamp the file no longer matches.
+     *
+     * <p>Validity is {@code (lastModifiedTime, size)}. That is a coarse stamp: a file rewritten
+     * within the filesystem's timestamp resolution, to exactly the same length, reads as unchanged.
+     * Writes made through this store refresh the entry directly, so the gap only covers edits by
+     * another process - set {@code rootCacheSize(0)} where that matters.
+     */
+    private ObjectNode memoized(Path file) {
+        if (roots == null) return null;
+        CachedRoot entry = roots.get(file);
+        if (entry == null) return null;
+        BasicFileAttributes attrs = statOrNull(file);
+        if (attrs == null || !entry.matches(attrs)) {
+            roots.remove(file);
+            return null;
+        }
+        return entry.root;
+    }
+
+    /**
+     * The whole aggregate document for {@code file}, memoized for the collections that follow, or
+     * {@code null} when the file is absent or its root is not an object.
+     *
+     * <p><b>Must not be mutated</b> - it is shared with every other reader of the same file. Callers
+     * about to change the document use {@link #mutableRoot(Path)}.
+     *
+     * <p>The stamp is taken <em>before</em> the content on purpose. A file changing between the two
+     * then leaves the entry carrying a stamp older than what it holds, so the next check sees a
+     * mismatch and re-reads. Stamping afterwards would do the opposite - pair old content with a new
+     * stamp, and confirm it as fresh forever.
+     *
+     * @throws IOException if the file cannot be read or parsed
+     */
+    ObjectNode cachedRoot(Path file) throws IOException {
+        ObjectNode memoized = memoized(file);
+        if (memoized != null) return memoized;
+
+        BasicFileAttributes attrs = statOrNull(file);
+        if (attrs == null) return null;
+        byte[] bytes = readIfPresent(file);
+        if (bytes == null) return null;
+
+        rootParses.incrementAndGet();
+        JsonNode node = mapper.readTree(bytes);
+        if (node == null || !node.isObject()) return null;
+        ObjectNode root = (ObjectNode) node;
+        if (roots != null) roots.put(file, new CachedRoot(attrs, root));
+        return root;
+    }
+
+    /**
+     * A private copy of {@code file}'s aggregate document, safe to modify, or {@code null} when the
+     * file is absent. Copying is what lets the scans read a memoized document without holding the
+     * key's lock: a writer never mutates the tree they are walking, it publishes a new one.
+     *
+     * @throws IOException if the file cannot be read or parsed
+     */
+    ObjectNode mutableRoot(Path file) throws IOException {
+        ObjectNode root = cachedRoot(file);
+        return root == null ? null : root.deepCopy();
+    }
+
+    /** Publishes {@code root} as the memoized document for {@code file}, after the file was written. */
+    private void memoize(Path file, ObjectNode root) {
+        if (roots == null) return;
+        BasicFileAttributes attrs = statOrNull(file);
+        if (attrs != null) roots.put(file, new CachedRoot(attrs, root));
+    }
+
+    private static BasicFileAttributes statOrNull(Path file) {
+        try {
+            return Files.readAttributes(file, BasicFileAttributes.class);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** An aggregate document plus the file stamp it was read at. */
+    private static final class CachedRoot {
+        final long       mtimeMillis;
+        final long       size;
+        final ObjectNode root;
+
+        CachedRoot(BasicFileAttributes attrs, ObjectNode root) {
+            this.mtimeMillis = attrs.lastModifiedTime().toMillis();
+            this.size        = attrs.size();
+            this.root        = root;
+        }
+
+        boolean matches(BasicFileAttributes attrs) {
+            return attrs.lastModifiedTime().toMillis() == mtimeMillis && attrs.size() == size;
         }
     }
 
@@ -243,7 +389,21 @@ final class KeyFileStore {
         }
     }
 
+    /**
+     * Publishes {@code root} as {@code target}'s new content and memoizes it, so the collections
+     * written or read next do not re-parse what this call already holds in tree form.
+     *
+     * <p>The caller gives up {@code root} here: it becomes the shared memoized document and must not
+     * be modified afterwards. Every write path obtains it from {@link #mutableRoot(Path)}, which
+     * already hands out a private copy.
+     */
+    void writeAtomic(Path target, ObjectNode root) throws IOException {
+        writeAtomic(target, mapper.writeValueAsBytes(root));
+        memoize(target, root);
+    }
+
     void delete(Path target) throws IOException {
+        if (roots != null) roots.remove(target);
         Files.delete(target);
     }
 }

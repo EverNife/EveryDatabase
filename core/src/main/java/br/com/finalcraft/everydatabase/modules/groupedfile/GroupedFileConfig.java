@@ -54,9 +54,18 @@ import java.nio.file.Path;
  */
 public final class GroupedFileConfig implements StorageConfig {
 
+    /**
+     * Aggregate documents memoized by default. Counts <em>files</em>, not bytes: the working set
+     * this is sized for is "the keys currently being served" (players online, say), not the whole
+     * directory. A document stays memoized until evicted, so a large value over large documents is
+     * a real memory commitment.
+     */
+    public static final int DEFAULT_ROOT_CACHE_SIZE = 256;
+
     private final Path baseDirectory;
     private final String sharedIdentity;
     private final SyncParticipation syncParticipation;
+    private final int rootCacheSize;
 
     /**
      * @param baseDirectory     root directory where the per-key files live
@@ -66,9 +75,39 @@ public final class GroupedFileConfig implements StorageConfig {
      *                          {@link #syncParticipation()})
      */
     public GroupedFileConfig(Path baseDirectory, String sharedIdentity, SyncParticipation syncParticipation) {
+        this(baseDirectory, sharedIdentity, syncParticipation, DEFAULT_ROOT_CACHE_SIZE);
+    }
+
+    private GroupedFileConfig(Path baseDirectory, String sharedIdentity,
+                              SyncParticipation syncParticipation, int rootCacheSize) {
         this.baseDirectory     = baseDirectory;
         this.sharedIdentity    = sharedIdentity;
         this.syncParticipation = syncParticipation;
+        this.rootCacheSize     = rootCacheSize;
+    }
+
+    /**
+     * A copy of this config memoizing at most {@code size} aggregate documents; {@code 0} disables
+     * the memo entirely.
+     *
+     * <p>Reading one key's collections is the case this pays for: the key file holds all of them, so
+     * the first read parses the document and the rest take it from memory. Validity is checked with
+     * a file stamp, which costs one extra syscall on a read that misses - so a workload that only
+     * ever touches a single collection per key is marginally better off with {@code 0}.
+     *
+     * <p>Turn it off, too, where another process writes the same directory and the timestamp
+     * resolution is too coarse to notice: the stamp is {@code (lastModifiedTime, size)}, so an
+     * external rewrite to the same length within the same filesystem tick reads as unchanged.
+     * Writes made through this storage refresh the memo directly and are never affected.
+     */
+    public GroupedFileConfig rootCacheSize(int size) {
+        if (size < 0) throw new IllegalArgumentException("rootCacheSize cannot be negative: " + size);
+        return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, size);
+    }
+
+    /** How many aggregate documents this storage memoizes; {@code 0} when the memo is disabled. */
+    public int rootCacheSize() {
+        return rootCacheSize;
     }
 
     /**
