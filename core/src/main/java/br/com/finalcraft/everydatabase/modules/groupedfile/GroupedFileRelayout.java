@@ -4,18 +4,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Moves the files of a grouped-file directory to where a new configuration says they belong -
- * after declaring a key space for collections that used to live in the base directory, say.
+ * after declaring a key space for collections that used to live in the base directory, say, or
+ * after changing how a key space fans its files out into sub-directories.
  *
  * <p>It is a call the consumer makes, not something an open storage does on its own. Opening a
  * storage whose configuration disagrees with the recorded layout <em>fails</em>, and deliberately:
@@ -34,9 +38,9 @@ import java.util.Set;
  * }</pre>
  *
  * <p><b>It moves entries, not files.</b> A key file holds every collection sharing its key, so
- * moving one collection out of it means lifting that sub-node into the target key space's file for
- * the same key (creating or merging it) and dropping it from the source - which is deleted only
- * once nothing is left in it. Collections staying behind never move.
+ * moving one collection out of it means lifting that sub-node into the target's file for the same
+ * key (creating or merging it) and dropping it from the source - which is deleted only once nothing
+ * is left in it. Collections staying behind never move.
  *
  * <p>Running it twice is harmless: the second run compares the recorded layout with the
  * configuration, finds them equal, and does nothing.
@@ -61,26 +65,30 @@ public final class GroupedFileRelayout {
         if (moves.isEmpty()) return RelayoutReport.nothingToDo();
 
         ContainerFormat format = ContainerFormat.byName(doc.format);
-        Map<String, KeyFileStore> stores = new LinkedHashMap<>();
+        Stores stores = new Stores(config, doc, format);
         RelayoutReport report = new RelayoutReport(new ArrayList<>(moves.keySet()));
 
         for (String source : sourcesOf(doc, moves)) {
-            KeyFileStore from = storeOf(stores, config, format, source);
+            KeyFileStore from = stores.source(source);
             try {
                 for (Path file : from.keyFiles()) {
-                    moveEntriesOut(file, from, source, doc, moves, stores, config, format, report);
+                    moveEntriesOut(file, from, source, doc, moves, stores, format, report);
                 }
             } catch (IOException e) {
                 throw new IllegalStateException(
                     "GroupedFileRelayout: failed to list '" + from.directory() + "' while moving "
                     + "collections out of it.", e);
             }
+            pruneEmptyDirectories(from.directory(), config.baseDirectory(), report);
         }
 
         for (Map.Entry<String, String> move : moves.entrySet()) {
-            doc.collections.put(move.getKey(), move.getValue());
-            if (!GroupedFileLayout.ROOT_KEY_SPACE.equals(move.getValue())) {
-                doc.keySpaces.computeIfAbsent(move.getValue(), k -> new GroupedFileLayout.KeySpace());
+            String destination = move.getValue();
+            doc.collections.put(move.getKey(), destination);
+            if (!GroupedFileLayout.ROOT_KEY_SPACE.equals(destination)) {
+                GroupedFileLayout.KeySpace entry =
+                    doc.keySpaces.computeIfAbsent(destination, k -> new GroupedFileLayout.KeySpace());
+                entry.partitioner = config.partitionerOf(destination).partitionerName();
             }
         }
         // Last, and only once every file is where the record will claim it is: a record written
@@ -93,15 +101,36 @@ public final class GroupedFileRelayout {
     //  Planning
     // ------------------------------------------------------------------
 
-    /** The collections the configuration places somewhere other than where they are recorded. */
+    /**
+     * The collections the configuration places somewhere other than where they are recorded -
+     * either in another key space, or in the same one spread by a different partitioner. Both are
+     * the same operation: the file is not where the new configuration would look for it.
+     */
     private static Map<String, String> plan(GroupedFileLayout.Document doc, GroupedFileConfig config) {
         Map<String, String> moves = new LinkedHashMap<>();
         for (Map.Entry<String, String> recorded : doc.collections.entrySet()) {
-            String configured = config.keySpaceOf(recorded.getKey());
-            if (configured == null) configured = GroupedFileLayout.ROOT_KEY_SPACE;
-            if (!configured.equals(recorded.getValue())) moves.put(recorded.getKey(), configured);
+            String collection = recorded.getKey();
+            String from       = recorded.getValue();
+            String to         = config.keySpaceOf(collection);
+            if (to == null) to = GroupedFileLayout.ROOT_KEY_SPACE;
+
+            if (!to.equals(from) || !recordedPartitioner(doc, from).equals(configuredPartitioner(config, to))) {
+                moves.put(collection, to);
+            }
         }
         return moves;
+    }
+
+    private static String recordedPartitioner(GroupedFileLayout.Document doc, String keySpace) {
+        if (GroupedFileLayout.ROOT_KEY_SPACE.equals(keySpace)) return GroupedFilePartitioner.FLAT;
+        GroupedFileLayout.KeySpace entry = doc.keySpaces.get(keySpace);
+        return entry == null || entry.partitioner == null ? GroupedFilePartitioner.FLAT : entry.partitioner;
+    }
+
+    private static String configuredPartitioner(GroupedFileConfig config, String keySpace) {
+        return GroupedFileLayout.ROOT_KEY_SPACE.equals(keySpace)
+            ? GroupedFilePartitioner.FLAT
+            : config.partitionerOf(keySpace).partitionerName();
     }
 
     /** The key spaces something is moving out of, so each source directory is walked once. */
@@ -117,8 +146,7 @@ public final class GroupedFileRelayout {
 
     private static void moveEntriesOut(Path file, KeyFileStore from, String source,
                                        GroupedFileLayout.Document doc, Map<String, String> moves,
-                                       Map<String, KeyFileStore> stores, GroupedFileConfig config,
-                                       ContainerFormat format, RelayoutReport report) {
+                                       Stores stores, ContainerFormat format, RelayoutReport report) {
         try {
             ObjectNode root = from.mutableRoot(file);
             if (root == null) return;
@@ -131,8 +159,10 @@ public final class GroupedFileRelayout {
                 JsonNode entry = root.get(collection);
                 if (entry == null) continue;
 
-                KeyFileStore to = storeOf(stores, config, format, move.getValue());
+                KeyFileStore to = stores.target(move.getValue());
                 Path targetFile = to.keyFile(stem);
+                if (targetFile.equals(file)) continue;   // already exactly where it is going
+
                 ObjectNode target = to.mutableRoot(targetFile);
                 if (target == null) target = format.mapper().createObjectNode();
                 target.set(collection, entry);
@@ -158,18 +188,35 @@ public final class GroupedFileRelayout {
         }
     }
 
-    private static KeyFileStore storeOf(Map<String, KeyFileStore> stores, GroupedFileConfig config,
-                                        ContainerFormat format, String keySpace) {
-        KeyFileStore store = stores.get(keySpace);
-        if (store == null) {
-            Path directory = GroupedFileLayout.ROOT_KEY_SPACE.equals(keySpace)
-                ? config.baseDirectory()
-                : config.baseDirectory().resolve(keySpace);
-            // No memo: this walks every file once and then throws the stores away.
-            store = new KeyFileStore(directory, format, 0);
-            stores.put(keySpace, store);
+    /**
+     * Drops the bucket directories the move emptied, deepest first.
+     *
+     * <p>Only here: a normal delete leaves its bucket in place, because checking emptiness on every
+     * delete costs a listing per call to save an inode. A relayout is already walking the whole
+     * tree, so cleaning up is free - and leaving the old fan-out's skeleton behind would make the
+     * new layout look like it had not happened.
+     */
+    private static void pruneEmptyDirectories(Path directory, Path baseDirectory, RelayoutReport report) {
+        if (!Files.isDirectory(directory)) return;
+        List<Path> candidates;
+        try (Stream<Path> walk = Files.walk(directory)) {
+            candidates = new ArrayList<>();
+            for (Path path : (Iterable<Path>) walk.filter(Files::isDirectory)::iterator) {
+                if (!path.equals(directory) && !path.equals(baseDirectory)) candidates.add(path);
+            }
+        } catch (IOException e) {
+            return;   // best effort: an empty directory left behind is untidy, never wrong
         }
-        return store;
+        candidates.sort(Comparator.comparingInt(Path::getNameCount).reversed());
+        for (Path candidate : candidates) {
+            if (candidate.getFileName().toString().equals(GroupedFileStorage.SCHEMA_DIR)) continue;
+            try {
+                Files.delete(candidate);   // fails harmlessly when it is not empty
+                report.directoriesRemoved++;
+            } catch (IOException ignored) {
+                // not empty, or in use - either way there is nothing to clean up here
+            }
+        }
     }
 
     private static String stemOf(Path file, ContainerFormat format) {
@@ -177,6 +224,55 @@ public final class GroupedFileRelayout {
         return name.endsWith(format.extension())
             ? name.substring(0, name.length() - format.extension().length())
             : name;
+    }
+
+    /**
+     * The stores on both ends of the move. They are kept apart because a key space can be its own
+     * source and target - that is what a partitioner change is - and then the two disagree on where
+     * a key's file goes, which is the entire point.
+     */
+    private static final class Stores {
+
+        private final GroupedFileConfig          config;
+        private final GroupedFileLayout.Document doc;
+        private final ContainerFormat            format;
+        private final Map<String, KeyFileStore>  sources = new LinkedHashMap<>();
+        private final Map<String, KeyFileStore>  targets = new LinkedHashMap<>();
+
+        Stores(GroupedFileConfig config, GroupedFileLayout.Document doc, ContainerFormat format) {
+            this.config = config;
+            this.doc    = doc;
+            this.format = format;
+        }
+
+        KeyFileStore source(String keySpace) {
+            KeyFileStore store = sources.get(keySpace);
+            if (store == null) {
+                store = build(keySpace, GroupedFilePartitioner.byName(recordedPartitioner(doc, keySpace)));
+                sources.put(keySpace, store);
+            }
+            return store;
+        }
+
+        KeyFileStore target(String keySpace) {
+            KeyFileStore store = targets.get(keySpace);
+            if (store == null) {
+                store = build(keySpace, GroupedFileLayout.ROOT_KEY_SPACE.equals(keySpace)
+                    ? GroupedFilePartitioner.flat()
+                    : config.partitionerOf(keySpace));
+                targets.put(keySpace, store);
+            }
+            return store;
+        }
+
+        private KeyFileStore build(String keySpace, GroupedFilePartitioner partitioner) {
+            Path directory = GroupedFileLayout.ROOT_KEY_SPACE.equals(keySpace)
+                ? config.baseDirectory()
+                : config.baseDirectory().resolve(keySpace);
+            // No memo: this walks every file once and then throws the stores away.
+            return new KeyFileStore(directory, format, 0,
+                partitioner == null ? GroupedFilePartitioner.flat() : partitioner);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -190,6 +286,7 @@ public final class GroupedFileRelayout {
         int entriesMoved;
         int filesWritten;
         int filesRemoved;
+        int directoriesRemoved;
 
         RelayoutReport(List<String> collectionsMoved) {
             this.collectionsMoved = collectionsMoved;
@@ -223,10 +320,16 @@ public final class GroupedFileRelayout {
             return filesRemoved;
         }
 
+        /** Bucket directories the move emptied. */
+        public int directoriesRemoved() {
+            return directoriesRemoved;
+        }
+
         @Override
         public String toString() {
             return "RelayoutReport{collections=" + collectionsMoved + ", entries=" + entriesMoved
-                 + ", written=" + filesWritten + ", removed=" + filesRemoved + "}";
+                 + ", written=" + filesWritten + ", removed=" + filesRemoved
+                 + ", dirs=" + directoriesRemoved + "}";
         }
     }
 }

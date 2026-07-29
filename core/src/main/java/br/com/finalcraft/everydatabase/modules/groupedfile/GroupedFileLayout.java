@@ -118,7 +118,8 @@ final class GroupedFileLayout {
      * @throws IllegalStateException when the codec and the directory disagree, when the directory
      *                               holds both formats, or when the layout file cannot be read
      */
-    synchronized void reconcile(ContainerFormat format, String collection, String keySpace) {
+    synchronized void reconcile(ContainerFormat format, String collection, String keySpace,
+                                GroupedFilePartitioner partitioner) {
         reconcileFormat(format, collection);
 
         String want     = keySpace == null ? ROOT_KEY_SPACE : keySpace;
@@ -126,11 +127,27 @@ final class GroupedFileLayout {
         if (recorded != null && !recorded.equals(want)) {
             throw keySpaceMismatch(collection, recorded, want);
         }
-        if (recorded == null) {
-            document.collections.put(collection, want);
-            if (!ROOT_KEY_SPACE.equals(want)) document.keySpaces.computeIfAbsent(want, k -> new KeySpace());
-            writeLayout(document);
+
+        boolean dirty = recorded == null;
+        if (dirty) document.collections.put(collection, want);
+
+        if (!ROOT_KEY_SPACE.equals(want)) {
+            String wantPartitioner = partitioner.partitionerName();
+            KeySpace entry = document.keySpaces.get(want);
+            if (entry == null) {
+                entry = new KeySpace();
+                entry.partitioner = wantPartitioner;
+                document.keySpaces.put(want, entry);
+                dirty = true;
+            } else {
+                String recordedPartitioner = entry.partitioner == null
+                    ? GroupedFilePartitioner.FLAT : entry.partitioner;
+                if (!recordedPartitioner.equals(wantPartitioner)) {
+                    throw partitionerMismatch(want, recordedPartitioner, wantPartitioner);
+                }
+            }
         }
+        if (dirty) writeLayout(document);
     }
 
     /** The format half of {@link #reconcile}: settled once, from whichever collection opens first. */
@@ -294,6 +311,15 @@ final class GroupedFileLayout {
             + "start writing a second copy elsewhere. Either restore the previous configuration, or "
             + "move the files first with GroupedFileRelayout.relayout(config), which relocates them and "
             + "rewrites this record.");
+    }
+
+    private IllegalStateException partitionerMismatch(String keySpace, String recorded, String want) {
+        return new IllegalStateException(
+            "GroupedFileStorage: key space '" + keySpace + "' spreads its files with partitioner '"
+            + recorded + "' according to " + relativeLayoutPath() + ", but the configuration asks for '"
+            + want + "'. The partitioner is what says where a file already is, so opening with a "
+            + "different one would find none of them. Either restore '" + recorded + "', or move the "
+            + "files first with GroupedFileRelayout.relayout(config).");
     }
 
     private static String describe(String keySpace) {

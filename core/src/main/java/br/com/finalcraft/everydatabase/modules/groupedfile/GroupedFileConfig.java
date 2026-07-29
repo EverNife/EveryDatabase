@@ -88,6 +88,8 @@ public final class GroupedFileConfig implements StorageConfig {
     private final int rootCacheSize;
     /** collection -> key space; a collection absent from this map lives directly in the base. */
     private final Map<String, String> collectionKeySpaces;
+    /** key space -> how its files fan out into sub-directories. */
+    private final Map<String, GroupedFilePartitioner> keySpacePartitioners;
 
     /**
      * @param baseDirectory     root directory where the per-key files live
@@ -98,17 +100,19 @@ public final class GroupedFileConfig implements StorageConfig {
      */
     public GroupedFileConfig(Path baseDirectory, String sharedIdentity, SyncParticipation syncParticipation) {
         this(baseDirectory, sharedIdentity, syncParticipation, DEFAULT_ROOT_CACHE_SIZE,
-             Collections.emptyMap());
+             Collections.emptyMap(), Collections.emptyMap());
     }
 
     private GroupedFileConfig(Path baseDirectory, String sharedIdentity,
                               SyncParticipation syncParticipation, int rootCacheSize,
-                              Map<String, String> collectionKeySpaces) {
-        this.baseDirectory       = baseDirectory;
-        this.sharedIdentity      = sharedIdentity;
-        this.syncParticipation   = syncParticipation;
-        this.rootCacheSize       = rootCacheSize;
-        this.collectionKeySpaces = collectionKeySpaces;
+                              Map<String, String> collectionKeySpaces,
+                              Map<String, GroupedFilePartitioner> keySpacePartitioners) {
+        this.baseDirectory        = baseDirectory;
+        this.sharedIdentity       = sharedIdentity;
+        this.syncParticipation    = syncParticipation;
+        this.rootCacheSize        = rootCacheSize;
+        this.collectionKeySpaces  = collectionKeySpaces;
+        this.keySpacePartitioners = keySpacePartitioners;
     }
 
     /**
@@ -127,7 +131,8 @@ public final class GroupedFileConfig implements StorageConfig {
      */
     public GroupedFileConfig rootCacheSize(int size) {
         if (size < 0) throw new IllegalArgumentException("rootCacheSize cannot be negative: " + size);
-        return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, size, collectionKeySpaces);
+        return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, size,
+                                     collectionKeySpaces, keySpacePartitioners);
     }
 
     /** How many aggregate documents this storage memoizes; {@code 0} when the memo is disabled. */
@@ -199,6 +204,15 @@ public final class GroupedFileConfig implements StorageConfig {
         return new LinkedHashSet<>(collectionKeySpaces.values());
     }
 
+    /**
+     * How a key space spreads its files into sub-directories; {@link GroupedFilePartitioner#flat()}
+     * for the base directory and for any key space that declared none.
+     */
+    public GroupedFilePartitioner partitionerOf(String keySpace) {
+        GroupedFilePartitioner declared = keySpacePartitioners.get(keySpace);
+        return declared != null ? declared : GroupedFilePartitioner.flat();
+    }
+
     // ------------------------------------------------------------------
     //  Builder
     // ------------------------------------------------------------------
@@ -222,6 +236,7 @@ public final class GroupedFileConfig implements StorageConfig {
         private SyncParticipation syncParticipation = SyncParticipation.RECOMMENDED;
         private int rootCacheSize = DEFAULT_ROOT_CACHE_SIZE;
         private final Map<String, String> collectionKeySpaces = new LinkedHashMap<>();
+        private final Map<String, GroupedFilePartitioner> keySpacePartitioners = new LinkedHashMap<>();
 
         private Builder(Path baseDirectory) {
             if (baseDirectory == null) throw new IllegalArgumentException("baseDirectory cannot be null");
@@ -267,6 +282,25 @@ public final class GroupedFileConfig implements StorageConfig {
          *                                  claimed by two key spaces
          */
         public Builder keySpace(String name, String... collections) {
+            return keySpace(name, GroupedFilePartitioner.flat(), collections);
+        }
+
+        /**
+         * The same, with the files of that key space spread over sub-directories by
+         * {@code partitioner} - for a key space large enough that a single directory listing hurts.
+         *
+         * <pre>{@code
+         * GroupedFileConfig.builder(base)
+         *     .keySpace("player", GroupedFilePartitioner.hashFanout(2), "playerdata")
+         *     .build();                              // -> base/player/3f/9c/<uuid>.yml
+         * }</pre>
+         *
+         * <p>The choice is permanent for the files already written under it: it is what says where
+         * they are. Changing it is a relayout, not a config edit, and opening a key space with a
+         * partitioner other than the recorded one fails rather than finding nothing.
+         */
+        public Builder keySpace(String name, GroupedFilePartitioner partitioner, String... collections) {
+            if (partitioner == null) throw new IllegalArgumentException("partitioner cannot be null");
             if (GroupedFileStorage.SCHEMA_DIR.equals(name)) {
                 throw new IllegalArgumentException(
                     "GroupedFileConfig: '" + GroupedFileStorage.SCHEMA_DIR + "' is reserved for the "
@@ -297,12 +331,14 @@ public final class GroupedFileConfig implements StorageConfig {
                 }
                 collectionKeySpaces.put(collection, name);
             }
+            keySpacePartitioners.put(name, partitioner);
             return this;
         }
 
         public GroupedFileConfig build() {
             return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, rootCacheSize,
-                Collections.unmodifiableMap(new LinkedHashMap<>(collectionKeySpaces)));
+                Collections.unmodifiableMap(new LinkedHashMap<>(collectionKeySpaces)),
+                Collections.unmodifiableMap(new LinkedHashMap<>(keySpacePartitioners)));
         }
     }
 }

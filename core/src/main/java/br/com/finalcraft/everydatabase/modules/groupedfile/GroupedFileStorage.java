@@ -154,7 +154,8 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
         String keySpace = config.keySpaceOf(collection);
         if (keySpace == null) return rootStore;
         return keySpaceStores.computeIfAbsent(keySpace, name ->
-            new KeyFileStore(config.baseDirectory().resolve(name), format, config.rootCacheSize()));
+            new KeyFileStore(config.baseDirectory().resolve(name), format, config.rootCacheSize(),
+                             config.partitionerOf(name)));
     }
 
     // ------------------------------------------------------------------
@@ -218,7 +219,9 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
                 // ...and the directory gets a say too: it may already hold this collection's files
                 // in another format, or in another key space, either of which would silently hide
                 // them from a repository opened this way.
-                layout.reconcile(format, descriptor.collection(), config.keySpaceOf(descriptor.collection()));
+                String keySpace = config.keySpaceOf(descriptor.collection());
+                layout.reconcile(format, descriptor.collection(), keySpace,
+                                 keySpace == null ? null : config.partitionerOf(keySpace));
                 return new GroupedFileRepository<>(descriptor, storeFor(descriptor.collection()), log);
             }
         );

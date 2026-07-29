@@ -50,8 +50,9 @@ import java.util.stream.Stream;
  */
 final class KeyFileStore {
 
-    private final Path            directory;
-    private final ContainerFormat format;
+    private final Path                   directory;
+    private final ContainerFormat        format;
+    private final GroupedFilePartitioner partitioner;
 
     /** Per-key locks, keyed by sanitised key. Global across all repositories of the owning storage. */
     private final ConcurrentHashMap<String, ReadWriteLock> locks = new ConcurrentHashMap<>();
@@ -68,8 +69,14 @@ final class KeyFileStore {
     }
 
     KeyFileStore(Path directory, ContainerFormat format, int rootCacheSize) {
+        this(directory, format, rootCacheSize, GroupedFilePartitioner.flat());
+    }
+
+    KeyFileStore(Path directory, ContainerFormat format, int rootCacheSize,
+                 GroupedFilePartitioner partitioner) {
         this.directory     = directory;
         this.format        = format;
+        this.partitioner   = partitioner;
         this.rootCacheSize = Math.max(0, rootCacheSize);
         this.roots = this.rootCacheSize == 0
             ? null
@@ -113,8 +120,14 @@ final class KeyFileStore {
         return FileKeyNames.safeStem(key.toString());
     }
 
+    /**
+     * Where {@code sanitizedKey}'s file lives. Resolved by the partitioner, never by searching - a
+     * point read costs the same with fan-out as without.
+     */
     Path keyFile(String sanitizedKey) {
-        return directory.resolve(sanitizedKey + format.extension());
+        String bucket = partitioner.directoryFor(sanitizedKey);
+        Path parent = bucket.isEmpty() ? directory : directory.resolve(bucket);
+        return parent.resolve(sanitizedKey + format.extension());
     }
 
     /**
@@ -127,10 +140,11 @@ final class KeyFileStore {
     }
 
     /**
-     * Lists the regular key files directly under this store's directory (depth 1), filtered by the
-     * resolved format's extension. Reserved sub-directories (such as {@code _schema/} under the base)
-     * are naturally excluded - they are directories, not regular files - and so are sibling
-     * {@code .tmp} files.
+     * The regular key files this store owns, filtered by the resolved format's extension. Sibling
+     * {@code .tmp} files never match, and the walk stops at the depth the partitioner can produce,
+     * so nothing else living under the directory is mistaken for a key file. Under the base
+     * directory that matters concretely: the reserved {@code _schema/} holds {@code layout.json},
+     * which a deeper walk would happily read as a key file of a JSON store.
      *
      * <p>A store that owns a key space lists <em>only</em> that key space: the files of the other
      * ones are not just filtered out, they are never looked at. That is where the scan cost goes.
@@ -138,12 +152,19 @@ final class KeyFileStore {
     List<Path> keyFiles() throws IOException {
         if (!Files.isDirectory(directory)) return Collections.emptyList();
         String ext = format.extension();
-        try (Stream<Path> entries = Files.list(directory)) {
+        try (Stream<Path> entries = Files.walk(directory, partitioner.depth() + 1)) {
             return entries
+                .filter(p -> !isReserved(p))
                 .filter(Files::isRegularFile)
                 .filter(p -> p.getFileName().toString().endsWith(ext))
                 .collect(Collectors.toList());
         }
+    }
+
+    /** The storage's own bookkeeping directory, which is never a bucket however deep the walk goes. */
+    private boolean isReserved(Path path) {
+        Path parent = path.getParent();
+        return parent != null && parent.equals(directory.resolve(GroupedFileStorage.SCHEMA_DIR));
     }
 
     // ------------------------------------------------------------------

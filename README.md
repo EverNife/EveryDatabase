@@ -356,14 +356,24 @@ GroupedFileStorage grouped = Storages.createGroupedFile(config);
 
 Collections are declared **grouped by key space** because the group is the point: co-location is what a key space *means*, and listing the members together makes a typo look wrong instead of silently splitting one entity's file in two. Collections you don't name keep living directly under the base directory, so the tree is byte-for-byte unchanged for anyone who declares nothing.
 
-Placement is recorded in `_schema/layout.json` too, and opening a storage that disagrees with it fails — moving a collection is a file operation, not a config change. Do it explicitly, once, before opening:
+**Fan-out.** A key space shrinks the small directories and leaves the big one exactly as big — and ten thousand files in one directory already slows listing down on NTFS. Give a large key space a partitioner and its files spread over sub-directories:
+
+```java
+GroupedFileConfig.builder(base)
+    .keySpace("player", GroupedFilePartitioner.hashFanout(2), "playerdata")
+    .build();                                  // -> base/player/10/c5/<uuid>.yml
+```
+
+`flat()` (the default), `hashFanout(levels)` — SHA-1 of the key, two hex digits per level, so the spread is identical on every JVM and OS — and `prefix(chars)` for a tree you can navigate by eye. Point reads never scan: the path is computed, not searched.
+
+Placement and fan-out are recorded in `_schema/layout.json` too, and opening a storage that disagrees with it fails — where a file lives is a file operation, not a config change. Do it explicitly, once, before opening:
 
 ```java
 GroupedFileRelayout.relayout(config);          // lifts the moved collections into their key space
 Storage storage = Storages.createGroupedFile(config);
 ```
 
-It moves *entries*, not files: a key file holding several collections is split, and only the collections that moved leave it. Running it twice does nothing the second time.
+It moves *entries*, not files: a key file holding several collections is split, and only the collections that moved leave it. It handles a changed partitioner the same way, and prunes the bucket directories it empties. Running it twice does nothing the second time.
 </details>
 
 <details>
