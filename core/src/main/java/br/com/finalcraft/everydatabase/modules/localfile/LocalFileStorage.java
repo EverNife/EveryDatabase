@@ -5,6 +5,13 @@ import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogConfig;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
+import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
+import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
+import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
+import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
+import br.com.finalcraft.everydatabase.changefeed.DirectoryChangeFeed;
 import br.com.finalcraft.everydatabase.schema.Migration;
 import br.com.finalcraft.everydatabase.schema.Migrations;
 import br.com.finalcraft.everydatabase.schema.MigrationContext;
@@ -45,13 +52,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Does <em>not</em> implement {@link TransactionalStorage}.
  * Implements {@link SchemaAwareStorage}.
  */
-public final class LocalFileStorage implements Storage, SchemaAwareStorage {
+public final class LocalFileStorage implements Storage, SchemaAwareStorage, ChangeFeedStorage {
 
     static final String MIGRATIONS_FILE = "_schema_migrations.json";
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
     private final LocalFileConfig config;
+
+    /** Change feed: the OS watches the tree, and this fans what it reports out to the listeners. */
+    private final String              originId = "localfile-" + UUID.randomUUID();
+    private final ChangeFeedSupport   changeFeed;
+    private final DirectoryChangeFeed watcher;
     private final ConcurrentHashMap<String, LocalFileRepository<?, ?>> repositories = new ConcurrentHashMap<>();
     private volatile boolean initialized = false;
 
@@ -77,6 +89,11 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
         this.config    = config;
         this.logConfig = logConfig;
         this.log       = new StorageLog("localfile", () -> this.logConfig);
+        this.changeFeed = new ChangeFeedSupport(t -> log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+            b -> b.detail("change listener failed: " + t)));
+        this.watcher    = new DirectoryChangeFeed(
+            "everydatabase-localfile-watch", config.baseDirectory(), this::onFileEvent,
+            t -> log.emit(StorageOp.HEALTH, StorageLogLevel.WARN, b -> b.detail("change feed: " + t)));
     }
 
     // ------------------------------------------------------------------
@@ -150,6 +167,8 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
 
     @Override
     public CompletableFuture<Void> close() {
+        watcher.close();
+        changeFeed.closeAll();
         repositories.clear();
         initialized = false;
         log.closed();
@@ -195,6 +214,47 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
                 return repo;
             }
         );
+    }
+
+    // ------------------------------------------------------------------
+    //  ChangeFeedStorage
+    //
+    //  The layout is collection-major, so a changed file names both parts by itself: the directory
+    //  under the base is the collection, and the file stem is the stored key.
+    // ------------------------------------------------------------------
+
+    @Override
+    public String originId() {
+        return originId;
+    }
+
+    @Override
+    public ChangeSubscription subscribe(ChangeListener listener) {
+        watcher.start();
+        return changeFeed.subscribe(listener);
+    }
+
+    /**
+     * Publishes one file event.
+     *
+     * <p>The event carries <b>no origin</b>, and that is not an oversight: a file system has nowhere
+     * to record who wrote a file, so claiming this storage did would make every other instance in
+     * the process discard the event as its own. An unattributed event is never skipped - the price
+     * being that a local write echoes back and re-marks the cell it just refreshed.
+     *
+     * <p>The key is the file's stem, so a key that had to be sanitised into a file name is reported
+     * in that sanitised form - the same limitation {@code Repository.keys} carries, and for the same
+     * reason: nothing here opens the file.
+     */
+    private void onFileEvent(Path directory, String fileName, ChangeOp op) {
+        Path relative = config.baseDirectory().relativize(directory);
+        if (relative.toString().isEmpty()) return;      // a loose file in the base is not a row
+        String collection = relative.getName(0).toString();
+
+        int dot = fileName.lastIndexOf('.');
+        String key = dot > 0 ? fileName.substring(0, dot) : fileName;
+        changeFeed.emit(new ChangeEvent(collection, key, op, ChangeEvent.UNKNOWN_VERSION, null,
+                                        backendIdentity()));
     }
 
     // ------------------------------------------------------------------

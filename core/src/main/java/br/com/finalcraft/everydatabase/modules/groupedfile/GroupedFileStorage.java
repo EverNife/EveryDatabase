@@ -11,6 +11,13 @@ import br.com.finalcraft.everydatabase.schema.MigrationContext;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedStorage;
+import br.com.finalcraft.everydatabase.changefeed.ChangeFeedSupport;
+import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
+import br.com.finalcraft.everydatabase.changefeed.ChangeOp;
+import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
+import br.com.finalcraft.everydatabase.changefeed.DirectoryChangeFeed;
 import br.com.finalcraft.everydatabase.keymajor.KeyBatch;
 import br.com.finalcraft.everydatabase.keymajor.KeyBundle;
 import br.com.finalcraft.everydatabase.keymajor.KeyMajorStorage;
@@ -60,7 +67,8 @@ import java.util.function.Consumer;
  * the migration ledger lives under the reserved {@code _schema/} sub-directory, so it can never collide
  * with a key file (a key named {@code _schema} maps to {@code _schema.<ext>}, a file, not the directory).
  */
-public final class GroupedFileStorage implements Storage, SchemaAwareStorage, KeyMajorStorage {
+public final class GroupedFileStorage
+        implements Storage, SchemaAwareStorage, KeyMajorStorage, ChangeFeedStorage {
 
     static final String SCHEMA_DIR       = "_schema";
     static final String MIGRATIONS_FILE  = "migrations.json";
@@ -75,6 +83,11 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage, Ke
     /** One store per declared key space, created on first use. Key: the key-space name. */
     private final ConcurrentHashMap<String, KeyFileStore> keySpaceStores = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, GroupedFileRepository<?, ?>> repositories = new ConcurrentHashMap<>();
+
+    /** Change feed: the OS watches the tree, and this fans what it reports out to the listeners. */
+    private final String              originId = "groupedfile-" + UUID.randomUUID();
+    private final ChangeFeedSupport   changeFeed;
+    private final DirectoryChangeFeed watcher;
     private volatile boolean initialized = false;
 
     /** Registered migrations, kept sorted by version. */
@@ -101,6 +114,11 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage, Ke
         this.log          = new StorageLog("groupedfile", () -> this.logConfig);
         this.layout       = new GroupedFileLayout(config.baseDirectory());
         this.rootStore    = new KeyFileStore(config.baseDirectory(), format, config.rootCacheSize());
+        this.changeFeed   = new ChangeFeedSupport(t -> log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+            b -> b.detail("change listener failed: " + t)));
+        this.watcher      = new DirectoryChangeFeed(
+            "everydatabase-groupedfile-watch", config.baseDirectory(), this::onFileEvent,
+            t -> log.emit(StorageOp.HEALTH, StorageLogLevel.WARN, b -> b.detail("change feed: " + t)));
     }
 
     // ------------------------------------------------------------------
@@ -192,6 +210,8 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage, Ke
 
     @Override
     public CompletableFuture<Void> close() {
+        watcher.close();
+        changeFeed.closeAll();
         repositories.clear();
         keySpaceStores.clear();
         initialized = false;
@@ -460,6 +480,68 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage, Ke
             }
             return true;
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  ChangeFeedStorage
+    // ------------------------------------------------------------------
+
+    @Override
+    public String originId() {
+        return originId;
+    }
+
+    @Override
+    public ChangeSubscription subscribe(ChangeListener listener) {
+        watcher.start();
+        return changeFeed.subscribe(listener);
+    }
+
+    /**
+     * Publishes one file event, once per collection that could be inside the file.
+     *
+     * <p>A key file holds every collection sharing its key, and the file system reports that the
+     * file changed, not which part of it did. There is no way to narrow it without reading the
+     * document - and reading it would still not say what it looked like before. So the event goes
+     * to every collection registered in that key space: a false wake-up for the ones that did not
+     * change, never a missed one for the one that did.
+     *
+     * <p>The event carries <b>no origin</b>: a file system has nowhere to record who wrote a file,
+     * so claiming this storage did would make every other instance in the process discard the event
+     * as its own. The memo is dropped before publishing, so a listener that reads on the spot sees
+     * what is on disk rather than what was cached before the change.
+     */
+    private void onFileEvent(Path directory, String fileName, ChangeOp op) {
+        if (!format.isResolved() || !fileName.endsWith(format.extension())) return;
+
+        String keySpace = keySpaceOfDirectory(directory);
+        String key = fileName.substring(0, fileName.length() - format.extension().length());
+
+        // A watched change is a change this instance did not make through its own cache; the
+        // memoized document for that file is exactly what would hide it.
+        storeOfKeySpace(keySpace).invalidateMemo(directory.resolve(fileName));
+
+        for (GroupedFileRepository<?, ?> repository : repositories.values()) {
+            String collection = repository.collection();
+            if (!Objects.equals(keySpace, config.keySpaceOf(collection))) continue;
+            changeFeed.emit(new ChangeEvent(collection, key, op, ChangeEvent.UNKNOWN_VERSION, null,
+                                            backendIdentity()));
+        }
+    }
+
+    /** Which key space a watched directory belongs to; {@code null} for the base directory itself. */
+    private String keySpaceOfDirectory(Path directory) {
+        Path relative = config.baseDirectory().relativize(directory);
+        if (relative.toString().isEmpty()) return null;
+        String first = relative.getName(0).toString();
+        return config.keySpaces().contains(first) ? first : null;
+    }
+
+    private KeyFileStore storeOfKeySpace(String keySpace) {
+        if (keySpace == null) return rootStore;
+        return keySpaceStores.computeIfAbsent(keySpace, name ->
+            new KeyFileStore(config.baseDirectory().resolve(name), format, config.rootCacheSize(),
+                             config.partitionerOf(name)));
     }
 
     // ------------------------------------------------------------------

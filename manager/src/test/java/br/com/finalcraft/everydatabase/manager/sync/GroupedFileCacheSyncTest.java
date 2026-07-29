@@ -11,12 +11,13 @@ import java.nio.file.Path;
 /**
  * Cache-sync contract on GroupedFile (no Docker). Two storages share one directory.
  *
- * <p>Like LocalFile, this backend has no lock column and does not need one to be polled - the key
- * file's stamp grows when it is rewritten. The memo is deliberately switched off on both sides: the
- * point of this suite is that one storage observes what the <em>other</em> wrote, and a memo
+ * <p>This backend has a change feed of its own now, so {@code CacheSync.attach} routes it through
+ * push rather than polling - which is what this suite ends up exercising; its polling substrate is
+ * covered separately by {@code FilePollingCacheSyncTest}. The memo is deliberately switched off on
+ * both sides: the point here is that one storage observes what the <em>other</em> wrote, and a memo
  * validated by a coarse file stamp is exactly the thing that could mask it.
  */
-@DisplayName("CacheSync contract - GroupedFile (polling on the file stamp)")
+@DisplayName("CacheSync contract - GroupedFile (watch-service feed)")
 class GroupedFileCacheSyncTest extends AbstractCacheSyncTest {
 
     @TempDir

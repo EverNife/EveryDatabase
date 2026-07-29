@@ -245,7 +245,7 @@ Storage storage = Storages.createMongo(new MongoConfig("mongodb://localhost:2701
 
 - `TransactionalStorage` — atomic `inTransaction(...)`
 - `SchemaAwareStorage` — `register(...).migrate()`
-- `ChangeFeedStorage` — a backend-native push feed of changes
+- `ChangeFeedStorage` — a push feed of changes (Mongo change streams, Postgres `LISTEN/NOTIFY`, and the file backends' watch service)
 
 Discover them with `instanceof` — the compiler stops you from using transactions on a backend that doesn't support them.
 
@@ -949,7 +949,7 @@ A write is only deferrable if something will eventually drain it, so the deferra
 
 ### Cross-process cache sync over pub/sub (`everydatabase-manager-jedis`)
 
-When several instances share one backend, a write on one leaves the others' caches stale. The single `CacheSync` facade keeps them fresh — via a backend-native change feed where it exists (Mongo change streams, Postgres `LISTEN/NOTIFY`), or version **polling** anywhere. For backends with **no native feed** (MySQL/MariaDB, …) an **optional pub/sub transport** replaces polling with real push: lower latency, no per-key version-check load on the database.
+When several instances share one backend, a write on one leaves the others' caches stale. The single `CacheSync` facade keeps them fresh — via a backend-native change feed where it exists (Mongo change streams, Postgres `LISTEN/NOTIFY`, and the file backends' OS watch service), or version **polling** anywhere. For backends with **no native feed** (MySQL/MariaDB, …) an **optional pub/sub transport** replaces polling with real push: lower latency, no per-key version-check load on the database.
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
@@ -972,6 +972,8 @@ CacheSync sync = CacheSync.attach(storage)
 ```
 
 Each manager publishes a tiny signal (collection + key + op — **never** entity content) on every local write; the other instances invalidate/evict the matching key. The local in-memory cache stays the source of live objects — the transport only signals *"reload"*, so it never breaks the identity map. Delivery is fire-and-forget (at-least-once, unordered, lossy), so pair it with a `ttl(...)` policy as a self-healing safety net. Only manager-mediated writes (`saveAndCache` / `deleteAndEvict` / `saveAllAndCache`) propagate — a raw `repository().save()` does not. The transport is a generic SPI (`CacheSyncTransport`); Jedis (Redis/Valkey) is the first implementation.
+
+**Local and grouped files push, and see edits made outside the application.** They implement `ChangeFeedStorage` over the operating system's file-watch notification, so `CacheSync.attach(storage)` takes the push path with no poll interval — and an administrator editing a YAML file by hand invalidates the cache exactly like a write through the API, which no other backend can report. Two caveats worth knowing: a file event carries **no origin** (a file system has nowhere to record who wrote it), so a local write echoes back and re-marks the cell it just refreshed; and on grouped files the event names the *file*, so every collection sharing that key is woken — a false wake-up, never a missed one. On macOS the JDK falls back to an internal polling watcher with second-scale latency; use `PollingCacheSync` explicitly there if the cadence must be yours.
 
 **What polling can detect depends on the backend.** It compares one reading of `versions(keys)` against the previous one and reloads a key whose number grew. A versioned descriptor supplies that number wherever the lock is enforced (MySQL/MariaDB, PostgreSQL, MongoDB); the **file backends derive it from the file itself** (modification time, with the size in the low bits so two writes in one clock tick still differ), so local and grouped files detect **updates as well as deletes** without any lock column. **H2 is the exception** — it reports `0` for every existing key, so polling there catches deletes only. On grouped files the number is per *file*, which holds every collection sharing that key: writing one of them makes the others reload once for nothing — a false reload, never a stale read.
 

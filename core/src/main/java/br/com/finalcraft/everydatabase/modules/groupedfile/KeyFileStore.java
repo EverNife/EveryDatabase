@@ -398,6 +398,11 @@ final class KeyFileStore {
         memoize(target, root);
     }
 
+    /** Drops the memoized document for {@code file}, so the next read goes back to disk. */
+    void invalidateMemo(Path file) {
+        if (roots != null) roots.remove(file);
+    }
+
     void delete(Path target) throws IOException {
         if (roots != null) roots.remove(target);
         Files.delete(target);

@@ -11,10 +11,11 @@ import java.nio.file.Path;
 /**
  * Cache-sync contract on LocalFile (no Docker). Two storages share one directory.
  *
- * <p>LocalFile enforces no optimistic lock, but it does not need one to be polled: the file's own
- * stamp grows when the file is rewritten, which is all the poller compares. Updates propagate here.
+ * <p>This backend has a change feed of its own now, so {@code CacheSync.attach} routes it through
+ * push rather than polling - which is what this suite ends up exercising. Its polling substrate is
+ * covered separately by {@code FilePollingCacheSyncTest}.
  */
-@DisplayName("CacheSync contract - LocalFile (polling on the file stamp)")
+@DisplayName("CacheSync contract - LocalFile (watch-service feed)")
 class LocalFileCacheSyncTest extends AbstractCacheSyncTest {
 
     @TempDir
