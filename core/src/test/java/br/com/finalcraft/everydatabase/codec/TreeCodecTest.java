@@ -17,6 +17,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
@@ -155,6 +157,37 @@ class TreeCodecTest {
             assertEquals(List.of("Bob"), repo.query(Query.eq("name", "Bob")).join()
                 .stream().map(TestPlayer::getName).collect(Collectors.toList()), where);
         }
+    }
+
+    @Test
+    @DisplayName("a document written before the tree path existed still reads back")
+    void storedFormat_isUnchanged() throws Exception {
+        // Byte-for-byte what the byte-only path produced: the codec's own JSON, embedded verbatim as
+        // a sub-node of the aggregate document. Nothing about the tree path may require a migration.
+        Path keyFile = baseDir.resolve(ALICE + ".json");
+        Files.write(keyFile, ("{\n  \"tree_players\" : {\n"
+            + "    \"uuid\" : \"" + ALICE + "\",\n"
+            + "    \"name\" : \"Alice\",\n"
+            + "    \"score\" : 100,\n"
+            + "    \"world\" : \"world\",\n"
+            + "    \"active\" : true,\n"
+            + "    \"createdAt\" : 0\n"
+            + "  }\n}").getBytes(StandardCharsets.UTF_8));
+
+        Repository<UUID, TestPlayer> repo = repositoryOn(
+            Storages.createGroupedFile(new GroupedFileConfig(baseDir)), new JacksonJsonCodec<>(TestPlayer.class));
+
+        assertEquals("Alice", repo.find(ALICE).join().map(TestPlayer::getName).orElse(null),
+            "a file written by the byte path must read back through the tree path");
+        assertEquals(1L, repo.count().join());
+
+        // And writing over it keeps producing something the byte path could read.
+        repo.save(new TestPlayer(ALICE, "Alice2", 7)).join();
+        String rewritten = new String(Files.readAllBytes(keyFile), StandardCharsets.UTF_8);
+        assertTrue(rewritten.contains("\"tree_players\""), "the collection is still the top-level field");
+        assertEquals("Alice2", new JacksonJsonCodec<>(TestPlayer.class)
+            .decodeTree(new com.fasterxml.jackson.databind.ObjectMapper().readTree(rewritten).get("tree_players"))
+            .getName());
     }
 
     // ------------------------------------------------------------------
