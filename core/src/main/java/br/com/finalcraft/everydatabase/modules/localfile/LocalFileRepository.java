@@ -6,6 +6,7 @@ import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.util.FileKeyNames;
+import br.com.finalcraft.everydatabase.util.FileStamps;
 import br.com.finalcraft.everydatabase.codec.Codec;
 import br.com.finalcraft.everydatabase.codec.CodecException;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
@@ -332,10 +333,11 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 ReadWriteLock lock = lockFor(key);
                 lock.readLock().lock();
                 try {
-                    // LocalFile does not enforce optimistic locking, so existing keys always
-                    // report version 0 - matching H2 and keeping the polling substrate uniform
-                    // across non-enforcing backends (and skipping a full decode per key).
-                    if (Files.exists(existingPathFor(key))) result.put(key, 0L);
+                    // No optimistic lock here, so there is no lock_version to report - but the
+                    // poller only needs a number that grows when the content does, and the file
+                    // already carries one. A stat, not an open: still no decode per key.
+                    Long stamp = FileStamps.of(existingPathFor(key));
+                    if (stamp != null) result.put(key, stamp);
                 } finally {
                     lock.readLock().unlock();
                 }

@@ -330,19 +330,33 @@ public abstract class AbstractStorageTest {
         assertEquals(2L, repo.count().join());
     }
 
+    /**
+     * Whether a non-versioned descriptor reports {@code 0} on this backend. The file backends stamp
+     * the file instead, which is what gives them update detection without a lock column, so the
+     * value there is opaque rather than zero.
+     */
+    protected boolean versionsAreZeroWithoutVersioning() {
+        return true;
+    }
+
     @Test
     @Order(32)
-    @DisplayName("[base] versions() on a non-versioned descriptor -> 0 for existing keys, absent keys omitted")
-    void versions_nonVersionedDescriptor_reportsZeroAndOmitsAbsent() {
+    @DisplayName("[base] versions() on a non-versioned descriptor omits absent keys and values the present ones")
+    void versions_nonVersionedDescriptor_omitsAbsent() {
         repo.save(alice()).join();
         repo.save(bob()).join();
 
         Map<UUID, Long> versions = repo.versions(Arrays.asList(UUID_ALICE, UUID_BOB, UUID_GHOST)).join();
 
         assertEquals(2, versions.size(), "absent keys must be omitted, not mapped to a value");
-        assertEquals(0L, versions.get(UUID_ALICE), "non-versioned descriptor must report version 0");
-        assertEquals(0L, versions.get(UUID_BOB),   "non-versioned descriptor must report version 0");
+        assertNotNull(versions.get(UUID_ALICE), "an existing key must carry a version");
+        assertNotNull(versions.get(UUID_BOB),   "an existing key must carry a version");
         assertFalse(versions.containsKey(UUID_GHOST), "absent key must not appear in the result");
+
+        if (versionsAreZeroWithoutVersioning()) {
+            assertEquals(0L, versions.get(UUID_ALICE), "without a lock column there is nothing to report but 0");
+            assertEquals(0L, versions.get(UUID_BOB),   "without a lock column there is nothing to report but 0");
+        }
 
         assertTrue(repo.versions(Collections.emptyList()).join().isEmpty(),
             "an empty key collection must produce an empty result");

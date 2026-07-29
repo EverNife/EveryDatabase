@@ -417,4 +417,10 @@ class LocalFileStorageTest extends AbstractStorageTest {
         assertNotEquals(count, streamed,
             "the gap between count() and all() is how a poisoned row announces itself");
     }
+
+    /** This backend stamps the file instead of reporting 0 - see {@code Repository.versions}. */
+    @Override
+    protected boolean versionsAreZeroWithoutVersioning() {
+        return false;
+    }
 }

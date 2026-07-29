@@ -41,10 +41,15 @@ import java.util.function.Consumer;
  * <h3>Limitations</h3>
  * <ul>
  *   <li><b>Latency</b> is one poll interval - not instant.</li>
- *   <li><b>Updates need versioning.</b> Detecting an in-place update requires the descriptor to be
- *       versioned (an increasing {@code lock_version}). On a non-versioned descriptor (or H2, which
- *       does not enforce versioning) every existing key reports version {@code 0}, so polling detects
- *       only <em>deletes</em>, not updates. Use versioned entities for update propagation.</li>
+ *   <li><b>Updates need a version that moves.</b> Detecting an in-place update requires the backend
+ *       to report an increasing number for the key. A versioned descriptor gives one everywhere it
+ *       is enforced; the file backends derive one from the file itself, so they detect updates
+ *       without a lock column. On a non-versioned descriptor over SQL/Mongo (or on H2, which does
+ *       not enforce versioning) every existing key reports version {@code 0}, and polling there
+ *       detects only <em>deletes</em>. Use versioned entities for update propagation on those.</li>
+ *   <li><b>The file backends' version is per file.</b> On grouped files that file holds every
+ *       collection sharing the key, so writing one of them bumps the version the others are polled
+ *       on: their caches reload once for nothing. A false reload, never a stale read.</li>
  *   <li><b>First-observation gap.</b> A key is assumed as fresh as the backend the first time it is
  *       polled (it usually was just loaded); a write landing in the brief window between a cache load
  *       and the first poll of that key can be missed. All later writes are caught. Pair with a TTL

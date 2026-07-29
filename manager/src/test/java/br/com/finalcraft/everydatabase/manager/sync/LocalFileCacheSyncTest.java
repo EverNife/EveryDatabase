@@ -9,10 +9,12 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 
 /**
- * Cache-sync contract on LocalFile (no Docker). Two storages share one directory. LocalFile does not
- * enforce optimistic locking, so the version poll catches only deletes - the update test self-skips.
+ * Cache-sync contract on LocalFile (no Docker). Two storages share one directory.
+ *
+ * <p>LocalFile enforces no optimistic lock, but it does not need one to be polled: the file's own
+ * stamp grows when the file is rewritten, which is all the poller compares. Updates propagate here.
  */
-@DisplayName("CacheSync contract - LocalFile (polling, delete-only)")
+@DisplayName("CacheSync contract - LocalFile (polling on the file stamp)")
 class LocalFileCacheSyncTest extends AbstractCacheSyncTest {
 
     @TempDir
@@ -26,10 +28,5 @@ class LocalFileCacheSyncTest extends AbstractCacheSyncTest {
     @Override
     protected Storage openReader() {
         return Storages.createLocalFile(new LocalFileConfig(sharedDir));
-    }
-
-    @Override
-    protected boolean supportsUpdatePropagation() {
-        return false;   // no enforced versioning -> polling detects deletes, not updates
     }
 }

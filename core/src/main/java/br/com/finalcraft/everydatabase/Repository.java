@@ -99,22 +99,32 @@ public interface Repository<K, V> {
     CompletableFuture<Long> count();
 
     /**
-     * Returns the current optimistic-lock version of each given key that exists in storage; absent
-     * keys are omitted from the result.
+     * Returns the current version of each given key that exists in storage; absent keys are omitted
+     * from the result.
      *
-     * <p>For a versioned descriptor on an enforcing backend (MySQL/MariaDB, PostgreSQL, MongoDB -
-     * the ones {@link Storage#enforcesOptimisticLock()} answers {@code true} for)
-     * the value is the stored {@code lock_version}. Backends that do not enforce versioning -
-     * H2, local files, grouped files - report {@code 0} for every existing key, as does any
-     * non-versioned descriptor: a poller can still detect <em>deletions</em> (a cached key
-     * missing from the result) but not in-place <em>updates</em>. The in-memory backend reports
-     * whatever version value is stored on the entity (handy for driving the poller in tests).
+     * <p><b>The value is opaque, and only comparable with an earlier value of the same key on the
+     * same backend.</b> All a caller may conclude is that a bigger number means the row changed
+     * since the smaller one was read. It is not a counter, not a timestamp anyone should format,
+     * and never comparable across backends - what produces it differs:
+     * <ul>
+     *   <li>a versioned descriptor on an enforcing backend (MySQL/MariaDB, PostgreSQL, MongoDB -
+     *       the ones {@link Storage#enforcesOptimisticLock()} answers {@code true} for) reports the
+     *       stored {@code lock_version};</li>
+     *   <li>the file backends report a stamp derived from the file itself (modification time, with
+     *       the size folded into the low bits so two writes within one clock tick still differ),
+     *       which gives them <em>update</em> detection without any lock column;</li>
+     *   <li>H2 and non-versioned descriptors on the SQL/Mongo backends report {@code 0}, so a poller
+     *       there detects <em>deletions</em> (a cached key missing from the result) but not in-place
+     *       updates;</li>
+     *   <li>the in-memory backend reports whatever version value is stored on the entity (handy for
+     *       driving the poller in tests).</li>
+     * </ul>
      *
      * <p>Cost: a key+version-only read on SQL/Mongo (never the entity body); the file backends
-     * only probe file/sub-document existence - also content-free. Used by the manager's
+     * {@code stat} the file, which is still content-free. Used by the manager's
      * {@code PollingCacheSync} to invalidate caches on backends without a native change feed
-     * (MySQL/MariaDB). On backends that do have a change feed it still works, but the push feed
-     * is preferred.
+     * (MySQL/MariaDB, and the file backends). On backends that do have a change feed it still works,
+     * but the push feed is preferred.
      */
     CompletableFuture<Map<K, Long>> versions(Collection<K> keys);
 

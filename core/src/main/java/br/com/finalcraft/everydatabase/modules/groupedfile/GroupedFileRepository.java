@@ -18,6 +18,7 @@ import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
 import br.com.finalcraft.everydatabase.query.Slices;
+import br.com.finalcraft.everydatabase.util.FileStamps;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -199,10 +200,14 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 ReadWriteLock lock = lockFor(key);
                 lock.readLock().lock();
                 try {
-                    // GroupedFile does not enforce optimistic locking, so existing keys always
-                    // report version 0 - matching H2 and keeping the polling substrate uniform
-                    // across non-enforcing backends. A presence probe is all this costs.
-                    if (store.hasSubNode(fileFor(key), collection)) result.put(key, 0L);
+                    // The collection check is not optional: a key file that lost this collection is
+                    // a delete of this collection, however recent the file itself is. Only then does
+                    // the file's own stamp stand in for the lock version this backend does not keep.
+                    Path file = fileFor(key);
+                    if (store.hasSubNode(file, collection)) {
+                        Long stamp = FileStamps.of(file);
+                        if (stamp != null) result.put(key, stamp);
+                    }
                 } catch (IOException e) {
                     // skip unreadable/corrupt entries
                 } finally {

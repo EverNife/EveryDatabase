@@ -37,8 +37,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <b>Delete propagation</b> works on every backend (a push delete event, or the version poll finding
  * the key gone). <b>Update propagation</b> needs an increasing version: push backends carry it on the
  * event, and a versioned descriptor on an <em>enforcing</em> backend (MariaDB) bumps {@code lock_version}
- * on save - but H2 and LocalFile do not enforce versioning, so polling there sees version {@code 0} and
- * catches only deletes. Those backends override {@link #supportsUpdatePropagation()} to {@code false}.
+ * on save - and the file backends derive one from the file itself, so they are polled the same way.
+ * H2 is the one that reports version {@code 0} for every existing key and therefore catches only
+ * deletes; it overrides {@link #supportsUpdatePropagation()} to {@code false}.
  */
 public abstract class AbstractCacheSyncTest {
 
@@ -57,7 +58,7 @@ public abstract class AbstractCacheSyncTest {
         return Duration.ofMillis(100);
     }
 
-    /** Whether a remote <em>update</em> (not just a delete) can be observed. False for H2/LocalFile. */
+    /** Whether a remote <em>update</em> (not just a delete) can be observed. False only for H2. */
     protected boolean supportsUpdatePropagation() {
         return true;
     }

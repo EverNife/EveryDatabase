@@ -439,4 +439,10 @@ class GroupedFileStorageTest extends AbstractStorageTest {
 
         reopened.close().join();
     }
+
+    /** This backend stamps the file instead of reporting 0 - see {@code Repository.versions}. */
+    @Override
+    protected boolean versionsAreZeroWithoutVersioning() {
+        return false;
+    }
 }
