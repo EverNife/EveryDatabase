@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Directory structure on disk:
  * <pre>
  * &lt;baseDirectory&gt;/
+ *   _schema_layout.json          (reserved - which format each collection is stored in)
  *   _schema_migrations.json
  *   playerdata/
  *     550e8400-e29b-41d4-a716-446655440000.json
@@ -49,8 +50,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * (path separators sanitised, and unsafe/over-long keys hash-suffixed so distinct keys never
  * collide on one file).
  *
+ * <p>The store describes itself: {@link LocalFileLayout} records the file extension each collection
+ * is written with, and refuses to open one whose files were written in another format - which would
+ * otherwise read as an empty collection while the data sat untouched beside it.
+ *
  * <p>Does <em>not</em> implement {@link TransactionalStorage}.
- * Implements {@link SchemaAwareStorage}.
+ * Implements {@link SchemaAwareStorage} and {@link ChangeFeedStorage}.
  */
 public final class LocalFileStorage implements Storage, SchemaAwareStorage, ChangeFeedStorage {
 
@@ -59,6 +64,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage, Chan
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
     private final LocalFileConfig config;
+    private final LocalFileLayout layout;
 
     /** Change feed: the OS watches the tree, and this fans what it reports out to the listeners. */
     private final String              originId = "localfile-" + UUID.randomUUID();
@@ -87,6 +93,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage, Chan
 
     public LocalFileStorage(LocalFileConfig config, StorageLogConfig logConfig) {
         this.config    = config;
+        this.layout    = new LocalFileLayout(config.baseDirectory());
         this.logConfig = logConfig;
         this.log       = new StorageLog("localfile", () -> this.logConfig);
         this.changeFeed = new ChangeFeedSupport(t -> log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
@@ -201,6 +208,9 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage, Chan
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
             k -> {
+                // The store gets a say before the repository exists: it may already hold this
+                // collection's files in another format, which opening it this way would hide.
+                layout.reconcile(descriptor.collection(), descriptor.codec().fileExtension());
                 LocalFileRepository<K, V> repo =
                     new LocalFileRepository<>(descriptor, config.baseDirectory(), log);
                 try {
