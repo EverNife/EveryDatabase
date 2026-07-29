@@ -18,6 +18,7 @@ import java.nio.file.Path;
  *
  * <pre>
  * &lt;baseDirectory&gt;/
+ *   _schema/layout.json              (reserved - records the container format of this directory)
  *   _schema/migrations.json          (reserved - never collides with a key file)
  *   &lt;key&gt;.yml                        (one file per key; e.g. one file per player UUID)
  * </pre>
@@ -41,7 +42,9 @@ import java.nio.file.Path;
  * is taken from the {@code Codec} on the {@link br.com.finalcraft.everydatabase.EntityDescriptor} -
  * a {@link JacksonJsonCodec} yields {@code .json} files, a {@link JacksonYamlCodec} yields readable
  * {@code .yml} files. All collections sharing this base directory must agree on one format (they share
- * the same physical files); a mismatch fails fast.
+ * the same physical files); a mismatch fails fast. The format is recorded in {@code _schema/layout.json}
+ * on first use, so reopening a directory with a codec of the other format fails instead of quietly
+ * reporting an empty collection and writing a parallel set of files.
  *
  * <pre>{@code
  * // YAML, human-readable: just use a YAML codec on the descriptor

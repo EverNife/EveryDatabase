@@ -32,12 +32,17 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <pre>
  * &lt;baseDirectory&gt;/
+ *   _schema/layout.json          (reserved - what format the files below are written in)
  *   _schema/migrations.json      (reserved ledger - isolated in a sub-directory, never a key file)
  *   &lt;key&gt;.yml                    (one file per key; a YAML/JSON map collection -&gt; entity)
  * </pre>
  *
  * <p>The per-key lock and the aggregate file primitives live in a single storage-wide
  * {@link KeyFileStore} shared by all repositories, because collections of the same key share one file.
+ *
+ * <p>The directory describes itself: {@link GroupedFileLayout} records the container format under
+ * {@code _schema/} and refuses to open a directory whose files were written in the other one, which
+ * would otherwise read as an empty collection.
  *
  * <p>Does <em>not</em> implement {@link TransactionalStorage}. Implements {@link SchemaAwareStorage};
  * the migration ledger lives under the reserved {@code _schema/} sub-directory, so it can never collide
@@ -50,8 +55,10 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
-    private final GroupedFileConfig config;
-    private final KeyFileStore      keyFileStore;
+    private final GroupedFileConfig  config;
+    private final ContainerFormat    format = new ContainerFormat();
+    private final GroupedFileLayout  layout;
+    private final KeyFileStore       keyFileStore;
     private final ConcurrentHashMap<String, GroupedFileRepository<?, ?>> repositories = new ConcurrentHashMap<>();
     private volatile boolean initialized = false;
 
@@ -77,7 +84,8 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
         this.config       = config;
         this.logConfig    = logConfig;
         this.log          = new StorageLog("groupedfile", () -> this.logConfig);
-        this.keyFileStore = new KeyFileStore(config.baseDirectory(), config.rootCacheSize());
+        this.layout       = new GroupedFileLayout(config.baseDirectory());
+        this.keyFileStore = new KeyFileStore(config.baseDirectory(), format, config.rootCacheSize());
     }
 
     // ------------------------------------------------------------------
@@ -190,7 +198,10 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
             k -> {
                 // Lock the container format (JSON/YAML) from the codec on first use; all collections
                 // in this base directory share the files, so they must agree on one format.
-                keyFileStore.resolveFormat(descriptor.codec());
+                format.resolve(descriptor.codec());
+                // ...and the directory gets a say too: it may already hold files written in the
+                // other format, in which case opening it this way would silently hide them.
+                layout.reconcile(format, descriptor.collection());
                 return new GroupedFileRepository<>(descriptor, keyFileStore, log);
             }
         );

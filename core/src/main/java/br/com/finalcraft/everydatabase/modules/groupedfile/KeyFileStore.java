@@ -2,16 +2,10 @@ package br.com.finalcraft.everydatabase.modules.groupedfile;
 
 import br.com.finalcraft.everydatabase.util.FileKeyNames;
 
-import br.com.finalcraft.everydatabase.codec.Codec;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
-import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
-
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
@@ -40,11 +34,9 @@ import java.util.stream.Stream;
  * updates.
  *
  * <p><b>Container format follows the codec.</b> The aggregate document is a Jackson tree, so it must be
- * a format Jackson round-trips as a tree - JSON or YAML (a {@link YAMLMapper} is an {@link ObjectMapper},
- * sharing the same {@code jackson-databind} tree model). The format is resolved <em>lazily</em> from the
- * first descriptor's {@code Codec} ({@link #resolveFormat(Codec)}) and is locked for the storage's
- * lifetime: every collection in one base directory writes the same files, so they must agree on one
- * format. A mismatched codec fails fast.
+ * a format Jackson round-trips as a tree - JSON or YAML. That decision is not this class's to make: it
+ * belongs to the whole base directory, so it lives in the shared {@link ContainerFormat} handed in at
+ * construction, already reconciled against what the directory says about itself.
  *
  * <p>The atomic file primitive (write to a sibling {@code .tmp}, then {@link StandardCopyOption#ATOMIC_MOVE})
  * is the same crash-safety mechanism LocalFile uses; here it publishes the whole multi-collection
@@ -53,15 +45,11 @@ import java.util.stream.Stream;
  */
 final class KeyFileStore {
 
-    private final Path baseDirectory;
+    private final Path            baseDirectory;
+    private final ContainerFormat format;
 
     /** Per-key locks, keyed by sanitised key. Global across all repositories of the owning storage. */
     private final ConcurrentHashMap<String, ReadWriteLock> locks = new ConcurrentHashMap<>();
-
-    // Format state - resolved once from the first codec, then immutable.
-    private volatile ObjectMapper mapper;     // matches the resolved format (JSON or YAML)
-    private volatile String       extension;  // ".json" or ".yml"
-    private volatile Boolean      yaml;        // null until resolved
 
     /** Memoized aggregate documents, LRU-bounded. Empty and unused when the cache is disabled. */
     private final Map<Path, CachedRoot> roots;
@@ -70,12 +58,13 @@ final class KeyFileStore {
     /** Full parses that actually happened - the observable the cache exists to reduce. */
     private final AtomicLong rootParses = new AtomicLong();
 
-    KeyFileStore(Path baseDirectory) {
-        this(baseDirectory, GroupedFileConfig.DEFAULT_ROOT_CACHE_SIZE);
+    KeyFileStore(Path baseDirectory, ContainerFormat format) {
+        this(baseDirectory, format, GroupedFileConfig.DEFAULT_ROOT_CACHE_SIZE);
     }
 
-    KeyFileStore(Path baseDirectory, int rootCacheSize) {
+    KeyFileStore(Path baseDirectory, ContainerFormat format, int rootCacheSize) {
         this.baseDirectory = baseDirectory;
+        this.format        = format;
         this.rootCacheSize = Math.max(0, rootCacheSize);
         this.roots = this.rootCacheSize == 0
             ? null
@@ -102,49 +91,7 @@ final class KeyFileStore {
     }
 
     ObjectMapper mapper() {
-        return mapper;
-    }
-
-    /**
-     * Resolves and locks the container format from a descriptor's codec, the first time a repository is
-     * created. JSON ({@link Codec#isJsonCodec()}) and YAML (content-type) are supported; any other codec
-     * (opaque/binary) cannot be embedded into a structured aggregate document and is rejected. Every
-     * collection of one storage shares the files, so all codecs must resolve to the same format.
-     *
-     * @throws IllegalArgumentException if the codec is neither JSON nor YAML
-     * @throws IllegalStateException    if a later codec resolves to a different format than the first
-     */
-    synchronized void resolveFormat(Codec<?> codec) {
-        boolean wantYaml = isYaml(codec);
-        if (yaml == null) {
-            yaml      = wantYaml;
-            extension = wantYaml ? ".yml" : ".json";
-            mapper    = wantYaml ? newYamlMapper() : newJsonMapper();
-        } else if (yaml != wantYaml) {
-            throw new IllegalStateException(
-                "GroupedFileStorage: all collections in one base directory must share a container format, "
-                + "but got both " + (yaml ? "YAML" : "JSON") + " and " + (wantYaml ? "YAML" : "JSON")
-                + " codecs. Use a single format (all JSON or all YAML) per base directory.");
-        }
-    }
-
-    private static boolean isYaml(Codec<?> codec) {
-        if (codec.isJsonCodec()) return false;
-        String ct = codec.contentType().toLowerCase();
-        if (ct.contains("yaml") || ct.contains("yml")) return true;
-        throw new IllegalArgumentException(
-            "GroupedFileStorage requires a JSON or YAML codec (the aggregate file is a structured "
-            + "document); got contentType=" + codec.contentType());
-    }
-
-    private static ObjectMapper newJsonMapper() {
-        // Local files are meant to be human-inspectable - keep the aggregate document indented.
-        return JsonMapper.builder().enable(SerializationFeature.INDENT_OUTPUT).build();
-    }
-
-    private static ObjectMapper newYamlMapper() {
-        // Drop the leading "---" document-start marker so files read like a plain config.
-        return YAMLMapper.builder().disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER).build();
+        return format.mapper();
     }
 
     /**
@@ -161,7 +108,7 @@ final class KeyFileStore {
     }
 
     Path keyFile(String sanitizedKey) {
-        return baseDirectory.resolve(sanitizedKey + extension);
+        return baseDirectory.resolve(sanitizedKey + format.extension());
     }
 
     /**
@@ -180,7 +127,7 @@ final class KeyFileStore {
      */
     List<Path> keyFiles() throws IOException {
         if (!Files.isDirectory(baseDirectory)) return Collections.emptyList();
-        String ext = extension;
+        String ext = format.extension();
         try (Stream<Path> entries = Files.list(baseDirectory)) {
             return entries
                 .filter(Files::isRegularFile)
@@ -210,7 +157,7 @@ final class KeyFileStore {
         if (memoized != null) return memoized.has(collection);
         byte[] bytes = readIfPresent(file);
         if (bytes == null) return false;
-        try (JsonParser parser = mapper.getFactory().createParser(bytes)) {
+        try (JsonParser parser = format.mapper().getFactory().createParser(bytes)) {
             return seekField(parser, collection);
         }
     }
@@ -230,7 +177,7 @@ final class KeyFileStore {
         if (memoized != null) return memoized.get(collection);
         byte[] bytes = readIfPresent(file);
         if (bytes == null) return null;
-        try (JsonParser parser = mapper.getFactory().createParser(bytes)) {
+        try (JsonParser parser = format.mapper().getFactory().createParser(bytes)) {
             return seekField(parser, collection) ? parser.readValueAsTree() : null;
         }
     }
@@ -290,7 +237,7 @@ final class KeyFileStore {
         if (bytes == null) return null;
 
         rootParses.incrementAndGet();
-        JsonNode node = mapper.readTree(bytes);
+        JsonNode node = format.mapper().readTree(bytes);
         if (node == null || !node.isObject()) return null;
         ObjectNode root = (ObjectNode) node;
         if (roots != null) roots.put(file, new CachedRoot(attrs, root));
@@ -398,7 +345,7 @@ final class KeyFileStore {
      * already hands out a private copy.
      */
     void writeAtomic(Path target, ObjectNode root) throws IOException {
-        writeAtomic(target, mapper.writeValueAsBytes(root));
+        writeAtomic(target, format.mapper().writeValueAsBytes(root));
         memoize(target, root);
     }
 
