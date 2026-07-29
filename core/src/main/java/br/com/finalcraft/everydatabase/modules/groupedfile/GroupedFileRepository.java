@@ -94,13 +94,24 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
     //  serialised and re-parsed around it, which is what these two hide.
     // ------------------------------------------------------------------
 
-    private V decodeSub(JsonNode sub) throws IOException {
+    /** The collection this repository owns - the field name it reads inside every key file. */
+    String collection() {
+        return collection;
+    }
+
+    EntityDescriptor<K, V> descriptor() {
+        return descriptor;
+    }
+
+    /** Package-visible so the key-major path can decode a document it already holds. */
+    V decodeSub(JsonNode sub) throws IOException {
         return treeCodec != null
             ? treeCodec.decodeTree(sub)
             : descriptor.codec().decode(store.mapper().writeValueAsBytes(sub));
     }
 
-    private JsonNode encodeSub(V entity) throws IOException {
+    /** Package-visible so the key-major path can build a sub-node for a document it will publish. */
+    JsonNode encodeSub(V entity) throws IOException {
         return treeCodec != null
             ? treeCodec.encodeTree(entity)
             : store.mapper().readTree(descriptor.codec().encode(entity));

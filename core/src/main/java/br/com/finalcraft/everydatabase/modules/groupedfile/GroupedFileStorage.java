@@ -11,8 +11,13 @@ import br.com.finalcraft.everydatabase.schema.MigrationContext;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.keymajor.KeyBatch;
+import br.com.finalcraft.everydatabase.keymajor.KeyBundle;
+import br.com.finalcraft.everydatabase.keymajor.KeyMajorStorage;
 import br.com.finalcraft.everydatabase.util.BackendIdentities;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.type.CollectionType;
 
 import java.io.IOException;
@@ -24,6 +29,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.function.Consumer;
 
 /**
  * Key-major local-file {@link Storage} backend: one file per key, each holding every collection that
@@ -44,11 +51,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@code _schema/} and refuses to open a directory whose files were written in the other one, which
  * would otherwise read as an empty collection.
  *
- * <p>Does <em>not</em> implement {@link TransactionalStorage}. Implements {@link SchemaAwareStorage};
+ * <p>Implements {@link KeyMajorStorage}: one key's collections share one file, so they can be read
+ * with one parse and written with one atomic move. That is atomicity <em>per key</em> and nothing
+ * more - this backend still does <em>not</em> implement {@link TransactionalStorage}, and nothing
+ * here spans two keys.
+ *
+ * <p>Implements {@link SchemaAwareStorage};
  * the migration ledger lives under the reserved {@code _schema/} sub-directory, so it can never collide
  * with a key file (a key named {@code _schema} maps to {@code _schema.<ext>}, a file, not the directory).
  */
-public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
+public final class GroupedFileStorage implements Storage, SchemaAwareStorage, KeyMajorStorage {
 
     static final String SCHEMA_DIR       = "_schema";
     static final String MIGRATIONS_FILE  = "migrations.json";
@@ -225,6 +237,229 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
                 return new GroupedFileRepository<>(descriptor, storeFor(descriptor.collection()), log);
             }
         );
+    }
+
+    // ------------------------------------------------------------------
+    //  KeyMajorStorage
+    //
+    //  This is the backend's own shape surfaced as API: every collection of one key already lives in
+    //  one file behind one lock, so reading them together is one parse and writing them together is
+    //  one atomic move. Doing it collection by collection pays N times for the same file - and, on
+    //  the write side, is not even equivalent: a crash between two of the N saves leaves the key
+    //  half-updated, which one batch cannot do.
+    // ------------------------------------------------------------------
+
+    @Override
+    public CompletableFuture<KeyBundle> loadKey(Object key, EntityDescriptor<?, ?>... descriptors) {
+        final List<GroupedFileRepository<?, ?>> repositories;
+        final KeyFileStore store;
+        try {
+            repositories = repositoriesOf("loadKey", key, descriptors);
+            store        = sharedStore("loadKey", descriptors);
+        } catch (RuntimeException e) {
+            return failed(e);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            String sanitized = KeyFileStore.sanitize(key);
+            ReadWriteLock lock = store.lockFor(sanitized);
+            lock.readLock().lock();
+            try {
+                // One read for the whole bundle - the point of the capability.
+                ObjectNode root = store.cachedRoot(store.keyFile(sanitized));
+                Map<String, Object> loaded = new LinkedHashMap<>();
+                for (GroupedFileRepository<?, ?> repository : repositories) {
+                    JsonNode sub = root == null ? null : root.get(repository.collection());
+                    loaded.put(repository.collection(), sub == null ? null : repository.decodeSub(sub));
+                }
+                return (KeyBundle) new LoadedKeyBundle(loaded);
+            } catch (IOException e) {
+                throw log.errored(StorageOp.FIND, null,
+                    new RuntimeException("GroupedFile: failed to read key=" + key, e));
+            } finally {
+                lock.readLock().unlock();
+            }
+        }, StorageExecutors.get());
+    }
+
+    @Override
+    public CompletableFuture<Void> batchKey(Object key, Consumer<KeyBatch> writes) {
+        if (writes == null) return failed(new IllegalArgumentException("writes cannot be null"));
+        return CompletableFuture.supplyAsync(() -> {
+            // Collected before any lock is taken: the consumer's code may call back into this
+            // storage, and running it under the key's write lock would let it deadlock on itself.
+            // It also means an exception thrown here happens before anything on disk is touched.
+            CollectedBatch batch = new CollectedBatch();
+            writes.accept(batch);
+            if (batch.operations.isEmpty()) return null;
+
+            EntityDescriptor<?, ?>[] touched = batch.operations.keySet().toArray(new EntityDescriptor<?, ?>[0]);
+            List<GroupedFileRepository<?, ?>> repositories = repositoriesOf("batchKey", key, touched);
+            KeyFileStore store = sharedStore("batchKey", touched);
+
+            long startMs = System.currentTimeMillis();
+            String sanitized = KeyFileStore.sanitize(key);
+            ReadWriteLock lock = store.lockFor(sanitized);
+            lock.writeLock().lock();
+            try {
+                Path file = store.keyFile(sanitized);
+                ObjectNode root = store.mutableRoot(file);
+                if (root == null) root = store.mapper().createObjectNode();
+
+                int index = 0;
+                for (Map.Entry<EntityDescriptor<?, ?>, Object> operation : batch.operations.entrySet()) {
+                    GroupedFileRepository<?, ?> repository = repositories.get(index++);
+                    if (operation.getValue() == REMOVED) {
+                        root.remove(repository.collection());
+                    } else {
+                        root.set(repository.collection(), encodeUnchecked(repository, operation.getValue()));
+                    }
+                }
+
+                if (root.size() == 0) {
+                    // Nothing left for this key - same rule as a delete that empties the file.
+                    if (Files.exists(file)) store.delete(file);
+                } else {
+                    store.writeAtomic(file, root);
+                }
+                log.savedBatch(collectionNames(repositories), batch.operations.size(),
+                               System.currentTimeMillis() - startMs);
+                return null;
+            } catch (IOException e) {
+                throw log.errored(StorageOp.SAVE, null,
+                    new RuntimeException("GroupedFile: failed to write key=" + key, e));
+            } finally {
+                lock.writeLock().unlock();
+            }
+        }, StorageExecutors.get());
+    }
+
+    /**
+     * The repositories for {@code descriptors}, in order, after checking that the key is one they
+     * can address. The key is untyped on this API - it names a file, and one file serves collections
+     * with different key types - so the check has to happen here.
+     */
+    private List<GroupedFileRepository<?, ?>> repositoriesOf(String what, Object key,
+                                                             EntityDescriptor<?, ?>... descriptors) {
+        if (key == null) throw new IllegalArgumentException("GroupedFileStorage." + what + ": key cannot be null");
+        if (descriptors == null || descriptors.length == 0) {
+            throw new IllegalArgumentException("GroupedFileStorage." + what + ": at least one descriptor is required");
+        }
+        List<GroupedFileRepository<?, ?>> resolved = new ArrayList<>(descriptors.length);
+        for (EntityDescriptor<?, ?> descriptor : descriptors) {
+            if (!descriptor.keyType().isInstance(key)) {
+                throw new IllegalArgumentException(
+                    "GroupedFileStorage." + what + ": collection '" + descriptor.collection() + "' is keyed by "
+                    + descriptor.keyType().getSimpleName() + ", but the key given is a "
+                    + key.getClass().getSimpleName() + " (" + key + ").");
+            }
+            resolved.add((GroupedFileRepository<?, ?>) repository(descriptor));
+        }
+        return resolved;
+    }
+
+    /**
+     * The one store all {@code descriptors} live in.
+     *
+     * <p>Collections in different key spaces do not share a file, so there is no single read or
+     * single write to be had. Accepting them and quietly doing N of each would hide exactly the cost
+     * this API exists to remove, so it is refused instead.
+     */
+    private KeyFileStore sharedStore(String what, EntityDescriptor<?, ?>... descriptors) {
+        String keySpace = config.keySpaceOf(descriptors[0].collection());
+        for (EntityDescriptor<?, ?> descriptor : descriptors) {
+            String other = config.keySpaceOf(descriptor.collection());
+            if (!Objects.equals(keySpace, other)) {
+                throw new IllegalArgumentException(
+                    "GroupedFileStorage." + what + ": collections '" + descriptors[0].collection() + "' ("
+                    + describeKeySpace(keySpace) + ") and '" + descriptor.collection() + "' ("
+                    + describeKeySpace(other) + ") are stored in different key spaces, so they do not share "
+                    + "a file. Group them in one key space, or address them one collection at a time.");
+            }
+        }
+        return storeFor(descriptors[0].collection());
+    }
+
+    private static String describeKeySpace(String keySpace) {
+        return keySpace == null ? "the base directory" : "key space '" + keySpace + "'";
+    }
+
+    private static String collectionNames(List<GroupedFileRepository<?, ?>> repositories) {
+        StringBuilder names = new StringBuilder();
+        for (GroupedFileRepository<?, ?> repository : repositories) {
+            if (names.length() > 0) names.append(',');
+            names.append(repository.collection());
+        }
+        return names.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static JsonNode encodeUnchecked(GroupedFileRepository<?, ?> repository, Object entity)
+            throws IOException {
+        return ((GroupedFileRepository<?, Object>) repository).encodeSub(entity);
+    }
+
+    private static <T> CompletableFuture<T> failed(RuntimeException e) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        future.completeExceptionally(e);
+        return future;
+    }
+
+    /** Marks a collection as being dropped rather than written, inside a collected batch. */
+    private static final Object REMOVED = new Object();
+
+    /** What the caller's {@code Consumer} asked for, in the order it asked. */
+    private static final class CollectedBatch implements KeyBatch {
+
+        private final Map<EntityDescriptor<?, ?>, Object> operations = new LinkedHashMap<>();
+
+        @Override
+        public <K, V> KeyBatch put(EntityDescriptor<K, V> descriptor, V entity) {
+            if (descriptor == null) throw new IllegalArgumentException("descriptor cannot be null");
+            if (entity == null)     throw new IllegalArgumentException("entity cannot be null; use remove(...)");
+            operations.put(descriptor, entity);
+            return this;
+        }
+
+        @Override
+        public <K, V> KeyBatch remove(EntityDescriptor<K, V> descriptor) {
+            if (descriptor == null) throw new IllegalArgumentException("descriptor cannot be null");
+            operations.put(descriptor, REMOVED);
+            return this;
+        }
+    }
+
+    /** A bundle over what one read of the key file produced; a {@code null} value means absent. */
+    private static final class LoadedKeyBundle implements KeyBundle {
+
+        private final Map<String, Object> byCollection;
+
+        LoadedKeyBundle(Map<String, Object> byCollection) {
+            this.byCollection = byCollection;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <K, V> Optional<V> get(EntityDescriptor<K, V> descriptor) {
+            if (descriptor == null || !byCollection.containsKey(descriptor.collection())) {
+                throw new IllegalArgumentException(
+                    "KeyBundle: collection '" + (descriptor == null ? null : descriptor.collection())
+                    + "' was not part of this read; it holds " + byCollection.keySet() + ".");
+            }
+            return Optional.ofNullable((V) byCollection.get(descriptor.collection()));
+        }
+
+        @Override
+        public Set<String> collections() {
+            return Collections.unmodifiableSet(byCollection.keySet());
+        }
+
+        @Override
+        public boolean isEmpty() {
+            for (Object value : byCollection.values()) {
+                if (value != null) return false;
+            }
+            return true;
+        }
     }
 
     // ------------------------------------------------------------------

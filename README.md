@@ -374,6 +374,24 @@ Storage storage = Storages.createGroupedFile(config);
 ```
 
 It moves *entries*, not files: a key file holding several collections is split, and only the collections that moved leave it. It handles a changed partitioner the same way, and prunes the bucket directories it empties. Running it twice does nothing the second time.
+
+**Reading and writing a whole key at once.** Because every collection of one key already lives in one file, grouped files implement the `KeyMajorStorage` capability — check for it with `instanceof` and fall back to N calls on backends that store collections apart:
+
+```java
+if (storage instanceof KeyMajorStorage kms) {
+    KeyBundle bundle = kms.loadKey(uuid, PLAYER_DATA, ECONOMY, HOMES).join();   // one parse
+    PlayerData data = bundle.get(PLAYER_DATA).orElseGet(PlayerData::new);
+    ...
+    kms.batchKey(uuid, b -> b                                                   // one atomic move
+        .put(PLAYER_DATA, data).put(ECONOMY, eco).put(HOMES, homes)).join();
+} else {
+    PlayerData data = storage.repository(PLAYER_DATA).find(uuid).join().orElseGet(PlayerData::new);
+    ...
+    storage.repository(PLAYER_DATA).save(data).join();
+}
+```
+
+Beyond the saved I/O, the batch is the only version that is **atomic**: N separate saves can be interrupted between two of them and leave the key half-updated. That atomicity is **per key and nothing more** — grouped files still do not implement `TransactionalStorage`, and nothing here spans two keys. All descriptors must share a key space; ones that don't have no file in common, so the call is refused rather than quietly doing N reads.
 </details>
 
 <details>

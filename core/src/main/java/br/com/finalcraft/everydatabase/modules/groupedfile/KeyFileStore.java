@@ -64,6 +64,9 @@ final class KeyFileStore {
     /** Full parses that actually happened - the observable the cache exists to reduce. */
     private final AtomicLong rootParses = new AtomicLong();
 
+    /** Atomic publications of a whole key file - what a key-major batch exists to collapse. */
+    private final AtomicLong atomicWrites = new AtomicLong();
+
     KeyFileStore(Path directory, ContainerFormat format) {
         this(directory, format, GroupedFileConfig.DEFAULT_ROOT_CACHE_SIZE);
     }
@@ -96,6 +99,11 @@ final class KeyFileStore {
     /** How many times a whole aggregate document had to be parsed since this store was created. */
     long rootParseCount() {
         return rootParses.get();
+    }
+
+    /** How many whole key files this store has published since it was created. */
+    long atomicWriteCount() {
+        return atomicWrites.get();
     }
 
     /** The directory this store owns: the base directory, or one key space's sub-directory of it. */
@@ -359,6 +367,7 @@ final class KeyFileStore {
         // key space nobody writes to never leaves an empty directory behind.
         Path parent = target.getParent();
         if (parent != null) Files.createDirectories(parent);
+        atomicWrites.incrementAndGet();
         Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
         Files.write(tmp, data,
             StandardOpenOption.CREATE,
