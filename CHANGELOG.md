@@ -8,27 +8,104 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-28
+
+Performance and layout work on the file backends. Both of them stop paying full-decode prices for
+questions that never needed the payload, both learn to describe their own on-disk format instead of
+guessing it, and both gain a push change feed. Grouped files additionally gain key spaces, directory
+fan-out, and a key-major read/write API that matches what the backend already is.
+
 ### Added
-- **GroupedFile memoizes aggregate documents**, bounded by `GroupedFileConfig.rootCacheSize(int)`
+
+- **`Repository.keys(Cursor, int)`** - key-ordered pagination over the stored keys, reading no
+  payload at all: an index-only scan on SQL, a covered query on Mongo, a directory listing on the
+  file backends. There was no way to ask "which keys exist" without decoding entities, so selective
+  preloading, reconciling two backends and sweeping all paid a full decode through `all()` or
+  `scanAll()`.
+
+  ```java
+  Slice<String> page = repo.keys(Cursor.scan(), 500).join();
+  List<Player> loaded = repo.findMany(parse(page.content())).join();
+  ```
+
+  The keys are storage keys, in `ScanRow.key()`'s form. On the file backends a key that had to be
+  sanitised into a file name is reported sanitised and does not round-trip to `find` - recovering
+  the original would mean reading the payload this exists to avoid. Use `scanAll` when the exact
+  original matters for keys that are not plain UUID/numeric/lower-case strings. A row whose payload
+  is unreadable still appears here, following the same rule as `count()`.
+
+- **Key spaces for grouped files** - `GroupedFileConfig.builder(base).keySpace(name, collections...)`
+  puts a group of collections in its own sub-directory, with its own listing and its own locks. One
+  base directory tends to accumulate collections keyed by unrelated things (player UUIDs, account
+  UUIDs, free-form cooldown ids); they share the directory but never share a meaningful key, so
+  every scan reads files that cannot hold what it is looking for, and an accidental key collision
+  puts two unrelated collections in one file behind one lock.
+
+  Collections are declared grouped by key space because the group is the point: co-location is what
+  a key space *means*, and listing the members together makes a typo look wrong instead of quietly
+  splitting one entity's file in two. Declaring none leaves the tree exactly as it was.
+
+- **Directory fan-out** - `GroupedFilePartitioner.hashFanout(levels)` / `prefix(chars)` / `flat()`,
+  passed to `keySpace(...)`. A key space shrinks the small directories and leaves the big one as big;
+  ten thousand files in one directory already slows listing down on NTFS. Point reads still resolve
+  the path rather than searching for it, so nothing on the read path gets worse.
+
+  The hash is SHA-1 over the key's UTF-8 bytes, which rules out `String.hashCode`: a file's location
+  is permanent, so the function that decided it has to be identical on every JVM, version and OS.
+
+- **`GroupedFileRelayout.relayout(config)`** - moves files to where a new configuration places them,
+  after declaring a key space or changing a partitioner. It moves *entries*, not files: a key file
+  holds collections that are staying put, so it is split rather than moved. Idempotent; prunes the
+  bucket directories it empties.
+
+- **`KeyMajorStorage`** (new package `keymajor`, with `KeyBundle` and `KeyBatch`) - reads or writes
+  every collection of one key in a single operation. Implemented only by grouped files, where the
+  collections already share one file behind one lock; every other backend stores them apart, so
+  callers check with `instanceof` and fall back to N calls.
+
+  ```java
+  KeyBundle bundle = kms.loadKey(uuid, PLAYER_DATA, ECONOMY, HOMES).join();   // one parse
+  kms.batchKey(uuid, b -> b.put(PLAYER_DATA, data).put(ECONOMY, eco)).join(); // one atomic move
+  ```
+
+  The write side is not merely cheaper: a crash between two of N saves leaves the key with half its
+  collections updated, which one publication cannot do. That is **atomicity per key and nothing
+  else** - grouped files still do not implement `TransactionalStorage`, and nothing here spans two
+  keys. Descriptors from different key spaces are refused rather than served with N reads.
+
+- **A change feed for local and grouped files** - both now implement `ChangeFeedStorage` over the
+  operating system's file-watch notification, so `CacheSync.attach(storage)` takes the push path
+  with no poll interval. This is the only feed that sees a change made *outside* the application: an
+  administrator editing a file by hand invalidates caches exactly like a write through the API.
+
+  Two consequences worth knowing. A file event carries **no origin** - a file system has nowhere to
+  record who wrote a file, and claiming otherwise would make every other instance in the process
+  discard the event as its own - so a local write echoes back and re-marks the cell it just
+  refreshed. And on grouped files the event names the *file*, so every collection sharing that key is
+  woken: a false wake-up, never a missed one. On macOS the JDK falls back to an internal polling
+  watcher with second-scale latency; use `PollingCacheSync` explicitly there if the cadence must be
+  yours.
+
+- **`GroupedFileConfig.rootCacheSize(int)`** - grouped files memoize aggregate documents, bounded
   (default 256 documents; `0` disables). A key file holds every collection sharing its key, so
-  loading one entity-root used to read and parse the same file once per collection — 20 collections
+  loading one entity-root used to read and parse the same file once per collection - 20 collections
   meant 20 parses of one document. Point reads and writes now share one parsed document; directory
   scans deliberately do not participate, since they touch each file once.
 
   Validity is a `(lastModifiedTime, size)` stamp checked per access, which costs one extra syscall
-  on a read that misses the memo — a workload that only ever touches one collection per key is
+  on a read that misses the memo - a workload that only ever touches one collection per key is
   marginally better off with `rootCacheSize(0)`. Writes made through the storage refresh the memo
   directly; an external process rewriting a file to exactly the same length within one filesystem
   timestamp tick is the case the stamp cannot see.
 
-- **`TreeCodec`** — an optional codec capability (same idiom as `ObjectMapperAware`) for converting
+- **`TreeCodec`** - an optional codec capability (same idiom as `ObjectMapperAware`) for converting
   directly to and from a Jackson tree. `JacksonJsonCodec` and `JacksonYamlCodec` implement it;
   anything else keeps working through `encode`/`decode`.
 
   It exists for the backends that already hold a tree: GroupedFile embeds each entity as a sub-node
   of a shared document, and InMemory round-trips entities to isolate the caller's instance from the
   stored one. Both used to serialise that tree to bytes purely so the codec could parse it straight
-  back — bytes that were never stored and never transmitted. SQL and Mongo are deliberately
+  back - bytes that were never stored and never transmitted. SQL and Mongo are deliberately
   untouched: they persist the encoded bytes, so for them there is no round-trip to remove.
 
   `IndexValueExtractor.toTree` now asks the codec for its tree form before falling back to a mapper.
@@ -36,23 +113,78 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
   `ObjectMapper` was previously indexed through the fallback mapper, so its indexed values could
   disagree with what it persisted.
 
+### Fixed
+
+- **A file store opened with the wrong codec format now fails instead of reporting an empty
+  collection.** This was silent data loss in the worst shape a persistence library has: both file
+  backends resolve every path through the codec's extension, and nothing on disk recorded which
+  extension the data had actually been written with. Opening a YAML store with a JSON codec matched
+  no files, reported the collection as empty, and the first save wrote a parallel `.json` file
+  beside the `.yml` one still holding the data. No error, anywhere.
+
+  Grouped files record the container format of the whole directory in `_schema/layout.json`; local
+  files record the extension **per collection** in `_schema_layout.json`, because each collection
+  owns a sub-directory and may legitimately differ from its neighbours. A store that predates these
+  files has its format inferred from what is on disk and written down. One that holds both formats
+  refuses to open at all, listing how many files of each it found - that is the fingerprint of a
+  mismatch that already happened, and only the operator can say which set to keep. An unreadable
+  layout fails the open rather than falling back to the codec's guess.
+
+  Grouped files record collection placement and fan-out there too, so a configuration that
+  disagrees with the record fails to open: where a file lives is a file operation, not a config
+  change. `GroupedFileRelayout` is how you make the move.
+
+- **Local and grouped files report a version that moves**, so `PollingCacheSync` detects remote
+  *updates* over them and not only deletes. They used to report `0` for every existing key, which
+  meant two processes over one directory - a network mount, or one process holding two storages -
+  served stale data indefinitely. The poller never needed a lock version: it asks whether the number
+  grew, and a file answers that with its modification time (with the size folded into the low bits,
+  so two writes inside one clock tick still differ).
+
+  Grouped files still check that the key file holds the collection before stamping it - a file that
+  lost this collection is a delete of it, however recent the file is. The flip side is that the
+  stamp is per file, so writing one collection makes the others reload once for nothing.
+
 ### Changed
+
 - **`Repository.count()` counts stored rows, not decodable ones.** A row whose payload fails to
   decode is now included: it occupies storage and a write to its key overwrites it, so it exists.
   `all()` and `query()` still skip it, which makes `count() != all().count()` the signal that a
-  collection holds a poisoned row — and `scanAll()` is what names it. This aligns the file backends
+  collection holds a poisoned row - and `scanAll()` is what names it. This aligns the file backends
   with SQL (`SELECT COUNT(*)`) and Mongo (`countDocuments`), which always counted such rows.
 
   The old behaviour cost a full read of the collection to answer "how many": LocalFile decoded
   every file and GroupedFile decoded every matching sub-node, only to discard the result. Counting
   is now a directory listing on LocalFile and a presence probe per key file on GroupedFile.
 
+- **`Repository.versions(...)` documents its value as opaque.** It is comparable only with an earlier
+  reading of the same key on the same backend; all a caller may conclude is that a bigger number
+  means the row changed. It is a `lock_version` on the enforcing backends, a file stamp on the file
+  backends, `0` on H2 and on non-versioned descriptors elsewhere - never a counter, never a
+  timestamp to format, never comparable across backends.
+
 - **`CollectionStats` gained `entitiesRead()`**, and `StorageTransfer`'s count verification now
   compares what was written against what the source *handed over* rather than against
   `sourceCount()`. A source row that cannot be decoded is reported as its own explicit transfer
-  error (naming how many were left behind) instead of surfacing as a confusing count mismatch —
+  error (naming how many were left behind) instead of surfacing as a confusing count mismatch -
   previously such a row was invisible in the report on both sides. The `CollectionStats`
   constructor takes the new value after `sourceCount`.
+
+- **Grouped-file reads stream instead of materialising the whole document.** A key file aggregates
+  every collection sharing its key, but a repository owns one of them; scans now walk the top-level
+  field names with a streaming parser and materialise at most the one that matches.
+
+### Breaking
+
+- **`Repository` gained `keys(Cursor, int)`.** Any implementation of the interface outside this
+  project must add it. Test doubles inside a consumer's own suite are the likely place this lands.
+- **`CollectionStats`'s constructor takes `entitiesRead` after `sourceCount`.** Direct construction
+  is unusual - the type is normally produced by `StorageTransfer` - but the signature changed.
+- **A grouped-file or local-file directory whose format disagrees with the codec now throws on
+  open** where it previously returned an empty collection. That is the fix, not a regression, but a
+  consumer whose configuration was quietly wrong will see the failure at startup.
+- **`versions()` on the file backends no longer returns `0`.** Code that compared the value against
+  a literal zero, rather than against an earlier reading, needs to stop.
 
 ## [1.1.1] — 2026-07-28
 
