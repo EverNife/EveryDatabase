@@ -529,7 +529,7 @@ The ordering is **identical on every backend**, so a query behaves the same when
 
 ### Listing keys without reading rows
 
-`keys(Cursor, int)` pages through the stored keys and **never opens a payload** — an index-only scan on SQL, a covered query on Mongo, a directory listing on the file backends. It's what makes loading a handful of rows out of a collection of tens of thousands cost the handful:
+`keys(Cursor, int)` pages through the stored keys and **never decodes an entity** — an index-only scan on SQL, a covered query on Mongo, a plain directory listing on LocalFile. It's what makes loading a handful of rows out of a collection of tens of thousands cost the handful:
 
 ```java
 Slice<String> page = repo.keys(Cursor.scan(), 500).join();
@@ -538,6 +538,8 @@ List<Player> loaded = repo.findMany(wanted).join();
 ```
 
 Contrast with `scanAll`, which decodes every row so it can *report* the ones that fail — what a maintenance sweep needs. `keys()` never decodes, so a row whose payload is unreadable still appears (same rule as `count()`). The keys are **storage keys**, in `ScanRow.key()`'s form: on the file backends a key that had to be sanitised into a file name is reported sanitised and won't round-trip to `find` — use `scanAll` when the exact original matters for keys that aren't plain UUID/numeric/lower-case strings.
+
+> **GroupedFile is the one backend where this is not free.** A key file aggregates every collection sharing the key, so a key whose file exists without *this* collection is not a key of this collection — there is no way to answer from the directory alone. It reads every key file's bytes and runs a streaming field probe over them: no tree is built and no entity is decoded, but every file is opened. And on **both** file backends the page is cut from a freshly built, fully sorted list of names, so each page costs a whole sweep — paging through everything is O(N²/limit), not O(N). Two consequences on GroupedFile specifically: an aggregate document that is corrupt *as a document* is skipped entirely (its key disappears from `keys()` and `count()`, unlike a merely undecodable row, which still counts), and `keys()` is a poor fit for a hot loop over a large key space.
 
 #### Page responses — `querySlice` (cheap) and `queryPage` (with total)
 

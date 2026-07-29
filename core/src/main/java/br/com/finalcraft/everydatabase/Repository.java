@@ -157,9 +157,17 @@ public interface Repository<K, V> {
     CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit);
 
     /**
-     * Key-ordered pagination over the stored keys alone: <b>no payload is read and nothing is
-     * decoded</b>. Begin with {@link Cursor#scan()} and follow {@link Slice#nextCursor()} until
-     * {@link Slice#hasNext()} is false.
+     * Key-ordered pagination over the stored keys alone: <b>no entity is ever decoded</b>. Begin
+     * with {@link Cursor#scan()} and follow {@link Slice#nextCursor()} until {@link Slice#hasNext()}
+     * is false.
+     *
+     * <p>How cheap that is depends on the backend: an index-only scan on SQL, a covered query on
+     * Mongo, a plain directory listing on LocalFile. <b>GroupedFile is the exception</b> - a key
+     * file aggregates every collection sharing the key, so a key whose file exists without this
+     * collection is not a key of this collection, and the directory alone cannot tell them apart.
+     * It reads every key file and runs a streaming field probe: still no tree and no entity, but
+     * every file is opened. On both file backends the page is also cut from a freshly built, fully
+     * sorted name list, so each page costs a whole sweep.
      *
      * <p>This is the primitive for "which keys exist" - selective preloading, reconciling two
      * backends, sweeping - which otherwise costs a full decode through {@link #all()} or

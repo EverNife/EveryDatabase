@@ -17,11 +17,17 @@ fan-out, and a key-major read/write API that matches what the backend already is
 
 ### Added
 
-- **`Repository.keys(Cursor, int)`** - key-ordered pagination over the stored keys, reading no
-  payload at all: an index-only scan on SQL, a covered query on Mongo, a directory listing on the
-  file backends. There was no way to ask "which keys exist" without decoding entities, so selective
+- **`Repository.keys(Cursor, int)`** - key-ordered pagination over the stored keys, decoding no
+  entity at all: an index-only scan on SQL, a covered query on Mongo, a plain directory listing on
+  LocalFile. There was no way to ask "which keys exist" without decoding entities, so selective
   preloading, reconciling two backends and sweeping all paid a full decode through `all()` or
   `scanAll()`.
+
+  GroupedFile is the exception, and it is not free: a key file aggregates every collection sharing
+  the key, so a key whose file exists without *this* collection is not a key of this collection and
+  the directory alone cannot say which is which. It opens every key file and runs a streaming field
+  probe - no tree built, no entity decoded, but every file read. On both file backends the page is
+  also cut from a freshly built, fully sorted name list, so each page costs a whole sweep.
 
   ```java
   Slice<String> page = repo.keys(Cursor.scan(), 500).join();
