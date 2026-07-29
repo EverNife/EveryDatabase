@@ -12,9 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -63,19 +61,32 @@ final class GroupedFileLayout {
     //  The persisted document
     // ------------------------------------------------------------------
 
-    /** The layout as stored. Unknown fields are tolerated so an older build can read a newer file. */
+    /**
+     * The layout as stored. Unknown fields are tolerated so an older build can read a newer file.
+     *
+     * <p>Placement is recorded once, in {@code collections}: every collection ever opened maps to the
+     * key space holding its files, with the empty string meaning the base directory itself. Recording
+     * the base-directory collections too is what lets a later run tell "never seen before" apart from
+     * "already stored, flat" - and only the second one is a divergence.
+     *
+     * <p>{@code keySpaces} carries per-key-space settings rather than membership, so no fact has two
+     * homes to drift between.
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     static final class Document {
-        public String                 format;
-        public Map<String, KeySpace>  keySpaces = new LinkedHashMap<>();
+        public String                format;
+        public Map<String, KeySpace> keySpaces   = new LinkedHashMap<>();
+        public Map<String, String>   collections = new LinkedHashMap<>();
     }
 
-    /** One named group of collections. Empty until key spaces exist; the shape is reserved here. */
+    /** Settings of one named key space. */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     static final class KeySpace {
-        public String       partitioner;
-        public List<String> collections = new ArrayList<>();
+        public String partitioner;
     }
+
+    /** How the base directory itself is spelled in {@link Document#collections}. */
+    static final String ROOT_KEY_SPACE = "";
 
     /** The reconciled layout, or {@code null} before the first repository is created. */
     Document document() {
@@ -107,7 +118,23 @@ final class GroupedFileLayout {
      * @throws IllegalStateException when the codec and the directory disagree, when the directory
      *                               holds both formats, or when the layout file cannot be read
      */
-    synchronized void reconcile(ContainerFormat format, String collection) {
+    synchronized void reconcile(ContainerFormat format, String collection, String keySpace) {
+        reconcileFormat(format, collection);
+
+        String want     = keySpace == null ? ROOT_KEY_SPACE : keySpace;
+        String recorded = document.collections.get(collection);
+        if (recorded != null && !recorded.equals(want)) {
+            throw keySpaceMismatch(collection, recorded, want);
+        }
+        if (recorded == null) {
+            document.collections.put(collection, want);
+            if (!ROOT_KEY_SPACE.equals(want)) document.keySpaces.computeIfAbsent(want, k -> new KeySpace());
+            writeLayout(document);
+        }
+    }
+
+    /** The format half of {@link #reconcile}: settled once, from whichever collection opens first. */
+    private void reconcileFormat(ContainerFormat format, String collection) {
         if (reconciled) return;
 
         String want   = format.name();
@@ -161,8 +188,25 @@ final class GroupedFileLayout {
         if (parsed == null || ContainerFormat.extensionOf(parsed.format) == null) {
             throw unreadableLayout(file, "it declares no usable container format (found: " + (parsed == null ? null : parsed.format) + ")", null);
         }
-        if (parsed.keySpaces == null) parsed.keySpaces = new LinkedHashMap<>();
+        if (parsed.keySpaces   == null) parsed.keySpaces   = new LinkedHashMap<>();
+        if (parsed.collections == null) parsed.collections = new LinkedHashMap<>();
         return parsed;
+    }
+
+    /**
+     * The layout as stored, or {@code null} when the directory does not describe itself yet - for
+     * callers that need to read the recorded placement without opening a storage, such as the
+     * relayout utility.
+     */
+    Document readOrNull() {
+        return readLayout();
+    }
+
+    /** Replaces the stored layout wholesale. Used by the relayout utility once the files have moved. */
+    void overwrite(Document doc) {
+        writeLayout(doc);
+        this.document   = doc;
+        this.reconciled = true;
     }
 
     private void writeLayout(Document doc) {
@@ -240,6 +284,20 @@ final class GroupedFileLayout {
             + "save writes a parallel set of " + ContainerFormat.extensionOf(want) + " files next to the "
             + ContainerFormat.extensionOf(stored) + " files that hold the data. Open this directory with a "
             + stored.toUpperCase() + " codec, or point the storage at a different directory.");
+    }
+
+    private IllegalStateException keySpaceMismatch(String collection, String recorded, String want) {
+        return new IllegalStateException(
+            "GroupedFileStorage: collection '" + collection + "' is configured to live in "
+            + describe(want) + ", but " + relativeLayoutPath() + " records its files in "
+            + describe(recorded) + ". Opening it where it is not would report an empty collection and "
+            + "start writing a second copy elsewhere. Either restore the previous configuration, or "
+            + "move the files first with GroupedFileRelayout.relayout(config), which relocates them and "
+            + "rewrites this record.");
+    }
+
+    private static String describe(String keySpace) {
+        return ROOT_KEY_SPACE.equals(keySpace) ? "the base directory" : "key space '" + keySpace + "'";
     }
 
     private IllegalStateException unreadableLayout(Path file, String reason, Throwable cause) {

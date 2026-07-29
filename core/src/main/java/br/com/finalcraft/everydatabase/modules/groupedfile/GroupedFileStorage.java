@@ -58,7 +58,10 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
     private final GroupedFileConfig  config;
     private final ContainerFormat    format = new ContainerFormat();
     private final GroupedFileLayout  layout;
-    private final KeyFileStore       keyFileStore;
+    /** The store for collections with no declared key space: the base directory itself. */
+    private final KeyFileStore       rootStore;
+    /** One store per declared key space, created on first use. Key: the key-space name. */
+    private final ConcurrentHashMap<String, KeyFileStore> keySpaceStores = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, GroupedFileRepository<?, ?>> repositories = new ConcurrentHashMap<>();
     private volatile boolean initialized = false;
 
@@ -85,7 +88,7 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
         this.logConfig    = logConfig;
         this.log          = new StorageLog("groupedfile", () -> this.logConfig);
         this.layout       = new GroupedFileLayout(config.baseDirectory());
-        this.keyFileStore = new KeyFileStore(config.baseDirectory(), format, config.rootCacheSize());
+        this.rootStore    = new KeyFileStore(config.baseDirectory(), format, config.rootCacheSize());
     }
 
     // ------------------------------------------------------------------
@@ -139,7 +142,19 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
 
     /** Package-visible so tests can assert how often an aggregate document is actually parsed. */
     KeyFileStore keyFileStore() {
-        return keyFileStore;
+        return rootStore;
+    }
+
+    /**
+     * The store owning {@code collection}'s files: the one for its declared key space, or the base
+     * directory's when it declared none. Two collections in different key spaces resolve to different
+     * stores, hence different directories and different lock maps.
+     */
+    private KeyFileStore storeFor(String collection) {
+        String keySpace = config.keySpaceOf(collection);
+        if (keySpace == null) return rootStore;
+        return keySpaceStores.computeIfAbsent(keySpace, name ->
+            new KeyFileStore(config.baseDirectory().resolve(name), format, config.rootCacheSize()));
     }
 
     // ------------------------------------------------------------------
@@ -165,6 +180,7 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
     @Override
     public CompletableFuture<Void> close() {
         repositories.clear();
+        keySpaceStores.clear();
         initialized = false;
         log.closed();
         return CompletableFuture.completedFuture(null);
@@ -199,10 +215,11 @@ public final class GroupedFileStorage implements Storage, SchemaAwareStorage {
                 // Lock the container format (JSON/YAML) from the codec on first use; all collections
                 // in this base directory share the files, so they must agree on one format.
                 format.resolve(descriptor.codec());
-                // ...and the directory gets a say too: it may already hold files written in the
-                // other format, in which case opening it this way would silently hide them.
-                layout.reconcile(format, descriptor.collection());
-                return new GroupedFileRepository<>(descriptor, keyFileStore, log);
+                // ...and the directory gets a say too: it may already hold this collection's files
+                // in another format, or in another key space, either of which would silently hide
+                // them from a repository opened this way.
+                layout.reconcile(format, descriptor.collection(), config.keySpaceOf(descriptor.collection()));
+                return new GroupedFileRepository<>(descriptor, storeFor(descriptor.collection()), log);
             }
         );
     }

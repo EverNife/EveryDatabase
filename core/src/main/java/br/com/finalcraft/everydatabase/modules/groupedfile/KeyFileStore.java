@@ -23,15 +23,20 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * Shared, storage-wide coordinator for the per-key aggregate files of a {@link GroupedFileStorage}.
+ * Coordinator for the per-key aggregate files of one directory of a {@link GroupedFileStorage}.
  *
  * <p>This is the structural difference from LocalFile: there, locks and file resolution live inside
  * each repository (one repository per collection, each its own directory). Here several collections
  * share the <em>same</em> physical file (the one named after the key), so the per-key lock and the
- * file-level read/write primitives must live <b>above</b> the repositories - one instance per base
- * directory, shared by every {@link GroupedFileRepository}. Without that, two repositories writing the
- * same key for different collections would read-modify-write the same file concurrently and lose
+ * file-level read/write primitives must live <b>above</b> the repositories, shared by every
+ * {@link GroupedFileRepository} that can reach the same file. Without that, two repositories writing
+ * the same key for different collections would read-modify-write the same file concurrently and lose
  * updates.
+ *
+ * <p>"The same file" is exactly one directory's worth: a storage holds one store per key space (plus
+ * one for the base directory itself), and a key space's files are unreachable from any other. That
+ * makes <em>same file if and only if same lock</em> true by construction rather than by convention -
+ * two stores cannot collide, because neither can name the other's paths.
  *
  * <p><b>Container format follows the codec.</b> The aggregate document is a Jackson tree, so it must be
  * a format Jackson round-trips as a tree - JSON or YAML. That decision is not this class's to make: it
@@ -45,7 +50,7 @@ import java.util.stream.Stream;
  */
 final class KeyFileStore {
 
-    private final Path            baseDirectory;
+    private final Path            directory;
     private final ContainerFormat format;
 
     /** Per-key locks, keyed by sanitised key. Global across all repositories of the owning storage. */
@@ -58,12 +63,12 @@ final class KeyFileStore {
     /** Full parses that actually happened - the observable the cache exists to reduce. */
     private final AtomicLong rootParses = new AtomicLong();
 
-    KeyFileStore(Path baseDirectory, ContainerFormat format) {
-        this(baseDirectory, format, GroupedFileConfig.DEFAULT_ROOT_CACHE_SIZE);
+    KeyFileStore(Path directory, ContainerFormat format) {
+        this(directory, format, GroupedFileConfig.DEFAULT_ROOT_CACHE_SIZE);
     }
 
-    KeyFileStore(Path baseDirectory, ContainerFormat format, int rootCacheSize) {
-        this.baseDirectory = baseDirectory;
+    KeyFileStore(Path directory, ContainerFormat format, int rootCacheSize) {
+        this.directory     = directory;
         this.format        = format;
         this.rootCacheSize = Math.max(0, rootCacheSize);
         this.roots = this.rootCacheSize == 0
@@ -86,8 +91,9 @@ final class KeyFileStore {
         return rootParses.get();
     }
 
-    Path baseDirectory() {
-        return baseDirectory;
+    /** The directory this store owns: the base directory, or one key space's sub-directory of it. */
+    Path directory() {
+        return directory;
     }
 
     ObjectMapper mapper() {
@@ -108,7 +114,7 @@ final class KeyFileStore {
     }
 
     Path keyFile(String sanitizedKey) {
-        return baseDirectory.resolve(sanitizedKey + format.extension());
+        return directory.resolve(sanitizedKey + format.extension());
     }
 
     /**
@@ -121,14 +127,18 @@ final class KeyFileStore {
     }
 
     /**
-     * Lists the regular key files directly under the base directory (depth 1), filtered by the resolved
-     * format's extension. The reserved {@code _schema/} directory is naturally excluded (it is a
-     * directory, not a regular file), and so are sibling {@code .tmp} files.
+     * Lists the regular key files directly under this store's directory (depth 1), filtered by the
+     * resolved format's extension. Reserved sub-directories (such as {@code _schema/} under the base)
+     * are naturally excluded - they are directories, not regular files - and so are sibling
+     * {@code .tmp} files.
+     *
+     * <p>A store that owns a key space lists <em>only</em> that key space: the files of the other
+     * ones are not just filtered out, they are never looked at. That is where the scan cost goes.
      */
     List<Path> keyFiles() throws IOException {
-        if (!Files.isDirectory(baseDirectory)) return Collections.emptyList();
+        if (!Files.isDirectory(directory)) return Collections.emptyList();
         String ext = format.extension();
-        try (Stream<Path> entries = Files.list(baseDirectory)) {
+        try (Stream<Path> entries = Files.list(directory)) {
             return entries
                 .filter(Files::isRegularFile)
                 .filter(p -> p.getFileName().toString().endsWith(ext))
@@ -324,6 +334,10 @@ final class KeyFileStore {
      * which {@link #keyFiles()} ignores because it filters by extension.
      */
     void writeAtomic(Path target, byte[] data) throws IOException {
+        // The key space's directory is created on first write rather than up front, so declaring a
+        // key space nobody writes to never leaves an empty directory behind.
+        Path parent = target.getParent();
+        if (parent != null) Files.createDirectories(parent);
         Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
         Files.write(tmp, data,
             StandardOpenOption.CREATE,

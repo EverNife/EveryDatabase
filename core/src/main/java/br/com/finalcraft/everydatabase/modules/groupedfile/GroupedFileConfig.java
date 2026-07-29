@@ -8,6 +8,12 @@ import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Configuration for the grouped (key-major) file-system storage backend.
@@ -21,7 +27,15 @@ import java.nio.file.Path;
  *   _schema/layout.json              (reserved - records the container format of this directory)
  *   _schema/migrations.json          (reserved - never collides with a key file)
  *   &lt;key&gt;.yml                        (one file per key; e.g. one file per player UUID)
+ *   player/&lt;key&gt;.yml                 (a declared key space - see {@link #builder(Path)})
  * </pre>
+ *
+ * <p><b>Key spaces.</b> One base directory often ends up holding collections keyed by unrelated
+ * things - player UUIDs, account UUIDs, free-form cooldown ids. They share the directory but never
+ * share a meaningful key, so every scan pays for files that can never hold the collection it is
+ * looking for, and an accidental key collision makes two unrelated collections write into the same
+ * file, behind the same lock. {@link #builder(Path)} splits them: each key space gets its own
+ * sub-directory, its own listing and its own locks. Declaring none keeps today's flat layout.
  *
  * <p>Each key file is a single structured document:
  * <pre>{@code
@@ -65,10 +79,15 @@ public final class GroupedFileConfig implements StorageConfig {
      */
     public static final int DEFAULT_ROOT_CACHE_SIZE = 256;
 
+    /** Key-space names are directory names on Windows and Linux alike, so they stay conservative. */
+    private static final Pattern KEY_SPACE_NAME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9_]*$");
+
     private final Path baseDirectory;
     private final String sharedIdentity;
     private final SyncParticipation syncParticipation;
     private final int rootCacheSize;
+    /** collection -> key space; a collection absent from this map lives directly in the base. */
+    private final Map<String, String> collectionKeySpaces;
 
     /**
      * @param baseDirectory     root directory where the per-key files live
@@ -78,15 +97,18 @@ public final class GroupedFileConfig implements StorageConfig {
      *                          {@link #syncParticipation()})
      */
     public GroupedFileConfig(Path baseDirectory, String sharedIdentity, SyncParticipation syncParticipation) {
-        this(baseDirectory, sharedIdentity, syncParticipation, DEFAULT_ROOT_CACHE_SIZE);
+        this(baseDirectory, sharedIdentity, syncParticipation, DEFAULT_ROOT_CACHE_SIZE,
+             Collections.emptyMap());
     }
 
     private GroupedFileConfig(Path baseDirectory, String sharedIdentity,
-                              SyncParticipation syncParticipation, int rootCacheSize) {
-        this.baseDirectory     = baseDirectory;
-        this.sharedIdentity    = sharedIdentity;
-        this.syncParticipation = syncParticipation;
-        this.rootCacheSize     = rootCacheSize;
+                              SyncParticipation syncParticipation, int rootCacheSize,
+                              Map<String, String> collectionKeySpaces) {
+        this.baseDirectory       = baseDirectory;
+        this.sharedIdentity      = sharedIdentity;
+        this.syncParticipation   = syncParticipation;
+        this.rootCacheSize       = rootCacheSize;
+        this.collectionKeySpaces = collectionKeySpaces;
     }
 
     /**
@@ -105,7 +127,7 @@ public final class GroupedFileConfig implements StorageConfig {
      */
     public GroupedFileConfig rootCacheSize(int size) {
         if (size < 0) throw new IllegalArgumentException("rootCacheSize cannot be negative: " + size);
-        return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, size);
+        return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, size, collectionKeySpaces);
     }
 
     /** How many aggregate documents this storage memoizes; {@code 0} when the memo is disabled. */
@@ -153,5 +175,134 @@ public final class GroupedFileConfig implements StorageConfig {
      */
     public SyncParticipation syncParticipation() {
         return syncParticipation;
+    }
+
+    // ------------------------------------------------------------------
+    //  Key spaces
+    // ------------------------------------------------------------------
+
+    /**
+     * The key space a collection's files live in, or {@code null} when they live directly under the
+     * base directory (the layout of a config built without key spaces).
+     */
+    public String keySpaceOf(String collection) {
+        return collectionKeySpaces.get(collection);
+    }
+
+    /** collection -&gt; key space, for every collection that declared one; never {@code null}. */
+    public Map<String, String> collectionKeySpaces() {
+        return collectionKeySpaces;
+    }
+
+    /** The declared key-space names, in declaration order. */
+    public Set<String> keySpaces() {
+        return new LinkedHashSet<>(collectionKeySpaces.values());
+    }
+
+    // ------------------------------------------------------------------
+    //  Builder
+    // ------------------------------------------------------------------
+
+    /** A config built collection by collection - the only way to declare key spaces. */
+    public static Builder builder(Path baseDirectory) {
+        return new Builder(baseDirectory);
+    }
+
+    /**
+     * Builds a config, optionally splitting the base directory into key spaces.
+     *
+     * <p>Collections are declared <em>grouped by key space</em> rather than one at a time, because
+     * the group is the point: co-location is what a key space means, and listing the members
+     * together makes a typo look wrong instead of silently splitting one entity's file in two.
+     */
+    public static final class Builder {
+
+        private final Path baseDirectory;
+        private String sharedIdentity;
+        private SyncParticipation syncParticipation = SyncParticipation.RECOMMENDED;
+        private int rootCacheSize = DEFAULT_ROOT_CACHE_SIZE;
+        private final Map<String, String> collectionKeySpaces = new LinkedHashMap<>();
+
+        private Builder(Path baseDirectory) {
+            if (baseDirectory == null) throw new IllegalArgumentException("baseDirectory cannot be null");
+            this.baseDirectory = baseDirectory;
+        }
+
+        /** See {@link GroupedFileConfig#sharedIdentity()}. */
+        public Builder sharedIdentity(String sharedIdentity) {
+            this.sharedIdentity = sharedIdentity;
+            return this;
+        }
+
+        /** See {@link GroupedFileConfig#syncParticipation()}. */
+        public Builder syncParticipation(SyncParticipation syncParticipation) {
+            if (syncParticipation == null) throw new IllegalArgumentException("syncParticipation cannot be null");
+            this.syncParticipation = syncParticipation;
+            return this;
+        }
+
+        /** See {@link GroupedFileConfig#rootCacheSize(int)}. */
+        public Builder rootCacheSize(int size) {
+            if (size < 0) throw new IllegalArgumentException("rootCacheSize cannot be negative: " + size);
+            this.rootCacheSize = size;
+            return this;
+        }
+
+        /**
+         * Puts {@code collections} in their own sub-directory {@code <base>/<name>/}, isolating them
+         * from every other key space: their files are listed, locked and scanned apart.
+         *
+         * <pre>{@code
+         * GroupedFileConfig.builder(base)
+         *     .keySpace("player",  "playerdata", "player_stats")
+         *     .keySpace("account", "accounts")
+         *     .build();
+         * }</pre>
+         *
+         * <p>Collections not named here keep living directly under the base directory, so adding a
+         * key space to one group leaves the rest of the tree exactly as it was.
+         *
+         * @throws IllegalArgumentException if the name is not a safe directory name, is the reserved
+         *                                  {@code _schema}, is declared twice, or if a collection is
+         *                                  claimed by two key spaces
+         */
+        public Builder keySpace(String name, String... collections) {
+            if (GroupedFileStorage.SCHEMA_DIR.equals(name)) {
+                throw new IllegalArgumentException(
+                    "GroupedFileConfig: '" + GroupedFileStorage.SCHEMA_DIR + "' is reserved for the "
+                    + "storage's own bookkeeping (the layout and the migration ledger) and cannot be a "
+                    + "key space.");
+            }
+            if (name == null || !KEY_SPACE_NAME.matcher(name).matches()) {
+                throw new IllegalArgumentException(
+                    "GroupedFileConfig: key space name must match " + KEY_SPACE_NAME.pattern()
+                    + " (it becomes a directory name); got: " + name);
+            }
+            if (collectionKeySpaces.containsValue(name)) {
+                throw new IllegalArgumentException(
+                    "GroupedFileConfig: key space '" + name + "' is declared twice. Declare all of its "
+                    + "collections in one call - the group is what makes co-location visible.");
+            }
+            if (collections == null || collections.length == 0) {
+                throw new IllegalArgumentException(
+                    "GroupedFileConfig: key space '" + name + "' declares no collections. An empty key "
+                    + "space would be an unused directory.");
+            }
+            for (String collection : collections) {
+                String previous = collectionKeySpaces.get(collection);
+                if (previous != null) {
+                    throw new IllegalArgumentException(
+                        "GroupedFileConfig: collection '" + collection + "' is claimed by two key spaces, "
+                        + "'" + previous + "' and '" + name + "'. A collection lives in exactly one.");
+                }
+                collectionKeySpaces.put(collection, name);
+            }
+            return this;
+        }
+
+        public GroupedFileConfig build() {
+            return new GroupedFileConfig(baseDirectory, sharedIdentity, syncParticipation, rootCacheSize,
+                Collections.unmodifiableMap(new LinkedHashMap<>(collectionKeySpaces)));
+        }
     }
 }

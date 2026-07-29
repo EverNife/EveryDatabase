@@ -341,7 +341,29 @@ import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileConfig;
 GroupedFileStorage grouped = Storages.createGroupedFile(new GroupedFileConfig(Paths.get("playerdata")));
 grouped.init().join();
 ```
-Grouped files invert the local-file layout: one file **per key**, holding every collection that shares that key — ideal for "everything about one player in one file". The container format (JSON or YAML) follows the descriptor's codec, and all collections under one base directory must agree on it.
+Grouped files invert the local-file layout: one file **per key**, holding every collection that shares that key — ideal for "everything about one player in one file". The container format (JSON or YAML) follows the descriptor's codec, and all collections under one base directory must agree on it. That choice is recorded in `_schema/layout.json`, so reopening a YAML directory with a JSON codec **fails** instead of reporting an empty collection and writing a parallel set of files beside the ones holding the data.
+
+**Key spaces.** One base directory tends to accumulate collections keyed by unrelated things — player UUIDs, account UUIDs, free-form cooldown ids. They share the directory but never share a meaningful key, so every scan reads files that can't hold what it's looking for, and an accidental key collision puts two unrelated collections in one file behind one lock. Give each group its own sub-directory:
+
+```java
+GroupedFileConfig config = GroupedFileConfig.builder(Paths.get("playerdata"))
+    .keySpace("player",  "playerdata", "player_stats")
+    .keySpace("account", "accounts")
+    .build();                                  // -> playerdata/player/<uuid>.yml, playerdata/account/<uuid>.yml
+
+GroupedFileStorage grouped = Storages.createGroupedFile(config);
+```
+
+Collections are declared **grouped by key space** because the group is the point: co-location is what a key space *means*, and listing the members together makes a typo look wrong instead of silently splitting one entity's file in two. Collections you don't name keep living directly under the base directory, so the tree is byte-for-byte unchanged for anyone who declares nothing.
+
+Placement is recorded in `_schema/layout.json` too, and opening a storage that disagrees with it fails — moving a collection is a file operation, not a config change. Do it explicitly, once, before opening:
+
+```java
+GroupedFileRelayout.relayout(config);          // lifts the moved collections into their key space
+Storage storage = Storages.createGroupedFile(config);
+```
+
+It moves *entries*, not files: a key file holding several collections is split, and only the collections that moved leave it. Running it twice does nothing the second time.
 </details>
 
 <details>
