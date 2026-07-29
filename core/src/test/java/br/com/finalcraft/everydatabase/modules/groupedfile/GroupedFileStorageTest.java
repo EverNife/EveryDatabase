@@ -8,6 +8,9 @@ import br.com.finalcraft.everydatabase.codec.JacksonYamlCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.modules.AbstractStorageTest;
 import br.com.finalcraft.everydatabase.modules.groupedfile.migrations.V000_PopulateTestPlayers;
+import br.com.finalcraft.everydatabase.query.Cursor;
+import br.com.finalcraft.everydatabase.query.Query;
+import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.schema.Migration;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
@@ -28,6 +31,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -444,5 +448,72 @@ class GroupedFileStorageTest extends AbstractStorageTest {
     @Override
     protected boolean versionsAreZeroWithoutVersioning() {
         return false;
+    }
+
+    // ------------------------------------------------------------------
+    //  A key file nobody can parse
+    //
+    //  It belongs to no collection: skipping it under-reports this one, counting it inflates every
+    //  other one in the directory. The key-only reads answer with a set, so they refuse; the reads
+    //  that hand back entities keep skipping, which is already their contract everywhere.
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(1030)
+    @DisplayName("count() refuses to answer when a key file cannot be parsed")
+    void count_unreadableKeyFile_fails() throws IOException {
+        repo.saveAll(List.of(alice(), bob(), carol())).join();
+        injectCorruptRow(DESCRIPTOR.collection());
+
+        CompletionException thrown = assertThrows(CompletionException.class, () -> repo.count().join());
+
+        assertInstanceOf(IllegalStateException.class, thrown.getCause(),
+            "an unreadable key file is a state failure, not a decode failure of some row");
+        assertTrue(thrown.getCause().getMessage().contains("corrupt.json"),
+            "the message must name the file, or the operator cannot act on it: "
+                + thrown.getCause().getMessage());
+    }
+
+    @Test
+    @Order(1031)
+    @DisplayName("keys() refuses to answer when a key file cannot be parsed")
+    void keys_unreadableKeyFile_fails() throws IOException {
+        repo.saveAll(List.of(alice(), bob(), carol())).join();
+        injectCorruptRow(DESCRIPTOR.collection());
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+            () -> repo.keys(Cursor.scan(), 100).join());
+
+        assertInstanceOf(IllegalStateException.class, thrown.getCause());
+        assertTrue(thrown.getCause().getMessage().contains("corrupt.json"),
+            "dropping the key silently is the same lie as an under-count: "
+                + thrown.getCause().getMessage());
+    }
+
+    @Test
+    @Order(1032)
+    @DisplayName("all(), query() and scanAll() still tolerate a key file that cannot be parsed")
+    void entityReads_unreadableKeyFile_stillTolerated() throws IOException {
+        repo.saveAll(List.of(alice(), bob(), carol())).join();
+        injectCorruptRow(DESCRIPTOR.collection());
+
+        assertEquals(3L, repo.all().join().count(),
+            "all() hands back entities, so omitting one it cannot read is its contract");
+        assertEquals(3, repo.query(Query.range("score", null, null)).join().size(),
+            "query() filters entities, so it skips the same file all() does");
+        assertEquals(1, drainScan(repo, 2).stream().filter(ScanRow::isFailed).count(),
+            "scanAll() stays the diagnosis: it names the file the other two refuse or skip");
+    }
+
+    @Test
+    @Order(1033)
+    @DisplayName("a poisoned payload under this collection is still counted, not refused")
+    void count_undecodablePayload_stillCounted() throws IOException {
+        repo.saveAll(List.of(alice(), bob(), carol())).join();
+        injectUndecodableRow(DESCRIPTOR.collection());
+
+        assertEquals(4L, repo.count().join(),
+            "the file parses and declares this collection, so the row is unambiguously ours");
+        assertEquals(3L, repo.all().join().count(), "all() still skips the payload it cannot decode");
     }
 }

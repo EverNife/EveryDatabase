@@ -159,6 +159,28 @@ fan-out, and a key-major read/write API that matches what the backend already is
   collection holds a poisoned row - and `scanAll()` is what names it. This aligns the file backends
   with SQL (`SELECT COUNT(*)`) and Mongo (`countDocuments`), which always counted such rows.
 
+- **`count()` and `keys()` on grouped files fail on a key file they cannot parse**, instead of
+  quietly leaving it out. A key file holds every collection sharing its key, so one that will not
+  parse belongs to *no* collection: skipping it under-reports the collection being counted, and
+  counting it inflates every other collection in the directory. Neither number is true, and the old
+  behaviour picked the first one and logged a WARN - so a collection missing rows reported a clean,
+  confident count, and even the `count() != all().count()` tell-tale read as clean, because `all()`
+  omitted the same file.
+
+  The failure names the file and points at the tool that lists them all:
+
+  ```
+  GroupedFile: cannot count 'ec_accounts': key file 'a3f1c2.json' is not a readable document,
+  so it belongs to no collection and any answer would be a guess. Use scanAll() to list every
+  unreadable file, then repair or remove it.
+  ```
+
+  Deliberately unchanged: a **poisoned row** (a file that parses and declares this collection, whose
+  payload does not decode) is still counted - it is unambiguously a row of this collection. `all()`
+  and `query()` still skip what they cannot decode, which is their contract on every backend, and
+  `scanAll()` still reports each offending file as a failed `ScanRow`. No other backend can reach
+  this state: elsewhere a row is attributable by construction, so nothing about them changed.
+
   The old behaviour cost a full read of the collection to answer "how many": LocalFile decoded
   every file and GroupedFile decoded every matching sub-node, only to discard the result. Counting
   is now a directory listing on LocalFile and a presence probe per key file on GroupedFile.
@@ -191,6 +213,10 @@ fan-out, and a key-major read/write API that matches what the backend already is
   consumer whose configuration was quietly wrong will see the failure at startup.
 - **`versions()` on the file backends no longer returns `0`.** Code that compared the value against
   a literal zero, rather than against an earlier reading, needs to stop.
+- **`count()` and `keys()` on grouped files can now throw** (`IllegalStateException`) where they
+  previously returned a number or a page that quietly omitted an unparseable key file. A caller that
+  treats a count as infallible - a boot guard, a health check - needs to decide what an unreadable
+  store means to it.
 
 ## [1.1.1] — 2026-07-28
 

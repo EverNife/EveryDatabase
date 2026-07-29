@@ -93,6 +93,13 @@ public interface Repository<K, V> {
      * {@code countDocuments} on Mongo, a directory listing on LocalFile, a presence probe per key
      * file on GroupedFile. Nothing is decoded.
      *
+     * <p><b>A count is never an estimate.</b> On GroupedFile a key file that cannot be parsed at all
+     * belongs to no collection - skipping it under-reports this one, counting it inflates every other
+     * one sharing the directory - so the call fails, naming the file, instead of returning a
+     * plausible wrong number. That is distinct from the poisoned row above, which parses fine and
+     * declares this collection, and is therefore counted. No other backend can reach this state: a
+     * row there is attributable by construction.
+     *
      * <p>Note that {@link #count(Query)} is a different question and a different cost: filtering
      * requires reading the indexed values, and on the file backends it decodes the matches.
      */
@@ -167,7 +174,9 @@ public interface Repository<K, V> {
      * collection is not a key of this collection, and the directory alone cannot tell them apart.
      * It reads every key file and runs a streaming field probe: still no tree and no entity, but
      * every file is opened. On both file backends the page is also cut from a freshly built, fully
-     * sorted name list, so each page costs a whole sweep.
+     * sorted name list, so each page costs a whole sweep. And because the answer is a set of keys,
+     * a key file GroupedFile cannot parse fails the call rather than dropping out of the page -
+     * silently omitting a key is the same lie as an under-count (see {@link #count()}).
      *
      * <p>This is the primitive for "which keys exist" - selective preloading, reconciling two
      * backends, sweeping - which otherwise costs a full decode through {@link #all()} or

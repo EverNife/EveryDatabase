@@ -218,6 +218,23 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         }, StorageExecutors.get());
     }
 
+    /**
+     * The failure a key-only read raises on a key file it cannot parse.
+     *
+     * <p>Such a file can be attributed to no collection: skipping it under-reports this collection,
+     * counting it inflates every other one sharing the directory. Neither number is true, so the
+     * read declines to produce one instead of returning a plausible wrong answer. {@code scanAll}
+     * lists every offending file by name; {@code all} and {@code query} keep skipping, because
+     * omitting rows they cannot read is already their contract on every backend.
+     */
+    private IllegalStateException unreadableKeyFile(String what, String fileName, Throwable cause) {
+        return new IllegalStateException(
+            "GroupedFile: cannot " + what + " '" + collection + "': key file '" + fileName
+            + "' is not a readable document, so it belongs to no collection and any answer would be"
+            + " a guess. Use scanAll() to list every unreadable file, then repair or remove it.",
+            cause);
+    }
+
     @Override
     public CompletableFuture<Long> count() {
         return CompletableFuture.supplyAsync(() -> {
@@ -226,12 +243,11 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                 for (Path file : store.keyFiles()) {
                     try {
                         // Presence, not decodability: a sub-node this collection owns is a row even if
-                        // its payload is poisoned, and all() is what skips it. A key file too broken to
-                        // parse cannot be attributed to any collection, so it is skipped-and-logged
-                        // instead - counting it here would inflate every collection in the directory.
+                        // its payload is poisoned, and all() is what skips it.
                         if (store.hasSubNode(file, collection)) n++;
                     } catch (Exception e) {
-                        log.skippedCorruptedRow(collection, file.getFileName().toString(), e);
+                        throw log.errored(StorageOp.COUNT, collection,
+                            unreadableKeyFile("count", file.getFileName().toString(), e));
                     }
                 }
                 return n;
@@ -465,6 +481,9 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
      * No payload is decoded, but the probe is not free - a key file holds every collection sharing
      * the key, and a key whose file exists without this collection is not a key of this collection.
      * The keys are file stems, so a key sanitised into a file name is reported in that form.
+     *
+     * <p>A key file that cannot be parsed fails the call rather than dropping out of the page: the
+     * answer is a set of keys, and silently omitting one is the same lie as an under-count.
      */
     @Override
     public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
@@ -481,7 +500,8 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
                             stems.add(name.substring(0, name.length() - ext.length()));
                         }
                     } catch (Exception e) {
-                        log.skippedCorruptedRow(collection, name, e);
+                        throw log.errored(StorageOp.SCAN_ALL, collection,
+                            unreadableKeyFile("list the keys of", name, e));
                     }
                 }
                 Collections.sort(stems);

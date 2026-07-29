@@ -539,7 +539,27 @@ List<Player> loaded = repo.findMany(wanted).join();
 
 Contrast with `scanAll`, which decodes every row so it can *report* the ones that fail — what a maintenance sweep needs. `keys()` never decodes, so a row whose payload is unreadable still appears (same rule as `count()`). The keys are **storage keys**, in `ScanRow.key()`'s form: on the file backends a key that had to be sanitised into a file name is reported sanitised and won't round-trip to `find` — use `scanAll` when the exact original matters for keys that aren't plain UUID/numeric/lower-case strings.
 
-> **GroupedFile is the one backend where this is not free.** A key file aggregates every collection sharing the key, so a key whose file exists without *this* collection is not a key of this collection — there is no way to answer from the directory alone. It reads every key file's bytes and runs a streaming field probe over them: no tree is built and no entity is decoded, but every file is opened. And on **both** file backends the page is cut from a freshly built, fully sorted list of names, so each page costs a whole sweep — paging through everything is O(N²/limit), not O(N). Two consequences on GroupedFile specifically: an aggregate document that is corrupt *as a document* is skipped entirely (its key disappears from `keys()` and `count()`, unlike a merely undecodable row, which still counts), and `keys()` is a poor fit for a hot loop over a large key space.
+> **GroupedFile is the one backend where this is not free.** A key file aggregates every collection sharing the key, so a key whose file exists without *this* collection is not a key of this collection — there is no way to answer from the directory alone. It reads every key file's bytes and runs a streaming field probe over them: no tree is built and no entity is decoded, but every file is opened. And on **both** file backends the page is cut from a freshly built, fully sorted list of names, so each page costs a whole sweep — paging through everything is O(N²/limit), not O(N). So `keys()` is a poor fit for a hot loop over a large key space there.
+
+### A count is never an estimate
+
+`count()` and `keys()` answer with a number and a set. Neither may quietly omit what it could not read, so on **GroupedFile** a key file that cannot be parsed **fails the call**, naming the file:
+
+```
+GroupedFile: cannot count 'ec_accounts': key file 'a3f1c2.json' is not a readable document,
+so it belongs to no collection and any answer would be a guess. Use scanAll() to list every
+unreadable file, then repair or remove it.
+```
+
+The reason it can't just pick a number: a key file holds every collection sharing its key, so one that won't parse belongs to *no* collection. Skipping it under-reports this collection; counting it inflates every other one in the directory. Both answers are wrong, and a wrong number is worse than a loud failure — it's the same class of bug as the format mismatch that used to report an empty collection.
+
+Three things this deliberately does **not** change:
+
+- **A poisoned row still counts.** A key file that parses and declares this collection is unambiguously a row of it, whatever its payload does. That is the `count() != all().count()` signal, unchanged.
+- **`all()` and `query()` still skip.** They hand back entities, so omitting one they cannot read is already their contract on every backend.
+- **`scanAll()` stays the diagnosis.** It names every offending file as a failed `ScanRow` — run it when a count fails.
+
+No other backend can reach this state: SQL, Mongo, InMemory and LocalFile attribute every row by construction, so their counts are never incomplete and nothing about them changed.
 
 #### Page responses — `querySlice` (cheap) and `queryPage` (with total)
 
