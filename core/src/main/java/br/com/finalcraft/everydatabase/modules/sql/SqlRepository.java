@@ -17,6 +17,7 @@ import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
+import br.com.finalcraft.everydatabase.query.Slices;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -1226,6 +1227,33 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                     }
                 }
                 return sliceOf(rows, cursor, limit);
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        // Only the key column, so the primary-key index answers this without touching a row.
+        StringBuilder sql = new StringBuilder("SELECT ").append(q(COL_KEY))
+            .append(" FROM ").append(q(tableName()));
+        List<Object> params = new ArrayList<>(2);
+        if (!cursor.isStart()) {
+            sql.append(" WHERE ").append(q(COL_KEY)).append(" > ?");
+            params.add(cursor.lastKey());
+        }
+        sql.append(" ORDER BY ").append(q(COL_KEY)).append(" ASC LIMIT ?");
+        int probe = limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1;   // one extra to detect hasNext
+        params.add(probe);
+        return withConnection(StorageOp.SCAN_ALL, conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                List<String> found = new ArrayList<>();
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) found.add(rs.getString(1));
+                }
+                return Slices.keyPage(found, cursor, limit);
             }
         });
     }

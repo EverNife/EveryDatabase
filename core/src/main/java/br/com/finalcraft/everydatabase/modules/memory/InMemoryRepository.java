@@ -18,6 +18,7 @@ import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
+import br.com.finalcraft.everydatabase.query.Slices;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.*;
@@ -339,6 +340,18 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
             next = Cursor.after(cursor.orderBy(), cursor.direction(), lastKey, lastKey);
         }
         return CompletableFuture.completedFuture(Slice.ofCursor(content, QueryOptions.none(), hasNext, next));
+    }
+
+    @Override
+    public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        List<String> ordered = new ArrayList<>(store.size());
+        synchronized (this) {
+            for (K key : store.keySet()) ordered.add(key.toString());
+        }
+        Collections.sort(ordered);
+        return CompletableFuture.completedFuture(Slices.keyPageOfAll(ordered, cursor, limit));
     }
 
     // ------------------------------------------------------------------

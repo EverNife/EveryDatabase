@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.IndexHint;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.testutil.CountingCodec;
@@ -137,5 +138,21 @@ class GroupedFileDecodeCostTest {
         assertEquals(3L, sparseRepo().count().join(), "only the 3 populated keys hold this collection");
         assertEquals(0, codec.decodeCount(),
             "how many rows exist is a presence question - nothing is deserialised to answer it");
+    }
+
+    @Test
+    @DisplayName("keys() decodes nothing, and only lists the keys that hold the collection")
+    void keys_decodeNothing() {
+        populateSparse(3);
+        codec.resetCounts();
+
+        List<String> listed = sparseRepo().keys(Cursor.scan(), 100).join().content();
+
+        assertEquals(3, listed.size(),
+            "a key whose file exists but holds only another collection is not a key of this one");
+        for (int i = 0; i < 3; i++) {
+            assertTrue(listed.contains(keys.get(i).toString()), "missing " + keys.get(i));
+        }
+        assertEquals(0, codec.decodeCount(), "which keys exist is answerable without opening a payload");
     }
 }

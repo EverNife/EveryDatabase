@@ -17,6 +17,7 @@ import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
+import br.com.finalcraft.everydatabase.query.Slices;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.mongodb.ErrorCategory;
@@ -814,6 +815,25 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 next = Cursor.after(cursor.orderBy(), cursor.direction(), lastKey, lastKey);
             }
             return Slice.ofCursor(content, QueryOptions.none(), hasNext, next);
+        }, StorageExecutors.get());
+    }
+
+    @Override
+    public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        int probe = limit == Integer.MAX_VALUE ? Integer.MAX_VALUE : limit + 1;   // one extra to detect hasNext
+        return CompletableFuture.supplyAsync(() -> {
+            Bson filter = cursor.isStart() ? new Document() : Filters.gt(COL_KEY, cursor.lastKey());
+            // Projecting the key alone keeps this a covered query: the _id index answers it whole.
+            FindIterable<Document> found =
+                (session != null ? collection.find(session, filter) : collection.find(filter))
+                    .projection(Projections.include(COL_KEY))
+                    .sort(Sorts.ascending(COL_KEY))
+                    .limit(probe);
+            List<String> page = new ArrayList<>();
+            for (Document doc : found) page.add(String.valueOf(doc.get(COL_KEY)));
+            return Slices.keyPage(page, cursor, limit);
         }, StorageExecutors.get());
     }
 

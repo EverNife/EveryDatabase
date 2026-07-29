@@ -833,6 +833,11 @@ class StorageTransferPoliciesTest {
                     }
 
                     @Override
+                    public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+                        return base.keys(cursor, limit);
+                    }
+
+                    @Override
                     public CompletableFuture<Slice<V>> queryAfter(Query query, Cursor cursor, int limit) {
                         return base.queryAfter(query, cursor, limit);
                     }

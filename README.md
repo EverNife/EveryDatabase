@@ -527,6 +527,18 @@ The ordering is **identical on every backend**, so a query behaves the same when
 
 > H2 opts out of optimistic locking but still orders and pages like the others. SQL backends order on the materialized `_idx_<field>` column (a real B-tree); LocalFile/GroupedFile order during their full scan.
 
+### Listing keys without reading rows
+
+`keys(Cursor, int)` pages through the stored keys and **never opens a payload** — an index-only scan on SQL, a covered query on Mongo, a directory listing on the file backends. It's what makes loading a handful of rows out of a collection of tens of thousands cost the handful:
+
+```java
+Slice<String> page = repo.keys(Cursor.scan(), 500).join();
+List<UUID> wanted = page.content().stream().filter(this::isOnline).map(UUID::fromString).collect(toList());
+List<Player> loaded = repo.findMany(wanted).join();
+```
+
+Contrast with `scanAll`, which decodes every row so it can *report* the ones that fail — what a maintenance sweep needs. `keys()` never decodes, so a row whose payload is unreadable still appears (same rule as `count()`). The keys are **storage keys**, in `ScanRow.key()`'s form: on the file backends a key that had to be sanitised into a file name is reported sanitised and won't round-trip to `find` — use `scanAll` when the exact original matters for keys that aren't plain UUID/numeric/lower-case strings.
+
 #### Page responses — `querySlice` (cheap) and `queryPage` (with total)
 
 `query(...)` returns a plain `List`. For navigation metadata, two richer results take the same `QueryOptions` (use `.page(n, size)` for 0-based paging):

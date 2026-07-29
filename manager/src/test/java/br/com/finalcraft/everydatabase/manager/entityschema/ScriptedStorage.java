@@ -167,6 +167,11 @@ class ScriptedStorage implements Storage {
         }
 
         @Override
+        public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+            return inner.keys(cursor, limit);
+        }
+
+        @Override
         public CompletableFuture<List<V>> findBy(String fieldPath, Object value) {
             return inner.findBy(fieldPath, value);
         }

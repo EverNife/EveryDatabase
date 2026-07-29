@@ -22,6 +22,7 @@ import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
+import br.com.finalcraft.everydatabase.query.Slices;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -443,6 +444,36 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             } catch (IOException e) {
                 throw log.errored(StorageOp.SCAN_ALL, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to scan all entities", e));
+            }
+        }, StorageExecutors.get());
+    }
+
+    /**
+     * Key-only page: a directory listing, and nothing is opened. The keys are file stems, so a key
+     * that had to be sanitised into a file name is reported in that sanitised form.
+     */
+    @Override
+    public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                List<String> stems = new ArrayList<>();
+                if (Files.exists(collectionDir)) {
+                    String ext = "." + fileExtension();
+                    try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
+                        for (Path path : (Iterable<Path>) paths
+                                .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))::iterator) {
+                            String name = path.getFileName().toString();
+                            stems.add(name.substring(0, name.length() - ext.length()));
+                        }
+                    }
+                }
+                Collections.sort(stems);
+                return Slices.keyPageOfAll(stems, cursor, limit);
+            } catch (IOException e) {
+                throw log.errored(StorageOp.SCAN_ALL, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to list keys", e));
             }
         }, StorageExecutors.get());
     }

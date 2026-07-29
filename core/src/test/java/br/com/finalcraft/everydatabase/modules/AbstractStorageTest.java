@@ -24,6 +24,7 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.function.Executable;
 
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -1311,6 +1312,78 @@ public abstract class AbstractStorageTest {
         assertEquals(3L, streamed, "all() hands back entities, so it skips the row it cannot decode");
         assertEquals(1, drainScan(repo, 2).stream().filter(ScanRow::isFailed).count(),
             "scanAll is what names the row the other two only disagree about");
+    }
+
+    // ------------------------------------------------------------------
+    //  Key-only pagination
+    // ------------------------------------------------------------------
+
+    @Test
+    @Order(315)
+    @DisplayName("[base] keys() pages through the stored keys without reading a payload")
+    void keys_pageThroughEveryKey() {
+        List<TestPlayer> many = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            // Zero-padded so the storage-key order is the same order a human would expect.
+            many.add(new TestPlayer(UUID.nameUUIDFromBytes(("keys-" + i).getBytes(StandardCharsets.UTF_8)),
+                                    "p" + i, i, "world", true, 0L));
+        }
+        repo.saveAll(many).join();
+
+        Slice<String> first = repo.keys(Cursor.scan(), 4).join();
+        assertEquals(4, first.content().size(), "a page must honour the limit it was given");
+        assertTrue(first.hasNext(), "ten keys cannot fit in a page of four");
+
+        List<String> collected = new ArrayList<>(first.content());
+        Slice<String> page = first;
+        while (page.hasNext()) {
+            page = repo.keys(page.nextCursor().orElseThrow(AssertionError::new), 4).join();
+            collected.addAll(page.content());
+        }
+
+        assertEquals(10, collected.size(), "paging must end up with every key, once");
+        assertEquals(new HashSet<>(collected).size(), collected.size(), "no key may appear on two pages");
+
+        List<String> sorted = new ArrayList<>(collected);
+        Collections.sort(sorted);
+        assertEquals(sorted, collected, "pages arrive in storage-key order");
+
+        // The same key set scanAll walks - keys() is the cheap way to ask the same question.
+        Set<String> scanned = new HashSet<>();
+        for (ScanRow<TestPlayer> row : drainScan(repo, 4)) scanned.add(row.key());
+        assertEquals(scanned, new HashSet<>(collected));
+    }
+
+    @Test
+    @Order(316)
+    @DisplayName("[base] keys() of an empty collection is an empty final page")
+    void keys_emptyCollection() {
+        Slice<String> page = repo.keys(Cursor.scan(), 10).join();
+        assertTrue(page.content().isEmpty());
+        assertFalse(page.hasNext());
+        assertFalse(page.nextCursor().isPresent());
+    }
+
+    @Test
+    @Order(317)
+    @DisplayName("[base] keys() rejects a limit below one")
+    void keys_rejectsBadLimit() {
+        assertThrows(IllegalArgumentException.class, () -> repo.keys(Cursor.scan(), 0));
+        assertThrows(IllegalArgumentException.class, () -> repo.keys(Cursor.scan(), -1));
+    }
+
+    @Test
+    @Order(318)
+    @DisplayName("[base] a key stops appearing in keys() once it is deleted")
+    void keys_followsDeletes() {
+        repo.saveAll(Arrays.asList(alice(), bob(), carol())).join();
+        assertEquals(3, repo.keys(Cursor.scan(), 100).join().content().size());
+
+        repo.delete(UUID_BOB).join();
+
+        List<String> remaining = repo.keys(Cursor.scan(), 100).join().content();
+        assertEquals(2, remaining.size());
+        assertFalse(remaining.contains(UUID_BOB.toString()));
     }
 
     // ------------------------------------------------------------------

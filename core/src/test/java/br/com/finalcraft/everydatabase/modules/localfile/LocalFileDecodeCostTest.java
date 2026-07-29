@@ -5,6 +5,7 @@ import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.query.IndexHint;
+import br.com.finalcraft.everydatabase.query.Cursor;
 import br.com.finalcraft.everydatabase.query.Query;
 import br.com.finalcraft.everydatabase.testutil.CountingCodec;
 import org.junit.jupiter.api.BeforeEach;
@@ -105,5 +106,15 @@ class LocalFileDecodeCostTest {
         assertEquals(KEYS, repo.count().join(), "every stored file is a row");
         assertEquals(0, codec.decodeCount(),
             "the directory already answers how many rows exist - opening them adds nothing");
+    }
+
+    @Test
+    @DisplayName("keys() decodes nothing")
+    void keys_decodeNothing() {
+        codec.resetCounts();
+
+        assertEquals(KEYS, repo.keys(Cursor.scan(), KEYS + 1)
+            .join().content().size(), "every stored file is a key");
+        assertEquals(0, codec.decodeCount(), "the file names are the answer - nothing is opened");
     }
 }

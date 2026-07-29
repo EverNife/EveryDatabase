@@ -146,6 +146,40 @@ public interface Repository<K, V> {
      */
     CompletableFuture<Slice<ScanRow<V>>> scanAll(Cursor cursor, int limit);
 
+    /**
+     * Key-ordered pagination over the stored keys alone: <b>no payload is read and nothing is
+     * decoded</b>. Begin with {@link Cursor#scan()} and follow {@link Slice#nextCursor()} until
+     * {@link Slice#hasNext()} is false.
+     *
+     * <p>This is the primitive for "which keys exist" - selective preloading, reconciling two
+     * backends, sweeping - which otherwise costs a full decode through {@link #all()} or
+     * {@link #scanAll}. It is what makes loading a handful of rows out of a collection of tens of
+     * thousands proportional to the handful:
+     *
+     * <pre>{@code
+     * Slice<String> page = repo.keys(Cursor.scan(), 500).join();
+     * List<V> loaded = repo.findMany(page.content().stream().map(UUID::fromString).collect(toList())).join();
+     * }</pre>
+     *
+     * <p>Contrast with {@link #scanAll}: that one decodes every row and reports the ones that fail,
+     * which is what a maintenance sweep needs; this one never opens a payload, so a row whose
+     * payload is unreadable still appears here - a key exists whether or not what it points at can
+     * be parsed (the same rule as {@link #count()}).
+     *
+     * <p><b>The keys are storage keys</b>, in the same form {@link ScanRow#key()} uses, and the
+     * ordering is theirs - not the lexicographic order of the original key object. On the file
+     * backends a key that had to be sanitised to become a file name (see
+     * {@code StorageKeys}: separators, case, reserved names, very long keys) is reported in its
+     * sanitised form, because recovering the original would mean reading the payload this method
+     * exists to avoid. Such a key does not round-trip to {@link #find(Object)}; use
+     * {@link #scanAll} when the exact original key matters for keys that are not plain
+     * UUID/numeric/lower-case strings.
+     *
+     * @param cursor {@link Cursor#scan()} for the first page, or a previous slice's {@link Slice#nextCursor()}
+     * @param limit  maximum keys in the returned page; must be {@code >= 1}
+     */
+    CompletableFuture<Slice<String>> keys(Cursor cursor, int limit);
+
     // ------------------------------------------------------------------
     //  Secondary-index queries
     // ------------------------------------------------------------------

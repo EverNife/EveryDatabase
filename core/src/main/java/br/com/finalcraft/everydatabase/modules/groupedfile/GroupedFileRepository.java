@@ -17,6 +17,7 @@ import br.com.finalcraft.everydatabase.query.QueryOptions;
 import br.com.finalcraft.everydatabase.query.QueryResultOrdering;
 import br.com.finalcraft.everydatabase.query.ScanRow;
 import br.com.finalcraft.everydatabase.query.Slice;
+import br.com.finalcraft.everydatabase.query.Slices;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -54,7 +55,7 @@ import java.util.stream.Stream;
  * <p>Entities are (de)serialized through the descriptor's {@code Codec}: the codec's bytes are parsed
  * into a sub-node with the storage's format-matched mapper, embedded in the aggregate document, and
  * re-emitted on read. The codec also decides the container format (JSON vs YAML) for the whole storage
- * (see {@link KeyFileStore#resolveFormat}).
+ * (see {@link ContainerFormat}).
  *
  * @param <K> the key type (its {@code toString()} names the file)
  * @param <V> the entity type
@@ -450,6 +451,39 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
             } catch (IOException e) {
                 throw log.errored(StorageOp.SCAN_ALL, collection,
                     new RuntimeException("GroupedFile: failed to scan all entities", e));
+            }
+        }, StorageExecutors.get());
+    }
+
+    /**
+     * Key-only page: a directory listing plus a streaming probe per file for this collection's field.
+     * No payload is decoded, but the probe is not free - a key file holds every collection sharing
+     * the key, and a key whose file exists without this collection is not a key of this collection.
+     * The keys are file stems, so a key sanitised into a file name is reported in that form.
+     */
+    @Override
+    public CompletableFuture<Slice<String>> keys(Cursor cursor, int limit) {
+        if (cursor == null) throw new IllegalArgumentException("cursor cannot be null");
+        if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                String ext = store.extension();
+                List<String> stems = new ArrayList<>();
+                for (Path file : store.keyFiles()) {
+                    String name = file.getFileName().toString();
+                    try {
+                        if (store.hasSubNode(file, collection)) {
+                            stems.add(name.substring(0, name.length() - ext.length()));
+                        }
+                    } catch (Exception e) {
+                        log.skippedCorruptedRow(collection, name, e);
+                    }
+                }
+                Collections.sort(stems);
+                return Slices.keyPageOfAll(stems, cursor, limit);
+            } catch (IOException e) {
+                throw log.errored(StorageOp.SCAN_ALL, collection,
+                    new RuntimeException("GroupedFile: failed to list keys", e));
             }
         }, StorageExecutors.get());
     }

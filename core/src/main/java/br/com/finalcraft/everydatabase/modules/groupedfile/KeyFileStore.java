@@ -115,6 +115,11 @@ final class KeyFileStore {
         return format.mapper();
     }
 
+    /** The key files' extension, dot included - {@code ".json"} or {@code ".yml"}. */
+    String extension() {
+        return format.extension();
+    }
+
     /**
      * Sanitises a key into a safe file-name stem via {@link FileKeyNames} (the same rules
      * LocalFile uses): path separators, case-differing names on case-insensitive file systems
