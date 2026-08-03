@@ -117,7 +117,7 @@ class GroupedFileStorageTest extends AbstractStorageTest {
         return true;
     }
 
-    // Two collections sharing the SAME key space (UUID) - the grouping case.
+    // Two collections keyed the SAME way (UUID), so they share a file - the grouping case.
     static final EntityDescriptor<UUID, TestPlayer> PLAYER_DATA =
         EntityDescriptor.builder(UUID.class, TestPlayer.class)
             .collection("player_data")
@@ -342,7 +342,7 @@ class GroupedFileStorageTest extends AbstractStorageTest {
     @Order(1017)
     @DisplayName("parallel save() of 6 collections sharing each key loses no update (global per-key lock)")
     void parallelSavesAcrossCollections_noLostUpdate() throws IOException {
-        final int COLLECTIONS = 6;   // >= 5 distinct collection "types" sharing one key space
+        final int COLLECTIONS = 6;   // >= 5 distinct collection "types" sharing one key
         final int KEYS        = 25;
 
         // One repository per collection, all keyed by UUID, so collections of one key share its file.
