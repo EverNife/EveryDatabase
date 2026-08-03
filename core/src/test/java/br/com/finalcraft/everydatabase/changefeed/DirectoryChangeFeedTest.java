@@ -7,13 +7,14 @@ import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
 import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileConfig;
-import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFilePartitioner;
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -43,6 +44,7 @@ class DirectoryChangeFeedTest {
     private final List<Storage> opened = new ArrayList<>();
 
     private static final UUID ALICE = UUID.fromString("00000000-0000-0000-0000-000000000001");
+    private static final UUID BOB   = UUID.fromString("00000000-0000-0000-0000-000000000002");
     private static final Duration CEILING = Duration.ofSeconds(20);
 
     @AfterEach
@@ -102,12 +104,32 @@ class DirectoryChangeFeedTest {
             && ALICE.toString().equals(e.key())), () -> "no DELETE for " + ALICE + " in " + seen);
     }
 
+    @Test
+    @DisplayName("LocalFile: a write into a collection directory created later is still seen")
+    void localFile_newCollectionDirectory_isWatched() {
+        Path dir = sharedDir.resolve("lf-late");
+        Storage watched = localFile(dir);
+        repoOn(watched).save(new TestPlayer(ALICE, "Alice", 100)).join();
+
+        CopyOnWriteArrayList<ChangeEvent> seen = new CopyOnWriteArrayList<>();
+        ((ChangeFeedStorage) watched).subscribe(seen::add);
+
+        // One directory per collection, created on first write - so "companions/" does not exist
+        // when the watch starts. A feed that only registered the tree it found would never see it.
+        localFile(dir).repository(descriptor("companions"))
+            .save(new TestPlayer(BOB, "Bob", 1)).join();
+
+        await(() -> seen.stream().anyMatch(e -> "companions".equals(e.collection())
+            && BOB.toString().equals(e.key())),
+            () -> "a write into a freshly created collection directory must be seen: " + seen);
+    }
+
     // ------------------------------------------------------------------
     //  Grouped files
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("GroupedFile: a write reaches every collection of the key space")
+    @DisplayName("GroupedFile: a write reaches every collection of the key")
     void groupedFile_externalWrite_reachesEveryCollection() {
         Path dir = sharedDir.resolve("gf-save");
         Storage watched = groupedFile(dir);
@@ -129,26 +151,29 @@ class DirectoryChangeFeedTest {
     }
 
     @Test
-    @DisplayName("GroupedFile: a file created in a bucket that did not exist is still seen")
-    void groupedFile_newBucket_isWatched() {
-        Path dir = sharedDir.resolve("gf-fanout");
-        GroupedFileConfig config = GroupedFileConfig.builder(dir)
-            .keySpace("player", GroupedFilePartitioner.hashFanout(2), "quests")
-            .build();
-
-        Storage watched = open(Storages.createGroupedFile(config));
-        watched.repository(descriptor("quests"));
+    @DisplayName("GroupedFile: a file below the base directory is not published as a key")
+    void groupedFile_fileBelowBase_isIgnored() throws Exception {
+        Path dir = sharedDir.resolve("gf-stray");
+        Storage watched = groupedFile(dir);
+        repoOn(watched).save(new TestPlayer(ALICE, "Alice", 100)).join();
 
         CopyOnWriteArrayList<ChangeEvent> seen = new CopyOnWriteArrayList<>();
         ((ChangeFeedStorage) watched).subscribe(seen::add);
 
-        // Nothing has been written yet, so player/10/c5/ does not exist when the watch starts: the
-        // feed has to register directories that appear afterwards or fan-out would be a blind spot.
-        Storage other = open(Storages.createGroupedFile(config));
-        other.repository(descriptor("quests")).save(new TestPlayer(ALICE, "Alice", 100)).join();
+        // The watch covers the whole tree, but only the base directory holds key files. A file left
+        // in a sub-directory names no key here, so publishing it would wake every collection with a
+        // key that resolves to nothing.
+        Path stray = dir.resolve("leftover").resolve(BOB + ".json");
+        Files.createDirectories(stray.getParent());
+        Files.write(stray, "{}".getBytes(StandardCharsets.UTF_8));
 
+        // A write in the base directory that must arrive, so the wait is bounded by a real event
+        // rather than by the ceiling: anything from the sub-directory would have come first.
+        repoOn(watched).save(new TestPlayer(ALICE, "Alice again", 101)).join();
         await(() -> seen.stream().anyMatch(e -> ALICE.toString().equals(e.key())),
-            () -> "a write into a freshly created bucket must still be seen: " + seen);
+            () -> "the base-directory write must still arrive: " + seen);
+        assertTrue(seen.stream().noneMatch(e -> BOB.toString().equals(e.key())),
+            () -> "a file below the base must publish nothing: " + seen);
     }
 
     @Test

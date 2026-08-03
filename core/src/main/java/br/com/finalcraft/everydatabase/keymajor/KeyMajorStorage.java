@@ -37,13 +37,8 @@ public interface KeyMajorStorage extends Storage {
     /**
      * Reads every listed collection of {@code key} in one go.
      *
-     * <p>All descriptors must be stored together - on the grouped-file backend, that means the same
-     * key space. Descriptors that are not do not share a file, so "one read" would be a lie, and the
-     * call is refused rather than quietly doing N reads.
-     *
-     * @throws IllegalArgumentException if no descriptor is given, if the key does not match a
-     *                                  descriptor's key type, or if the descriptors are not stored
-     *                                  together
+     * @throws IllegalArgumentException if no descriptor is given, or if the key does not match a
+     *                                  descriptor's key type
      */
     CompletableFuture<KeyBundle> loadKey(Object key, EntityDescriptor<?, ?>... descriptors);
 

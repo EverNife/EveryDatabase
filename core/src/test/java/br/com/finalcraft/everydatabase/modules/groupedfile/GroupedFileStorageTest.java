@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.modules.groupedfile;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
+import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.codec.JacksonYamlCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
@@ -242,6 +243,26 @@ class GroupedFileStorageTest extends AbstractStorageTest {
     }
 
     @Test
+    @Order(1014)
+    @DisplayName("a key at the length limit still fits as a file name")
+    void longestKey_stillFits() {
+        StringBuilder key = new StringBuilder();
+        while (key.length() < StorageKeys.MAX_KEY_LENGTH) key.append('k');
+
+        EntityDescriptor<String, TestPlayer> byName = EntityDescriptor
+            .builder(String.class, TestPlayer.class)
+            .collection("long_keyed")
+            .keyExtractor(TestPlayer::getName)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .build();
+        Repository<String, TestPlayer> stringRepo = storage.repository(byName);
+
+        stringRepo.save(new TestPlayer(UUID.randomUUID(), key.toString(), 1)).join();
+        assertTrue(stringRepo.find(key.toString()).join().isPresent(),
+            "the longest key the contract allows must still name a file");
+    }
+
+    @Test
     @Order(1015)
     @DisplayName("keys differing only in letter case map to distinct files (case-insensitive file systems)")
     void caseDifferingKeys_doNotCollide() {
@@ -389,6 +410,18 @@ class GroupedFileStorageTest extends AbstractStorageTest {
 
         // The reserved directory must not leak into a collection scan.
         assertEquals(20L, repo.count().join(), "count() must ignore the reserved _schema/ directory");
+    }
+
+    @Test
+    @Order(1016)
+    @DisplayName("a scan of the base directory still ignores the reserved directory")
+    void baseScan_ignoresSchemaDirectory() {
+        // layout.json is a .json file and this is a JSON store, so a listing that reached into
+        // _schema/ would count it as a key file.
+        repo.save(new TestPlayer(UUID.randomUUID(), "Alice", 100)).join();
+
+        assertTrue(Files.exists(tempDir.resolve("_schema").resolve("layout.json")));
+        assertEquals(1L, repo.count().join());
     }
 
     // ------------------------------------------------------------------

@@ -78,10 +78,8 @@ public final class GroupedFileStorage
     private final GroupedFileConfig  config;
     private final ContainerFormat    format = new ContainerFormat();
     private final GroupedFileLayout  layout;
-    /** The store for collections with no declared key space: the base directory itself. */
+    /** The one store of this storage: the base directory, shared by every repository. */
     private final KeyFileStore       rootStore;
-    /** One store per declared key space, created on first use. Key: the key-space name. */
-    private final ConcurrentHashMap<String, KeyFileStore> keySpaceStores = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, GroupedFileRepository<?, ?>> repositories = new ConcurrentHashMap<>();
 
     /** Change feed: the OS watches the tree, and this fans what it reports out to the listeners. */
@@ -175,19 +173,6 @@ public final class GroupedFileStorage
         return rootStore;
     }
 
-    /**
-     * The store owning {@code collection}'s files: the one for its declared key space, or the base
-     * directory's when it declared none. Two collections in different key spaces resolve to different
-     * stores, hence different directories and different lock maps.
-     */
-    private KeyFileStore storeFor(String collection) {
-        String keySpace = config.keySpaceOf(collection);
-        if (keySpace == null) return rootStore;
-        return keySpaceStores.computeIfAbsent(keySpace, name ->
-            new KeyFileStore(config.baseDirectory().resolve(name), format, config.rootCacheSize(),
-                             config.partitionerOf(name)));
-    }
-
     // ------------------------------------------------------------------
     //  Lifecycle
     // ------------------------------------------------------------------
@@ -213,7 +198,6 @@ public final class GroupedFileStorage
         watcher.close();
         changeFeed.closeAll();
         repositories.clear();
-        keySpaceStores.clear();
         initialized = false;
         log.closed();
         return CompletableFuture.completedFuture(null);
@@ -249,12 +233,9 @@ public final class GroupedFileStorage
                 // in this base directory share the files, so they must agree on one format.
                 format.resolve(descriptor.codec());
                 // ...and the directory gets a say too: it may already hold this collection's files
-                // in another format, or in another key space, either of which would silently hide
-                // them from a repository opened this way.
-                String keySpace = config.keySpaceOf(descriptor.collection());
-                layout.reconcile(format, descriptor.collection(), keySpace,
-                                 keySpace == null ? null : config.partitionerOf(keySpace));
-                return new GroupedFileRepository<>(descriptor, storeFor(descriptor.collection()), log);
+                // in another format, which would silently hide them from a repository opened this way.
+                layout.reconcile(format, descriptor.collection());
+                return new GroupedFileRepository<>(descriptor, rootStore, log);
             }
         );
     }
@@ -272,20 +253,18 @@ public final class GroupedFileStorage
     @Override
     public CompletableFuture<KeyBundle> loadKey(Object key, EntityDescriptor<?, ?>... descriptors) {
         final List<GroupedFileRepository<?, ?>> repositories;
-        final KeyFileStore store;
         try {
             repositories = repositoriesOf("loadKey", key, descriptors);
-            store        = sharedStore("loadKey", descriptors);
         } catch (RuntimeException e) {
             return failed(e);
         }
         return CompletableFuture.supplyAsync(() -> {
             String sanitized = KeyFileStore.sanitize(key);
-            ReadWriteLock lock = store.lockFor(sanitized);
+            ReadWriteLock lock = rootStore.lockFor(sanitized);
             lock.readLock().lock();
             try {
                 // One read for the whole bundle - the point of the capability.
-                ObjectNode root = store.cachedRoot(store.keyFile(sanitized));
+                ObjectNode root = rootStore.cachedRoot(rootStore.keyFile(sanitized));
                 Map<String, Object> loaded = new LinkedHashMap<>();
                 for (GroupedFileRepository<?, ?> repository : repositories) {
                     JsonNode sub = root == null ? null : root.get(repository.collection());
@@ -314,16 +293,15 @@ public final class GroupedFileStorage
 
             EntityDescriptor<?, ?>[] touched = batch.operations.keySet().toArray(new EntityDescriptor<?, ?>[0]);
             List<GroupedFileRepository<?, ?>> repositories = repositoriesOf("batchKey", key, touched);
-            KeyFileStore store = sharedStore("batchKey", touched);
 
             long startMs = System.currentTimeMillis();
             String sanitized = KeyFileStore.sanitize(key);
-            ReadWriteLock lock = store.lockFor(sanitized);
+            ReadWriteLock lock = rootStore.lockFor(sanitized);
             lock.writeLock().lock();
             try {
-                Path file = store.keyFile(sanitized);
-                ObjectNode root = store.mutableRoot(file);
-                if (root == null) root = store.mapper().createObjectNode();
+                Path file = rootStore.keyFile(sanitized);
+                ObjectNode root = rootStore.mutableRoot(file);
+                if (root == null) root = rootStore.mapper().createObjectNode();
 
                 int index = 0;
                 for (Map.Entry<EntityDescriptor<?, ?>, Object> operation : batch.operations.entrySet()) {
@@ -337,9 +315,9 @@ public final class GroupedFileStorage
 
                 if (root.size() == 0) {
                     // Nothing left for this key - same rule as a delete that empties the file.
-                    if (Files.exists(file)) store.delete(file);
+                    if (Files.exists(file)) rootStore.delete(file);
                 } else {
-                    store.writeAtomic(file, root);
+                    rootStore.writeAtomic(file, root);
                 }
                 log.savedBatch(collectionNames(repositories), batch.operations.size(),
                                System.currentTimeMillis() - startMs);
@@ -375,32 +353,6 @@ public final class GroupedFileStorage
             resolved.add((GroupedFileRepository<?, ?>) repository(descriptor));
         }
         return resolved;
-    }
-
-    /**
-     * The one store all {@code descriptors} live in.
-     *
-     * <p>Collections in different key spaces do not share a file, so there is no single read or
-     * single write to be had. Accepting them and quietly doing N of each would hide exactly the cost
-     * this API exists to remove, so it is refused instead.
-     */
-    private KeyFileStore sharedStore(String what, EntityDescriptor<?, ?>... descriptors) {
-        String keySpace = config.keySpaceOf(descriptors[0].collection());
-        for (EntityDescriptor<?, ?> descriptor : descriptors) {
-            String other = config.keySpaceOf(descriptor.collection());
-            if (!Objects.equals(keySpace, other)) {
-                throw new IllegalArgumentException(
-                    "GroupedFileStorage." + what + ": collections '" + descriptors[0].collection() + "' ("
-                    + describeKeySpace(keySpace) + ") and '" + descriptor.collection() + "' ("
-                    + describeKeySpace(other) + ") are stored in different key spaces, so they do not share "
-                    + "a file. Group them in one key space, or address them one collection at a time.");
-            }
-        }
-        return storeFor(descriptors[0].collection());
-    }
-
-    private static String describeKeySpace(String keySpace) {
-        return keySpace == null ? "the base directory" : "key space '" + keySpace + "'";
     }
 
     private static String collectionNames(List<GroupedFileRepository<?, ?>> repositories) {
@@ -503,8 +455,8 @@ public final class GroupedFileStorage
      * <p>A key file holds every collection sharing its key, and the file system reports that the
      * file changed, not which part of it did. There is no way to narrow it without reading the
      * document - and reading it would still not say what it looked like before. So the event goes
-     * to every collection registered in that key space: a false wake-up for the ones that did not
-     * change, never a missed one for the one that did.
+     * to every collection of this storage: a false wake-up for the ones that did not change, never
+     * a missed one for the one that did.
      *
      * <p>The event carries <b>no origin</b>: a file system has nowhere to record who wrote a file,
      * so claiming this storage did would make every other instance in the process discard the event
@@ -513,35 +465,20 @@ public final class GroupedFileStorage
      */
     private void onFileEvent(Path directory, String fileName, ChangeOp op) {
         if (!format.isResolved() || !fileName.endsWith(format.extension())) return;
+        // Only the base directory holds key files. A file below it is not addressable by any key
+        // here, so publishing its name as one would be a wrong key, for every collection.
+        if (!directory.equals(config.baseDirectory())) return;
 
-        String keySpace = keySpaceOfDirectory(directory);
         String key = fileName.substring(0, fileName.length() - format.extension().length());
 
         // A watched change is a change this instance did not make through its own cache; the
         // memoized document for that file is exactly what would hide it.
-        storeOfKeySpace(keySpace).invalidateMemo(directory.resolve(fileName));
+        rootStore.invalidateMemo(directory.resolve(fileName));
 
         for (GroupedFileRepository<?, ?> repository : repositories.values()) {
-            String collection = repository.collection();
-            if (!Objects.equals(keySpace, config.keySpaceOf(collection))) continue;
-            changeFeed.emit(new ChangeEvent(collection, key, op, ChangeEvent.UNKNOWN_VERSION, null,
-                                            backendIdentity()));
+            changeFeed.emit(new ChangeEvent(repository.collection(), key, op,
+                                            ChangeEvent.UNKNOWN_VERSION, null, backendIdentity()));
         }
-    }
-
-    /** Which key space a watched directory belongs to; {@code null} for the base directory itself. */
-    private String keySpaceOfDirectory(Path directory) {
-        Path relative = config.baseDirectory().relativize(directory);
-        if (relative.toString().isEmpty()) return null;
-        String first = relative.getName(0).toString();
-        return config.keySpaces().contains(first) ? first : null;
-    }
-
-    private KeyFileStore storeOfKeySpace(String keySpace) {
-        if (keySpace == null) return rootStore;
-        return keySpaceStores.computeIfAbsent(keySpace, name ->
-            new KeyFileStore(config.baseDirectory().resolve(name), format, config.rootCacheSize(),
-                             config.partitionerOf(name)));
     }
 
     // ------------------------------------------------------------------

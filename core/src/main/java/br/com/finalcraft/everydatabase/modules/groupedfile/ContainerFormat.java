@@ -54,21 +54,6 @@ final class ContainerFormat {
         }
     }
 
-    /**
-     * A format pinned to a name already recorded on disk, for callers that work on a directory
-     * without opening a storage over it (the relayout utility) and so have no codec to ask.
-     */
-    static ContainerFormat byName(String formatName) {
-        if (extensionOf(formatName) == null) {
-            throw new IllegalArgumentException("Unknown grouped-file container format: " + formatName);
-        }
-        ContainerFormat resolved = new ContainerFormat();
-        resolved.yaml      = YAML.equals(formatName);
-        resolved.extension = extensionOf(formatName);
-        resolved.mapper    = resolved.yaml ? newYamlMapper() : newJsonMapper();
-        return resolved;
-    }
-
     boolean isResolved() {
         return yaml != null;
     }

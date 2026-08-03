@@ -80,10 +80,7 @@ class GroupedFileLayoutTest {
     void newDirectory_gainsLayoutFile() throws Exception {
         openRepository(new JacksonJsonCodec<>(TestPlayer.class));
 
-        JsonNode layout = readLayout();
-        assertEquals("json", layout.path("format").asText());
-        assertTrue(layout.has("keySpaces"), "the key-space section is present from the start");
-        assertTrue(layout.path("keySpaces").isEmpty(), "and empty until key spaces are declared");
+        assertEquals("json", readLayout().path("format").asText());
     }
 
     @Test
@@ -156,6 +153,58 @@ class GroupedFileLayoutTest {
             assertTrue(message.contains("1 .json") && message.contains("1 .yml"),
                 () -> "the message must count both sets so the operator can tell which to keep: " + message);
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  Files this version cannot reach
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("a key file in a sub-directory fails the open instead of being ignored")
+    void keyFilesBelowBase_failOpen() throws Exception {
+        Path below = baseDir.resolve("player").resolve(ALICE + ".json");
+        Files.createDirectories(below.getParent());
+        Files.write(below, "{\"players\":{}}".getBytes(StandardCharsets.UTF_8));
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+            () -> openRepository(new JacksonJsonCodec<>(TestPlayer.class)));
+
+        String message = thrown.getMessage();
+        assertTrue(message.contains("player"), () -> "must name the sub-directory: " + message);
+
+        // What the failure protects: nothing was adopted and nothing was written beside the data.
+        assertFalse(Files.exists(layoutFile()), "the directory must not describe itself from a guess");
+        assertEquals(0, keyFilesWithSuffix(".json"), "no parallel key file may be created");
+    }
+
+    @Test
+    @DisplayName("a layout from a build that placed files in sub-directories is not rewritten")
+    void layoutRecordingSubdirectory_failsWithoutRewriting() throws Exception {
+        Path below = baseDir.resolve("player").resolve(ALICE + ".json");
+        Files.createDirectories(below.getParent());
+        Files.write(below, "{\"players\":{}}".getBytes(StandardCharsets.UTF_8));
+        Files.createDirectories(layoutFile().getParent());
+        Files.write(layoutFile(),
+            "{\"format\":\"json\",\"collections\":{\"players\":\"player\"}}".getBytes(StandardCharsets.UTF_8));
+        byte[] before = Files.readAllBytes(layoutFile());
+
+        assertThrows(IllegalStateException.class,
+            () -> openRepository(new JacksonJsonCodec<>(TestPlayer.class)));
+
+        assertArrayEquals(before, Files.readAllBytes(layoutFile()),
+            "the open must fail before anything is written back");
+    }
+
+    @Test
+    @DisplayName("the reserved directory is the storage's own and never counts as a stray")
+    void reservedDirectory_isNotAStray() {
+        Repository<UUID, TestPlayer> repo = openRepository(new JacksonJsonCodec<>(TestPlayer.class));
+        repo.save(new TestPlayer(ALICE, "Alice", 100)).join();
+
+        // _schema/layout.json is a .json file below the base, and the guard must not trip on it.
+        assertTrue(Files.exists(layoutFile()));
+        assertEquals("Alice", openRepository(new JacksonJsonCodec<>(TestPlayer.class))
+            .find(ALICE).join().map(TestPlayer::getName).orElse(null));
     }
 
     // ------------------------------------------------------------------

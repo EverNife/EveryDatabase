@@ -33,10 +33,9 @@ import java.util.stream.Stream;
  * the same key for different collections would read-modify-write the same file concurrently and lose
  * updates.
  *
- * <p>"The same file" is exactly one directory's worth: a storage holds one store per key space (plus
- * one for the base directory itself), and a key space's files are unreachable from any other. That
- * makes <em>same file if and only if same lock</em> true by construction rather than by convention -
- * two stores cannot collide, because neither can name the other's paths.
+ * <p>A storage holds exactly one of these, over its base directory, so <em>same file if and only if
+ * same lock</em> holds by construction rather than by convention: there is no second store that could
+ * name the same paths behind a different lock map.
  *
  * <p><b>Container format follows the codec.</b> The aggregate document is a Jackson tree, so it must be
  * a format Jackson round-trips as a tree - JSON or YAML. That decision is not this class's to make: it
@@ -50,9 +49,8 @@ import java.util.stream.Stream;
  */
 final class KeyFileStore {
 
-    private final Path                   directory;
-    private final ContainerFormat        format;
-    private final GroupedFilePartitioner partitioner;
+    private final Path            directory;
+    private final ContainerFormat format;
 
     /** Per-key locks, keyed by sanitised key. Global across all repositories of the owning storage. */
     private final ConcurrentHashMap<String, ReadWriteLock> locks = new ConcurrentHashMap<>();
@@ -72,14 +70,8 @@ final class KeyFileStore {
     }
 
     KeyFileStore(Path directory, ContainerFormat format, int rootCacheSize) {
-        this(directory, format, rootCacheSize, GroupedFilePartitioner.flat());
-    }
-
-    KeyFileStore(Path directory, ContainerFormat format, int rootCacheSize,
-                 GroupedFilePartitioner partitioner) {
         this.directory     = directory;
         this.format        = format;
-        this.partitioner   = partitioner;
         this.rootCacheSize = Math.max(0, rootCacheSize);
         this.roots = this.rootCacheSize == 0
             ? null
@@ -106,7 +98,7 @@ final class KeyFileStore {
         return atomicWrites.get();
     }
 
-    /** The directory this store owns: the base directory, or one key space's sub-directory of it. */
+    /** The base directory this store owns. */
     Path directory() {
         return directory;
     }
@@ -133,14 +125,9 @@ final class KeyFileStore {
         return FileKeyNames.safeStem(key.toString());
     }
 
-    /**
-     * Where {@code sanitizedKey}'s file lives. Resolved by the partitioner, never by searching - a
-     * point read costs the same with fan-out as without.
-     */
+    /** Where {@code sanitizedKey}'s file lives - resolved, never searched. */
     Path keyFile(String sanitizedKey) {
-        String bucket = partitioner.directoryFor(sanitizedKey);
-        Path parent = bucket.isEmpty() ? directory : directory.resolve(bucket);
-        return parent.resolve(sanitizedKey + format.extension());
+        return directory.resolve(sanitizedKey + format.extension());
     }
 
     /**
@@ -154,30 +141,19 @@ final class KeyFileStore {
 
     /**
      * The regular key files this store owns, filtered by the resolved format's extension. Sibling
-     * {@code .tmp} files never match, and the walk stops at the depth the partitioner can produce,
-     * so nothing else living under the directory is mistaken for a key file. Under the base
-     * directory that matters concretely: the reserved {@code _schema/} holds {@code layout.json},
-     * which a deeper walk would happily read as a key file of a JSON store.
-     *
-     * <p>A store that owns a key space lists <em>only</em> that key space: the files of the other
-     * ones are not just filtered out, they are never looked at. That is where the scan cost goes.
+     * {@code .tmp} files never match, and the listing is one level deep, so nothing else living
+     * under the directory is mistaken for a key file: the reserved {@code _schema/} holds
+     * {@code layout.json}, which a deeper walk would happily read as a key file of a JSON store.
      */
     List<Path> keyFiles() throws IOException {
         if (!Files.isDirectory(directory)) return Collections.emptyList();
         String ext = format.extension();
-        try (Stream<Path> entries = Files.walk(directory, partitioner.depth() + 1)) {
+        try (Stream<Path> entries = Files.list(directory)) {
             return entries
-                .filter(p -> !isReserved(p))
                 .filter(Files::isRegularFile)
                 .filter(p -> p.getFileName().toString().endsWith(ext))
                 .collect(Collectors.toList());
         }
-    }
-
-    /** The storage's own bookkeeping directory, which is never a bucket however deep the walk goes. */
-    private boolean isReserved(Path path) {
-        Path parent = path.getParent();
-        return parent != null && parent.equals(directory.resolve(GroupedFileStorage.SCHEMA_DIR));
     }
 
     // ------------------------------------------------------------------
@@ -368,8 +344,7 @@ final class KeyFileStore {
      * which {@link #keyFiles()} ignores because it filters by extension.
      */
     void writeAtomic(Path target, byte[] data) throws IOException {
-        // The key space's directory is created on first write rather than up front, so declaring a
-        // key space nobody writes to never leaves an empty directory behind.
+        // A write must still land after the directory was removed underneath a running storage.
         Path parent = target.getParent();
         if (parent != null) Files.createDirectories(parent);
         atomicWrites.incrementAndGet();

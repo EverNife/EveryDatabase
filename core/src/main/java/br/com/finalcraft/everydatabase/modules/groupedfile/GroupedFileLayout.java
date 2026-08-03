@@ -12,25 +12,22 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.stream.Stream;
 
 /**
  * The self-description of a grouped-file directory, persisted as {@code <base>/_schema/layout.json}.
  *
- * <p>It exists because the physical layout of these files - which format they are written in, and
- * later how they are grouped - used to be knowable only from the {@code Codec} that happened to open
- * the directory first. Nothing on disk said what was actually there, so opening a YAML directory
- * with a JSON codec was not an error: it simply found no files with the extension it was looking
- * for, reported an empty collection, and wrote a parallel set of {@code .json} files next to the
- * {@code .yml} ones that already held the data. Silence is the worst failure mode a persistence
- * library has, so the layout is now written down and every open is checked against it.
+ * <p>It exists because the format these files are written in used to be knowable only from the
+ * {@code Codec} that happened to open the directory first. Nothing on disk said what was actually
+ * there, so opening a YAML directory with a JSON codec was not an error: it simply found no files
+ * with the extension it was looking for, reported an empty collection, and wrote a parallel set of
+ * {@code .json} files next to the {@code .yml} ones that already held the data. Silence is the worst
+ * failure mode a persistence library has, so the format is now written down and every open is
+ * checked against it.
  *
  * <pre>{@code
  * {
- *   "format" : "yaml",
- *   "keySpaces" : { }
+ *   "format" : "yaml"
  * }
  * }</pre>
  *
@@ -50,8 +47,7 @@ final class GroupedFileLayout {
 
     private final Path baseDirectory;
 
-    private volatile Document document;
-    private volatile boolean  reconciled;
+    private volatile boolean reconciled;
 
     GroupedFileLayout(Path baseDirectory) {
         this.baseDirectory = baseDirectory;
@@ -61,36 +57,10 @@ final class GroupedFileLayout {
     //  The persisted document
     // ------------------------------------------------------------------
 
-    /**
-     * The layout as stored. Unknown fields are tolerated so an older build can read a newer file.
-     *
-     * <p>Placement is recorded once, in {@code collections}: every collection ever opened maps to the
-     * key space holding its files, with the empty string meaning the base directory itself. Recording
-     * the base-directory collections too is what lets a later run tell "never seen before" apart from
-     * "already stored, flat" - and only the second one is a divergence.
-     *
-     * <p>{@code keySpaces} carries per-key-space settings rather than membership, so no fact has two
-     * homes to drift between.
-     */
+    /** The layout as stored. Unknown fields are tolerated so an older build can read a newer file. */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     static final class Document {
-        public String                format;
-        public Map<String, KeySpace> keySpaces   = new LinkedHashMap<>();
-        public Map<String, String>   collections = new LinkedHashMap<>();
-    }
-
-    /** Settings of one named key space. */
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    static final class KeySpace {
-        public String partitioner;
-    }
-
-    /** How the base directory itself is spelled in {@link Document#collections}. */
-    static final String ROOT_KEY_SPACE = "";
-
-    /** The reconciled layout, or {@code null} before the first repository is created. */
-    Document document() {
-        return document;
+        public String format;
     }
 
     // ------------------------------------------------------------------
@@ -116,43 +86,16 @@ final class GroupedFileLayout {
      * @param collection the collection being opened - named in the error, since it is the one whose
      *                   codec disagrees with the directory
      * @throws IllegalStateException when the codec and the directory disagree, when the directory
-     *                               holds both formats, or when the layout file cannot be read
+     *                               holds both formats, when key files sit below the base directory,
+     *                               or when the layout file cannot be read
      */
-    synchronized void reconcile(ContainerFormat format, String collection, String keySpace,
-                                GroupedFilePartitioner partitioner) {
-        reconcileFormat(format, collection);
-
-        String want     = keySpace == null ? ROOT_KEY_SPACE : keySpace;
-        String recorded = document.collections.get(collection);
-        if (recorded != null && !recorded.equals(want)) {
-            throw keySpaceMismatch(collection, recorded, want);
-        }
-
-        boolean dirty = recorded == null;
-        if (dirty) document.collections.put(collection, want);
-
-        if (!ROOT_KEY_SPACE.equals(want)) {
-            String wantPartitioner = partitioner.partitionerName();
-            KeySpace entry = document.keySpaces.get(want);
-            if (entry == null) {
-                entry = new KeySpace();
-                entry.partitioner = wantPartitioner;
-                document.keySpaces.put(want, entry);
-                dirty = true;
-            } else {
-                String recordedPartitioner = entry.partitioner == null
-                    ? GroupedFilePartitioner.FLAT : entry.partitioner;
-                if (!recordedPartitioner.equals(wantPartitioner)) {
-                    throw partitionerMismatch(want, recordedPartitioner, wantPartitioner);
-                }
-            }
-        }
-        if (dirty) writeLayout(document);
-    }
-
-    /** The format half of {@link #reconcile}: settled once, from whichever collection opens first. */
-    private void reconcileFormat(ContainerFormat format, String collection) {
+    synchronized void reconcile(ContainerFormat format, String collection) {
         if (reconciled) return;
+
+        // Before anything is read or written: a key file below the base is unreachable, and every
+        // answer that follows - the inferred format, an empty collection, the first save - would be
+        // computed as if it were not there.
+        rejectKeyFilesBelowBase();
 
         String want   = format.name();
         Document read = readLayout();
@@ -169,8 +112,57 @@ final class GroupedFileLayout {
             throw formatMismatch(read.format, want, collection, "recorded in " + relativeLayoutPath());
         }
 
-        this.document   = read;
         this.reconciled = true;
+    }
+
+    /**
+     * Refuses a directory holding key files anywhere below itself.
+     *
+     * <p>Only the base directory is read, so those files are invisible: the format would be inferred
+     * as if the directory were empty, the collection would report nothing, and the first save would
+     * write a second copy beside data nobody can see - the exact failure this file exists to prevent.
+     *
+     * @throws IllegalStateException naming the first such file found
+     */
+    private void rejectKeyFilesBelowBase() {
+        Path stray = firstKeyFileBelowBase();
+        if (stray == null) return;
+        throw new IllegalStateException(
+            "GroupedFileStorage: the directory '" + baseDirectory + "' holds key files in a "
+            + "sub-directory ('" + baseDirectory.relativize(stray) + "'), which is not read: every key "
+            + "file lives directly under the base. Opening it this way would report those collections "
+            + "empty and start writing a second copy in the base directory. Point the storage at that "
+            + "sub-directory, or move the files up into the base directory first.");
+    }
+
+    /**
+     * The first key file below {@code baseDirectory}, or {@code null} when there is none. Any
+     * container extension counts, not just the one being opened: a stray directory of the other
+     * format is just as unreadable. The reserved {@code _schema/} is the storage's own bookkeeping.
+     */
+    private Path firstKeyFileBelowBase() {
+        if (!Files.isDirectory(baseDirectory)) return null;
+        try (Stream<Path> children = Files.list(baseDirectory)) {
+            for (Path child : (Iterable<Path>) children.filter(Files::isDirectory)::iterator) {
+                if (GroupedFileStorage.SCHEMA_DIR.equals(String.valueOf(child.getFileName()))) continue;
+                try (Stream<Path> below = Files.walk(child)) {
+                    Path found = below.filter(Files::isRegularFile)
+                        .filter(GroupedFileLayout::hasContainerExtension)
+                        .findFirst().orElse(null);
+                    if (found != null) return found;
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                "GroupedFileStorage: failed to list '" + baseDirectory + "' while checking that none "
+                + "of its key files are hidden in a sub-directory.", e);
+        }
+        return null;
+    }
+
+    private static boolean hasContainerExtension(Path file) {
+        String name = file.getFileName().toString().toLowerCase();
+        return name.endsWith(".json") || name.endsWith(".yml") || name.endsWith(".yaml");
     }
 
     // ------------------------------------------------------------------
@@ -205,25 +197,7 @@ final class GroupedFileLayout {
         if (parsed == null || ContainerFormat.extensionOf(parsed.format) == null) {
             throw unreadableLayout(file, "it declares no usable container format (found: " + (parsed == null ? null : parsed.format) + ")", null);
         }
-        if (parsed.keySpaces   == null) parsed.keySpaces   = new LinkedHashMap<>();
-        if (parsed.collections == null) parsed.collections = new LinkedHashMap<>();
         return parsed;
-    }
-
-    /**
-     * The layout as stored, or {@code null} when the directory does not describe itself yet - for
-     * callers that need to read the recorded placement without opening a storage, such as the
-     * relayout utility.
-     */
-    Document readOrNull() {
-        return readLayout();
-    }
-
-    /** Replaces the stored layout wholesale. Used by the relayout utility once the files have moved. */
-    void overwrite(Document doc) {
-        writeLayout(doc);
-        this.document   = doc;
-        this.reconciled = true;
     }
 
     private void writeLayout(Document doc) {
@@ -301,29 +275,6 @@ final class GroupedFileLayout {
             + "save writes a parallel set of " + ContainerFormat.extensionOf(want) + " files next to the "
             + ContainerFormat.extensionOf(stored) + " files that hold the data. Open this directory with a "
             + stored.toUpperCase() + " codec, or point the storage at a different directory.");
-    }
-
-    private IllegalStateException keySpaceMismatch(String collection, String recorded, String want) {
-        return new IllegalStateException(
-            "GroupedFileStorage: collection '" + collection + "' is configured to live in "
-            + describe(want) + ", but " + relativeLayoutPath() + " records its files in "
-            + describe(recorded) + ". Opening it where it is not would report an empty collection and "
-            + "start writing a second copy elsewhere. Either restore the previous configuration, or "
-            + "move the files first with GroupedFileRelayout.relayout(config), which relocates them and "
-            + "rewrites this record.");
-    }
-
-    private IllegalStateException partitionerMismatch(String keySpace, String recorded, String want) {
-        return new IllegalStateException(
-            "GroupedFileStorage: key space '" + keySpace + "' spreads its files with partitioner '"
-            + recorded + "' according to " + relativeLayoutPath() + ", but the configuration asks for '"
-            + want + "'. The partitioner is what says where a file already is, so opening with a "
-            + "different one would find none of them. Either restore '" + recorded + "', or move the "
-            + "files first with GroupedFileRelayout.relayout(config).");
-    }
-
-    private static String describe(String keySpace) {
-        return ROOT_KEY_SPACE.equals(keySpace) ? "the base directory" : "key space '" + keySpace + "'";
     }
 
     private IllegalStateException unreadableLayout(Path file, String reason, Throwable cause) {

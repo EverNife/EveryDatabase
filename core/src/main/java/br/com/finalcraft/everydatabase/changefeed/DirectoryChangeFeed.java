@@ -28,9 +28,9 @@ import java.util.stream.Stream;
  * an administrator editing a YAML file by hand - is observed exactly like one made through the API.
  *
  * <p>Directories created later are picked up: a {@code CREATE} of a directory registers it too, so a
- * key space or a fan-out bucket that did not exist when the watch started is still watched. The
- * reserved {@code _schema} directory never is, and neither are the {@code .tmp} files the atomic
- * write path leaves behind mid-write.
+ * collection whose directory did not exist when the watch started is still watched. The reserved
+ * {@code _schema} directory never is, and neither are the {@code .tmp} files the atomic write path
+ * leaves behind mid-write.
  *
  * <p><b>Platform note.</b> Linux and Windows have real kernel notification. On macOS the JDK falls
  * back to an internal polling watcher whose latency is measured in seconds - the feed still works,
@@ -188,7 +188,7 @@ public final class DirectoryChangeFeed implements Closeable {
         Path resolved = directory.resolve(fileName);
 
         if (event.kind() == StandardWatchEventKinds.ENTRY_CREATE && Files.isDirectory(resolved)) {
-            // A key space or a fan-out bucket appearing after the watch started.
+            // A directory appearing after the watch started - a collection opened just now.
             if (!isReserved(resolved)) registerTree(resolved);
             return;
         }

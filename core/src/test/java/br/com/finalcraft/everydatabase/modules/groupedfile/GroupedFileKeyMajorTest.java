@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -221,29 +222,33 @@ class GroupedFileKeyMajorTest {
     }
 
     // ------------------------------------------------------------------
-    //  What it refuses
+    //  What it takes
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("collections in different key spaces are refused, not silently read twice")
-    void differentKeySpaces_areRefused() {
-        GroupedFileStorage storage = open(GroupedFileConfig.builder(baseDir)
-            .keySpace("player",  "playerdata")
-            .keySpace("account", "economy")
-            .build());
-        storage.repository(PLAYER);
-        storage.repository(ECONOMY);
+    @DisplayName("any set of the storage's collections goes into one call")
+    void anyDescriptors_areAccepted() {
+        GroupedFileStorage storage = open(new GroupedFileConfig(baseDir));
 
-        CompletionException thrown = assertThrows(CompletionException.class,
-            () -> storage.loadKey(ALICE, PLAYER, ECONOMY).join());
+        // Every collection of a key shares its file, so no combination of them is special: each of
+        // these subsets is still one parse and one publication.
+        storage.batchKey(ALICE, batch -> batch
+            .put(PLAYER,  new TestPlayer(ALICE, "Alice", 100))
+            .put(HOMES,   new TestPlayer(ALICE, "Alice", 3))).join();
+        storage.batchKey(ALICE, batch -> batch
+            .put(ECONOMY, new TestPlayer(ALICE, "Alice", 7))).join();
 
-        String message = thrown.getCause().getMessage();
-        assertTrue(message.contains("player"),  () -> "names both key spaces: " + message);
-        assertTrue(message.contains("account"), () -> "names both key spaces: " + message);
-
-        // Within one key space it is fine again.
-        assertDoesNotThrow(() -> storage.loadKey(ALICE, PLAYER).join());
+        assertEquals(3, storage.loadKey(ALICE, PLAYER, ECONOMY, HOMES).join().collections().size());
+        assertEquals(7, storage.loadKey(ALICE, ECONOMY, PLAYER).join()
+            .get(ECONOMY).map(TestPlayer::getScore).orElse(-1));
+        assertEquals(3, storage.loadKey(ALICE, HOMES).join()
+            .get(HOMES).map(TestPlayer::getScore).orElse(-1));
+        assertEquals(1, keyFiles(), "one key, one file, whatever the call asked for");
     }
+
+    // ------------------------------------------------------------------
+    //  What it refuses
+    // ------------------------------------------------------------------
 
     @Test
     @DisplayName("a key of the wrong type is refused before any file is touched")
@@ -309,5 +314,13 @@ class GroupedFileKeyMajorTest {
             .keyExtractor(TestPlayer::getUuid)
             .codec(new JacksonJsonCodec<>(TestPlayer.class))
             .build();
+    }
+
+    private long keyFiles() {
+        try (Stream<Path> entries = Files.list(baseDir)) {
+            return entries.filter(Files::isRegularFile).count();
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
     }
 }
