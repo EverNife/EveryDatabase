@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
- * Reusable in-process fan-out a {@link ChangeFeedStorage} composes to manage its listeners. It is
+ * Reusable in-process broadcast a {@link ChangeFeedStorage} composes to manage its listeners. It is
  * <b>only the local dispatcher</b>; the <em>source</em> of events differs per backend (a Mongo
  * change-stream thread, a Postgres NOTIFY thread, or the writer's own thread for in-memory) and
  * calls {@link #emit(ChangeEvent)} to publish.

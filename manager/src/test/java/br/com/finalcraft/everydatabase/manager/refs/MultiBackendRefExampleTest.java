@@ -113,11 +113,11 @@ class MultiBackendRefExampleTest {
 
         // root -> MariaDB, clan -> PostgreSQL, wallet -> MongoDB, stats -> H2,
         // home -> LocalFile, session -> InMemory
-        fanOut(new RefRegistry(), mariadb, postgres, mongo, h2, localFile, inMemory);
+        resolveOneRootAcross(new RefRegistry(), mariadb, postgres, mongo, h2, localFile, inMemory);
     }
 
     @Test
-    void the_same_fan_out_resolves_across_embedded_backends() {
+    void the_same_wiring_resolves_across_embedded_backends() {
         // No Docker needed: exercise the heterogeneous keys on real embedded persistence -
         // H2 (SQL string keys via toString), LocalFile (sanitized record-key filenames),
         // InMemory (equals/hashCode keys).
@@ -127,13 +127,13 @@ class MultiBackendRefExampleTest {
         Storage mem = open(Storages.createInMemory());
 
         // profiles + clans + stats -> H2; home -> LocalFile; wallet + session -> InMemory
-        fanOut(new RefRegistry(), sql, sql, mem, sql, file, mem);
+        resolveOneRootAcross(new RefRegistry(), sql, sql, mem, sql, file, mem);
     }
 
-    /** The single-registry fan-out, shared by both tests above (only the backends differ). */
-    private void fanOut(RefRegistry refRegistry,
-                        Storage profilesStore, Storage clansStore, Storage walletsStore,
-                        Storage statsStore, Storage homesStore, Storage sessionsStore) {
+    /** The single-registry wiring, shared by both tests above (only the backends differ). */
+    private void resolveOneRootAcross(RefRegistry refRegistry,
+                                      Storage profilesStore, Storage clansStore, Storage walletsStore,
+                                      Storage statsStore, Storage homesStore, Storage sessionsStore) {
 
         // one manager per entity type, each backed by its given store, each with its own key type,
         // all registered in the same registry.

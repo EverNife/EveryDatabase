@@ -245,7 +245,7 @@ class MongoStorageTest extends AbstractTransactionalStorageTest {
      * A versioned {@code saveAll()} run inside a Mongo transaction must insert every entity at
      * version 0 and make them all visible after the transaction commits. This exercises the
      * per-entity optimistic-lock check-then-act on a shared transactional {@code ClientSession}
-     * (the chained, non-fan-out branch of {@link MongoRepository#saveAll}).
+     * (the chained, one-at-a-time branch of {@link MongoRepository#saveAll}).
      */
     @Test
     @Order(1030)
