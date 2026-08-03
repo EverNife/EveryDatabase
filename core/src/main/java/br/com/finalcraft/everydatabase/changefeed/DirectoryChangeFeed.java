@@ -30,7 +30,8 @@ import java.util.stream.Stream;
  * <p>Directories created later are picked up: a {@code CREATE} of a directory registers it too, so a
  * collection whose directory did not exist when the watch started is still watched. The reserved
  * {@code _schema} directory never is, and neither are the {@code .tmp} files the atomic write path
- * leaves behind mid-write.
+ * leaves behind mid-write. A sub-directory the operating system refuses to watch is reported and
+ * skipped rather than failing the feed; only the root failing leaves nothing to watch.
  *
  * <p><b>Platform note.</b> Linux and Windows have real kernel notification. On macOS the JDK falls
  * back to an internal polling watcher whose latency is measured in seconds - the feed still works,
@@ -145,6 +146,13 @@ public final class DirectoryChangeFeed implements Closeable {
                 StandardWatchEventKinds.ENTRY_DELETE);
         } catch (NotDirectoryException e) {
             // It was a directory a moment ago and is not one now; nothing to watch.
+        } catch (IOException e) {
+            // One directory the OS will not watch - a watch limit reached, a permission denied on a
+            // sub-tree - must not take the whole feed down: the rest keeps pushing, and what is left
+            // unwatched degrades to whatever polls it. Losing the root is a different matter, since
+            // there would be nothing left to watch at all.
+            if (directory.equals(root)) throw e;
+            report(e);
         }
     }
 

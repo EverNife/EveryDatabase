@@ -8,12 +8,35 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-03
+
+Three ways the file backends could stay quiet about something they could not see.
+
+### Fixed
+
+- **A grouped-file store holding key files in a sub-directory now fails to open.** Only the base
+  directory is read, so those files were invisible: the container format was inferred as if the
+  directory were empty, the collections reported nothing, and the first save wrote a second copy
+  beside data nobody could see - the same silent loss `_schema/layout.json` was added to prevent,
+  reached through a different door. The failure names the sub-directory and says what to do with it
+  (open a storage over that directory, or move the files up into the base).
+
+- **A file event from below the base directory is no longer published as a key of the base.** The
+  watch covers the tree, but only the base holds key files, so a file left in a sub-directory was
+  announced under a key that resolves to nothing - to every collection of the storage.
+
+- **A sub-directory the operating system refuses to watch no longer takes the whole change feed
+  down.** Only `NotDirectoryException` was tolerated; any other `IOException` (a watch limit
+  reached, a permission denied on one sub-tree) propagated out of `subscribe()` and left the storage
+  with no feed at all. It is now reported and skipped - the rest of the tree keeps pushing - while
+  the root still fails loudly, since losing it leaves nothing to watch.
+
 ## [1.2.0] - 2026-07-28
 
 Performance and layout work on the file backends. Both of them stop paying full-decode prices for
 questions that never needed the payload, both learn to describe their own on-disk format instead of
-guessing it, and both gain a push change feed. Grouped files additionally gain key spaces, directory
-fan-out, and a key-major read/write API that matches what the backend already is.
+guessing it, and both gain a push change feed. Grouped files additionally gain a key-major read/write
+API that matches what the backend already is.
 
 ### Added
 
@@ -40,30 +63,6 @@ fan-out, and a key-major read/write API that matches what the backend already is
   original matters for keys that are not plain UUID/numeric/lower-case strings. A row whose payload
   is unreadable still appears here, following the same rule as `count()`.
 
-- **Key spaces for grouped files** - `GroupedFileConfig.builder(base).keySpace(name, collections...)`
-  puts a group of collections in its own sub-directory, with its own listing and its own locks. One
-  base directory tends to accumulate collections keyed by unrelated things (player UUIDs, account
-  UUIDs, free-form cooldown ids); they share the directory but never share a meaningful key, so
-  every scan reads files that cannot hold what it is looking for, and an accidental key collision
-  puts two unrelated collections in one file behind one lock.
-
-  Collections are declared grouped by key space because the group is the point: co-location is what
-  a key space *means*, and listing the members together makes a typo look wrong instead of quietly
-  splitting one entity's file in two. Declaring none leaves the tree exactly as it was.
-
-- **Directory fan-out** - `GroupedFilePartitioner.hashFanout(levels)` / `prefix(chars)` / `flat()`,
-  passed to `keySpace(...)`. A key space shrinks the small directories and leaves the big one as big;
-  ten thousand files in one directory already slows listing down on NTFS. Point reads still resolve
-  the path rather than searching for it, so nothing on the read path gets worse.
-
-  The hash is SHA-1 over the key's UTF-8 bytes, which rules out `String.hashCode`: a file's location
-  is permanent, so the function that decided it has to be identical on every JVM, version and OS.
-
-- **`GroupedFileRelayout.relayout(config)`** - moves files to where a new configuration places them,
-  after declaring a key space or changing a partitioner. It moves *entries*, not files: a key file
-  holds collections that are staying put, so it is split rather than moved. Idempotent; prunes the
-  bucket directories it empties.
-
 - **`KeyMajorStorage`** (new package `keymajor`, with `KeyBundle` and `KeyBatch`) - reads or writes
   every collection of one key in a single operation. Implemented only by grouped files, where the
   collections already share one file behind one lock; every other backend stores them apart, so
@@ -77,7 +76,7 @@ fan-out, and a key-major read/write API that matches what the backend already is
   The write side is not merely cheaper: a crash between two of N saves leaves the key with half its
   collections updated, which one publication cannot do. That is **atomicity per key and nothing
   else** - grouped files still do not implement `TransactionalStorage`, and nothing here spans two
-  keys. Descriptors from different key spaces are refused rather than served with N reads.
+  keys.
 
 - **A change feed for local and grouped files** - both now implement `ChangeFeedStorage` over the
   operating system's file-watch notification, so `CacheSync.attach(storage)` takes the push path
@@ -135,10 +134,6 @@ fan-out, and a key-major read/write API that matches what the backend already is
   refuses to open at all, listing how many files of each it found - that is the fingerprint of a
   mismatch that already happened, and only the operator can say which set to keep. An unreadable
   layout fails the open rather than falling back to the codec's guess.
-
-  Grouped files record collection placement and fan-out there too, so a configuration that
-  disagrees with the record fails to open: where a file lives is a file operation, not a config
-  change. `GroupedFileRelayout` is how you make the move.
 
 - **Local and grouped files report a version that moves**, so `PollingCacheSync` detects remote
   *updates* over them and not only deletes. They used to report `0` for every existing key, which

@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-1.2.0-informational)
+![Version](https://img.shields.io/badge/version-1.2.1-informational)
 
 </div>
 
@@ -87,10 +87,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.1'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.2.0'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.2.1'
 }
 ```
 
@@ -98,13 +98,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.1'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.2.0') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.2.1') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -124,7 +124,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.2.0</version>
+  <version>1.2.1</version>
 </dependency>
 ```
 
@@ -343,37 +343,14 @@ grouped.init().join();
 ```
 Grouped files invert the local-file layout: one file **per key**, holding every collection that shares that key — ideal for "everything about one player in one file". The container format (JSON or YAML) follows the descriptor's codec, and all collections under one base directory must agree on it. That choice is recorded in `_schema/layout.json`, so reopening a YAML directory with a JSON codec **fails** instead of reporting an empty collection and writing a parallel set of files beside the ones holding the data.
 
-**Key spaces.** One base directory tends to accumulate collections keyed by unrelated things — player UUIDs, account UUIDs, free-form cooldown ids. They share the directory but never share a meaningful key, so every scan reads files that can't hold what it's looking for, and an accidental key collision puts two unrelated collections in one file behind one lock. Give each group its own sub-directory:
+**One directory is one group of keys.** Every key file lives directly under the base directory, and a scan reads all of them — so collections keyed by unrelated things (player UUIDs, account ids, free-form cooldown names) are better off apart: they never share a meaningful key, an accidental collision would put them in one file behind one lock, and each pays for the other's files on every scan. Splitting them is a second storage over a second directory:
 
 ```java
-GroupedFileConfig config = GroupedFileConfig.builder(Paths.get("playerdata"))
-    .keySpace("player",  "playerdata", "player_stats")
-    .keySpace("account", "accounts")
-    .build();                                  // -> playerdata/player/<uuid>.yml, playerdata/account/<uuid>.yml
-
-GroupedFileStorage grouped = Storages.createGroupedFile(config);
+Storage players  = Storages.createGroupedFile(new GroupedFileConfig(base.resolve("player")));
+Storage accounts = Storages.createGroupedFile(new GroupedFileConfig(base.resolve("account")));
 ```
 
-Collections are declared **grouped by key space** because the group is the point: co-location is what a key space *means*, and listing the members together makes a typo look wrong instead of silently splitting one entity's file in two. Collections you don't name keep living directly under the base directory, so the tree is byte-for-byte unchanged for anyone who declares nothing.
-
-**Fan-out.** A key space shrinks the small directories and leaves the big one exactly as big — and ten thousand files in one directory already slows listing down on NTFS. Give a large key space a partitioner and its files spread over sub-directories:
-
-```java
-GroupedFileConfig.builder(base)
-    .keySpace("player", GroupedFilePartitioner.hashFanout(2), "playerdata")
-    .build();                                  // -> base/player/10/c5/<uuid>.yml
-```
-
-`flat()` (the default), `hashFanout(levels)` — SHA-1 of the key, two hex digits per level, so the spread is identical on every JVM and OS — and `prefix(chars)` for a tree you can navigate by eye. Point reads never scan: the path is computed, not searched.
-
-Placement and fan-out are recorded in `_schema/layout.json` too, and opening a storage that disagrees with it fails — where a file lives is a file operation, not a config change. Do it explicitly, once, before opening:
-
-```java
-GroupedFileRelayout.relayout(config);          // lifts the moved collections into their key space
-Storage storage = Storages.createGroupedFile(config);
-```
-
-It moves *entries*, not files: a key file holding several collections is split, and only the collections that moved leave it. It handles a changed partitioner the same way, and prunes the bucket directories it empties. Running it twice does nothing the second time.
+Each gets its own directory, listing, locks and layout file. A base directory that holds key files in a sub-directory **fails to open**: those files are not read here, so adopting the directory as if they were not there would report those collections empty and start writing a second copy beside them.
 
 **Reading and writing a whole key at once.** Because every collection of one key already lives in one file, grouped files implement the `KeyMajorStorage` capability — check for it with `instanceof` and fall back to N calls on backends that store collections apart:
 
@@ -391,7 +368,7 @@ if (storage instanceof KeyMajorStorage kms) {
 }
 ```
 
-Beyond the saved I/O, the batch is the only version that is **atomic**: N separate saves can be interrupted between two of them and leave the key half-updated. That atomicity is **per key and nothing more** — grouped files still do not implement `TransactionalStorage`, and nothing here spans two keys. All descriptors must share a key space; ones that don't have no file in common, so the call is refused rather than quietly doing N reads.
+Beyond the saved I/O, the batch is the only version that is **atomic**: N separate saves can be interrupted between two of them and leave the key half-updated. That atomicity is **per key and nothing more** — grouped files still do not implement `TransactionalStorage`, and nothing here spans two keys.
 </details>
 
 <details>
@@ -539,7 +516,7 @@ List<Player> loaded = repo.findMany(wanted).join();
 
 Contrast with `scanAll`, which decodes every row so it can *report* the ones that fail — what a maintenance sweep needs. `keys()` never decodes, so a row whose payload is unreadable still appears (same rule as `count()`). The keys are **storage keys**, in `ScanRow.key()`'s form: on the file backends a key that had to be sanitised into a file name is reported sanitised and won't round-trip to `find` — use `scanAll` when the exact original matters for keys that aren't plain UUID/numeric/lower-case strings.
 
-> **GroupedFile is the one backend where this is not free.** A key file aggregates every collection sharing the key, so a key whose file exists without *this* collection is not a key of this collection — there is no way to answer from the directory alone. It reads every key file's bytes and runs a streaming field probe over them: no tree is built and no entity is decoded, but every file is opened. And on **both** file backends the page is cut from a freshly built, fully sorted list of names, so each page costs a whole sweep — paging through everything is O(N²/limit), not O(N). So `keys()` is a poor fit for a hot loop over a large key space there.
+> **GroupedFile is the one backend where this is not free.** A key file aggregates every collection sharing the key, so a key whose file exists without *this* collection is not a key of this collection — there is no way to answer from the directory alone. It reads every key file's bytes and runs a streaming field probe over them: no tree is built and no entity is decoded, but every file is opened. And on **both** file backends the page is cut from a freshly built, fully sorted list of names, so each page costs a whole sweep — paging through everything is O(N²/limit), not O(N). So `keys()` is a poor fit for a hot loop over a large directory there.
 
 ### A count is never an estimate
 
@@ -889,8 +866,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.2.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.2.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.1'
 ```
 
 ```java
@@ -975,9 +952,9 @@ When several instances share one backend, a write on one leaves the others' cach
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.2.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.2.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.2.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.2.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.2.1'
 ```
 
 ```java
