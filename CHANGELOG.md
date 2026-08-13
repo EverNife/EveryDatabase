@@ -8,6 +8,35 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-12
+
+The manager registry learns to survive a live reload. A `RefRegistry` can now stay the same object
+for the life of a process while a reload swaps only its *content*, manager by manager - so a `Ref`
+alive from before the reload (in an entity field, a GUI, a static) resolves the new generation on
+its next access, with no callback machinery and no window in which the type is unresolvable.
+
+### Added
+
+- **`RefRegistry.replace(type, resolver)`** - the atomic hot-swap primitive: installs a resolver
+  over whatever is registered and returns the replaced one (`null` if none) so the caller can tear
+  it down. At no instant is the type without a resolver - a concurrent `Ref.resolve()` sees the old
+  manager or the new one, never the gap the unregister-then-register dance has. `register` keeps
+  refusing an accidental duplicate; its message now teaches `replace` as the deliberate way out.
+
+- **`RefRegistry.managerReplacing(descriptor, storage, options|policy, retired)`** - as
+  `manager(...)`, but registering with replacement semantics. The replaced resolver is handed to
+  the `retired` consumer, which owns its teardown in the order that makes live refs re-resolve:
+  **flush pending writes → `clearCache()` → close the storage if that generation owned it**. The
+  `clearCache()` is the step that cannot be skipped - it marks every cell evicted, which is what
+  drops the memo of every live `Ref` pointing at the retired manager. A protected
+  `CachingManager` constructor with the same semantics exists for domain-named subclasses.
+
+### Notes
+
+- A live `Ref` that crossed a swap keeps the *freshness policy* it memoized from the retired
+  manager (the data comes from the new one). A per-reference `@RefPolicy`/`withPolicy` override is
+  unaffected - it always wins; only the manager-default policy is memoized this way.
+
 ## [1.2.1] - 2026-08-03
 
 Three ways the file backends could stay quiet about something they could not see.

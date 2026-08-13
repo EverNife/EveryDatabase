@@ -2,7 +2,7 @@
 # Project version - single source of truth. Consumed by the root build.gradle
 # (every module's `version`), stamped into the READMEs by `stampDocsVersions`, and
 # checked by `verifyDocsVersions` (wired into `check`).
-everydatabase = "1.2.1"
+everydatabase = "1.3.0"
 
 # Build-only annotation processor (FinalCraft fork): rides JDK 25's javac, so production compiles on the
 # single Java 25 toolchain and still emits Java 8 bytecode - no separate JDK 17 compiler pin needed.

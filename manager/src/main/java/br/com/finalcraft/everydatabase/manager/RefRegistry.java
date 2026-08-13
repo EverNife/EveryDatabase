@@ -9,6 +9,7 @@ import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * A <b>per-context registry of references</b>: it maps each entity type to its
@@ -91,7 +92,8 @@ public final class RefRegistry {
      * {@code type} in this registry, this throws instead of silently overwriting it - two managers
      * for the same type would collide last-writer-wins, a bug discoverable only at runtime, which is
      * exactly what the no-global-registry design exists to prevent. Re-registering the very same
-     * resolver instance is a harmless no-op; to intentionally replace, {@link #unregister} first.
+     * resolver instance is a harmless no-op; a deliberate substitution goes through
+     * {@link #replace(Class, RefResolver)}.
      *
      * @throws IllegalStateException if a different resolver is already registered for {@code type}
      */
@@ -101,9 +103,28 @@ public final class RefRegistry {
             throw new IllegalStateException(
                 "a resolver is already registered for " + type.getName() + " in this RefRegistry - "
                 + "two managers for the same type would collide (last-writer-wins). Use a separate "
-                + "RefRegistry per context, or unregister(" + type.getSimpleName()
-                + ".class) before registering a replacement.");
+                + "RefRegistry per context, or replace(" + type.getSimpleName()
+                + ".class, resolver) for a deliberate hot-swap.");
         }
+    }
+
+    /**
+     * Atomically installs {@code resolver} for {@code type}, <b>replacing</b> any resolver already
+     * registered - the hot-swap primitive a live reload needs: at no instant is the type
+     * unresolvable, so a concurrent {@link Ref#resolve()} sees the old resolver or the new one,
+     * never a gap (the unregister-then-register dance has one, and {@code Ref.resolve()} fails in
+     * it). Returns the resolver that was replaced ({@code null} if none) so the caller can tear it
+     * down - flush pending writes, then {@code clearCache()} (which is what makes live {@code Ref}s
+     * re-resolve against the replacement), then close its storage if this generation owns it.
+     *
+     * <p>Accidental duplicates should keep using {@link #register}, which refuses to overwrite;
+     * replacing is the deliberate gesture of whoever orchestrates a reload. The cast is safe for
+     * {@code V} ({@link #resolver(Class)} documents why); the key type is the caller's discipline,
+     * as everywhere else in this registry.
+     */
+    @SuppressWarnings("unchecked")
+    public <K, V> RefResolver<K, V> replace(Class<V> type, RefResolver<K, V> resolver) {
+        return (RefResolver<K, V>) resolvers.put(type, resolver);
     }
 
     /** Removes the resolver for {@code type}, if any. */
@@ -166,6 +187,27 @@ public final class RefRegistry {
     /** {@link #manager(EntityDescriptor, Storage, CacheOptions)} with an unbounded cache. */
     public <K, V> CachingManager<K, V> manager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy) {
         return manager(descriptor, storage, CacheOptions.of(policy));
+    }
+
+    /**
+     * As {@link #manager(EntityDescriptor, Storage, CacheOptions)}, but <b>replacing</b> any
+     * resolver already registered for the entity type ({@link #replace(Class, RefResolver)}) - the
+     * reload path. The replaced resolver is handed to {@code retired}, which owns its teardown:
+     * typically flush pending writes, then {@code clearCache()} (so live {@link Ref}s re-resolve
+     * against the new manager), then close its storage if that generation owned it. When nothing
+     * was registered yet, {@code retired} is not invoked.
+     */
+    public <K, V> CachingManager<K, V> managerReplacing(EntityDescriptor<K, V> descriptor, Storage storage,
+                                                        CacheOptions options,
+                                                        Consumer<? super RefResolver<K, V>> retired) {
+        return new CachingManager<>(descriptor, storage, options, this, retired);
+    }
+
+    /** {@link #managerReplacing(EntityDescriptor, Storage, CacheOptions, Consumer)} with an unbounded cache. */
+    public <K, V> CachingManager<K, V> managerReplacing(EntityDescriptor<K, V> descriptor, Storage storage,
+                                                        CachePolicy policy,
+                                                        Consumer<? super RefResolver<K, V>> retired) {
+        return managerReplacing(descriptor, storage, CacheOptions.of(policy), retired);
     }
 
     /**

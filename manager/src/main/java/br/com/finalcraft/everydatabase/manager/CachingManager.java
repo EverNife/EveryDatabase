@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -111,6 +112,42 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
 
     /** Creates a manager with the given options and registers it in {@code registry}. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options, RefRegistry registry) {
+        this(descriptor, storage, options);
+        registry.register(type, this);
+    }
+
+    /** Convenience: unbounded cache with the given default policy. */
+    public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy, RefRegistry registry) {
+        this(descriptor, storage, CacheOptions.of(policy), registry);
+    }
+
+    /**
+     * Creates a manager with the given options and registers it in {@code registry} with
+     * <b>replacement</b> semantics ({@link RefRegistry#replace}): any resolver already registered
+     * for the entity type is atomically swapped out and handed to {@code retired}, which owns its
+     * teardown - typically flush pending writes, then {@code clearCache()} (which is what makes
+     * live {@link Ref}s re-resolve against this manager), then close its storage if that
+     * generation owned it. At no instant is the type unresolvable: a concurrent resolve sees the
+     * previous manager or this one, never a gap.
+     *
+     * <p>This is the reload path - the plain constructors keep refusing an accidental duplicate.
+     * When nothing was registered yet, {@code retired} is not invoked (so it never sees
+     * {@code null}). Prefer {@link RefRegistry#managerReplacing}; subclasses call this
+     * {@code super(...)} to take part in a reload under their domain-named type.
+     */
+    protected CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options,
+                             RefRegistry registry, Consumer<? super RefResolver<K, V>> retired) {
+        this(descriptor, storage, options);
+        Objects.requireNonNull(retired, "retired consumer can't be null - it receives the replaced"
+                + " resolver, whose teardown (flush, clearCache, close) the caller owns");
+        RefResolver<K, V> previous = registry.replace(type, this);
+        if (previous != null) {
+            retired.accept(previous);
+        }
+    }
+
+    /** Field wiring shared by every constructor; registration is each public constructor's last step. */
+    private CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options) {
         this.repository = storage.repository(descriptor);
         this.storage    = storage;
         this.type       = descriptor.type();
@@ -122,12 +159,6 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         //dirty cells are pinned against LRU eviction: evicting one would silently drop the
         //unsaved write-back changes before the next flushDirty() could persist them
         this.store      = new LruCacheStore<>(options.maxSize(), this::isDirty);
-        registry.register(type, this);
-    }
-
-    /** Convenience: unbounded cache with the given default policy. */
-    public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy, RefRegistry registry) {
-        this(descriptor, storage, CacheOptions.of(policy), registry);
     }
 
     // ------------------------------------------------------------------
