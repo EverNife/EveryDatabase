@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.changefeed;
 
+import br.com.finalcraft.everydatabase.util.DirectoryListing;
+
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.ClosedWatchServiceException;
@@ -13,7 +15,6 @@ import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
-import java.util.stream.Stream;
 
 /**
  * The event <em>source</em> a file-backed {@link ChangeFeedStorage} composes, next to the
@@ -130,11 +131,9 @@ public final class DirectoryChangeFeed implements Closeable {
     private void registerTree(Path directory) throws IOException {
         if (!Files.isDirectory(directory)) return;
         register(directory);
-        try (Stream<Path> children = Files.list(directory)) {
-            for (Path child : (Iterable<Path>) children.filter(Files::isDirectory)::iterator) {
-                if (isReserved(child)) continue;
-                registerTree(child);
-            }
+        for (Path child : DirectoryListing.subdirectories(directory)) {
+            if (isReserved(child)) continue;
+            registerTree(child);
         }
     }
 

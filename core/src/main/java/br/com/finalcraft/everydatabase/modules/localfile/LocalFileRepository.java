@@ -5,6 +5,8 @@ import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.WriteMode;
+import br.com.finalcraft.everydatabase.util.AtomicFileWrite;
+import br.com.finalcraft.everydatabase.util.DirectoryListing;
 import br.com.finalcraft.everydatabase.util.FileKeyNames;
 import br.com.finalcraft.everydatabase.util.FileStamps;
 import br.com.finalcraft.everydatabase.codec.Codec;
@@ -34,7 +36,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -251,28 +252,16 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
      * (which logs a single {@code SAVE} event) and {@link #saveAll} (which logs one
      * {@code SAVE_BATCH} summary instead - logging here too would emit one event per entity).
      *
-     * <p>The write is crash-safe: data goes to a sibling {@code .tmp} file first and is then
-     * moved over the target with {@link StandardCopyOption#ATOMIC_MOVE}, so a crash mid-write
-     * never leaves a truncated entity file behind (at worst an orphan {@code .tmp}, which
-     * {@code all()}/{@code count()} ignore because they filter by codec extension).
+     * <p>The write is crash-safe ({@link AtomicFileWrite}), so it never leaves a truncated entity file
+     * behind - at worst an orphan {@code .tmp}, which the scans ignore because they filter by codec
+     * extension.
      */
     private void writeFile(K key, V entity) {
         ReadWriteLock lock = lockFor(key);
         lock.writeLock().lock();
         try {
-            byte[] data = descriptor.codec().encode(entity);
             Path target = keyToPath(key);
-            Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-            Files.write(tmp, data,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
-            try {
-                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                // Exotic file system without atomic rename: plain replace is the best we can do.
-                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            AtomicFileWrite.write(target, descriptor.codec().encode(entity));
             // Migrate-on-write: drop a pre-guard file for the same key so scans never
             // count the entity twice (reads prefer the new stem anyway).
             Path legacy = legacyKeyToPathIfReal(key);
@@ -350,16 +339,10 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Long> count() {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                if (!Files.exists(collectionDir)) return 0L;
-                String ext = "." + fileExtension();
                 // One file with the codec's extension is one row, decodable or not - the same set
                 // all() and scanAll() enumerate. Opening them to check would make counting cost a
                 // full read of the collection to answer a question the directory already answers.
-                try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                    return paths
-                        .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
-                        .count();
-                }
+                return (long) collectionFiles().size();
             } catch (IOException e) {
                 throw log.errored(StorageOp.COUNT, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to count entities", e));
@@ -371,16 +354,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Stream<V>> all() {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                if (!Files.exists(collectionDir)) return Stream.empty();
-
-                String ext = "." + fileExtension();
-                List<Path> files;
-                try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                    files = paths
-                        .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
-                        .collect(Collectors.toList());
-                }
-
+                List<Path> files = collectionFiles();
                 List<V> results = new ArrayList<>(files.size());
                 for (Path path : files) {
                     String fileName = path.getFileName().toString();
@@ -416,17 +390,9 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
         }
         return CompletableFuture.supplyAsync(() -> {
             try {
-                if (!Files.exists(collectionDir)) {
-                    return Slice.ofCursor(new ArrayList<ScanRow<V>>(), QueryOptions.none(), false, null);
-                }
                 String ext = "." + fileExtension();
-                List<Path> files;
-                try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                    files = paths
-                        .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
-                        .sorted(Comparator.comparing(p -> p.getFileName().toString()))
-                        .collect(Collectors.toList());
-                }
+                List<Path> files = new ArrayList<>(collectionFiles());
+                files.sort(Comparator.comparing(p -> p.getFileName().toString()));
                 List<ScanRow<V>> rows = new ArrayList<>(files.size());
                 for (Path path : files) {
                     String fileName = path.getFileName().toString();
@@ -460,16 +426,11 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
         if (limit < 1)      throw new IllegalArgumentException("limit must be >= 1: " + limit);
         return CompletableFuture.supplyAsync(() -> {
             try {
+                String ext = "." + fileExtension();
                 List<String> stems = new ArrayList<>();
-                if (Files.exists(collectionDir)) {
-                    String ext = "." + fileExtension();
-                    try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                        for (Path path : (Iterable<Path>) paths
-                                .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))::iterator) {
-                            String name = path.getFileName().toString();
-                            stems.add(name.substring(0, name.length() - ext.length()));
-                        }
-                    }
+                for (Path path : collectionFiles()) {
+                    String name = path.getFileName().toString();
+                    stems.add(name.substring(0, name.length() - ext.length()));
                 }
                 Collections.sort(stems);
                 return Slices.keyPageOfAll(stems, cursor, limit);
@@ -554,13 +515,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
 
     /** The entity files of this collection (depth 1, filtered by the codec's extension). */
     private List<Path> collectionFiles() throws IOException {
-        if (!Files.exists(collectionDir)) return Collections.emptyList();
-        String ext = "." + fileExtension();
-        try (Stream<Path> paths = Files.walk(collectionDir, 1)) {
-            return paths
-                .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
-                .collect(Collectors.toList());
-        }
+        return DirectoryListing.regularFilesEndingWith(collectionDir, "." + fileExtension());
     }
 
     /**

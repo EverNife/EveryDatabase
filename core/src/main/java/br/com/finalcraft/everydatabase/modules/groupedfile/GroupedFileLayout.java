@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.groupedfile;
 
+import br.com.finalcraft.everydatabase.util.AtomicFileWrite;
+import br.com.finalcraft.everydatabase.util.DirectoryListing;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -7,12 +9,8 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.util.stream.Stream;
 
 /**
  * The self-description of a grouped-file directory, persisted as {@code <base>/_schema/layout.json}.
@@ -141,16 +139,11 @@ final class GroupedFileLayout {
      * format is just as unreadable. The reserved {@code _schema/} is the storage's own bookkeeping.
      */
     private Path firstKeyFileBelowBase() {
-        if (!Files.isDirectory(baseDirectory)) return null;
-        try (Stream<Path> children = Files.list(baseDirectory)) {
-            for (Path child : (Iterable<Path>) children.filter(Files::isDirectory)::iterator) {
+        try {
+            for (Path child : DirectoryListing.subdirectories(baseDirectory)) {
                 if (GroupedFileStorage.SCHEMA_DIR.equals(String.valueOf(child.getFileName()))) continue;
-                try (Stream<Path> below = Files.walk(child)) {
-                    Path found = below.filter(Files::isRegularFile)
-                        .filter(GroupedFileLayout::hasContainerExtension)
-                        .findFirst().orElse(null);
-                    if (found != null) return found;
-                }
+                Path found = DirectoryListing.firstRegularFileBelow(child, GroupedFileLayout::hasContainerExtension);
+                if (found != null) return found;
             }
         } catch (IOException e) {
             throw new IllegalStateException(
@@ -203,18 +196,7 @@ final class GroupedFileLayout {
     private void writeLayout(Document doc) {
         Path file = layoutFile();
         try {
-            Files.createDirectories(file.getParent());
-            byte[] bytes = MAPPER.writeValueAsBytes(doc);
-            Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.write(tmp, bytes,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
-            try {
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
-            }
+            AtomicFileWrite.write(file, MAPPER.writeValueAsBytes(doc));
         } catch (IOException e) {
             throw new IllegalStateException(
                 "GroupedFileStorage: failed to write the layout file '" + file + "'. It records the "
@@ -239,8 +221,8 @@ final class GroupedFileLayout {
         if (!Files.isDirectory(baseDirectory)) return null;
         int json = 0;
         int yaml = 0;
-        try (Stream<Path> entries = Files.list(baseDirectory)) {
-            for (Path entry : (Iterable<Path>) entries.filter(Files::isRegularFile)::iterator) {
+        try {
+            for (Path entry : DirectoryListing.regularFiles(baseDirectory)) {
                 String name = entry.getFileName().toString().toLowerCase();
                 if      (name.endsWith(".json"))                          json++;
                 else if (name.endsWith(".yml") || name.endsWith(".yaml")) yaml++;

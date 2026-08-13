@@ -18,16 +18,14 @@ import br.com.finalcraft.everydatabase.schema.MigrationContext;
 import br.com.finalcraft.everydatabase.schema.SchemaAwareStorage;
 import br.com.finalcraft.everydatabase.schema.SchemaVersion;
 import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
+import br.com.finalcraft.everydatabase.util.AtomicFileWrite;
 import br.com.finalcraft.everydatabase.util.BackendIdentities;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.type.CollectionType;
 
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -403,22 +401,12 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage, Chan
     }
 
     /**
-     * Writes the migration ledger via a temp file + atomic move (same crash-safety the entity
-     * files get). A plain truncate-then-write could be interrupted mid-write, and a truncated
-     * ledger reads back as "nothing applied" - the next boot would re-run every migration over
-     * already-migrated data.
+     * Publishes the migration ledger whole ({@link AtomicFileWrite}). A plain truncate-then-write
+     * could be interrupted mid-write, and a truncated ledger reads back as "nothing applied" - the
+     * next boot would re-run every migration over already-migrated data.
      */
     private static void writeLedgerAtomically(Path target, byte[] bytes) throws IOException {
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-        Files.write(tmp, bytes,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-            StandardOpenOption.WRITE);
-        try {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-        }
+        AtomicFileWrite.write(target, bytes);
     }
 
     // ------------------------------------------------------------------

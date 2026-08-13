@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.groupedfile;
 
+import br.com.finalcraft.everydatabase.util.AtomicFileWrite;
+import br.com.finalcraft.everydatabase.util.DirectoryListing;
 import br.com.finalcraft.everydatabase.util.FileKeyNames;
 
 import com.fasterxml.jackson.core.JsonParser;
@@ -19,8 +21,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * Coordinator for the per-key aggregate files of one directory of a {@link GroupedFileStorage}.
@@ -146,14 +146,7 @@ final class KeyFileStore {
      * {@code layout.json}, which a deeper walk would happily read as a key file of a JSON store.
      */
     List<Path> keyFiles() throws IOException {
-        if (!Files.isDirectory(directory)) return Collections.emptyList();
-        String ext = format.extension();
-        try (Stream<Path> entries = Files.list(directory)) {
-            return entries
-                .filter(Files::isRegularFile)
-                .filter(p -> p.getFileName().toString().endsWith(ext))
-                .collect(Collectors.toList());
-        }
+        return DirectoryListing.regularFilesEndingWith(directory, format.extension());
     }
 
     // ------------------------------------------------------------------
@@ -338,26 +331,13 @@ final class KeyFileStore {
     }
 
     /**
-     * Crash-safe write: data goes to a sibling {@code .tmp} file first, then is moved over the target
-     * with {@link StandardCopyOption#ATOMIC_MOVE} (plain replace on exotic file systems without atomic
-     * rename). A crash mid-write never leaves a truncated key file - at worst an orphan {@code .tmp},
-     * which {@link #keyFiles()} ignores because it filters by extension.
+     * Publishes a whole key file through {@link AtomicFileWrite}, counting it. The orphan {@code .tmp}
+     * an interrupted write leaves behind is never mistaken for a key file - {@link #keyFiles()}
+     * filters by extension.
      */
     void writeAtomic(Path target, byte[] data) throws IOException {
-        // A write must still land after the directory was removed underneath a running storage.
-        Path parent = target.getParent();
-        if (parent != null) Files.createDirectories(parent);
         atomicWrites.incrementAndGet();
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-        Files.write(tmp, data,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-            StandardOpenOption.WRITE);
-        try {
-            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-        }
+        AtomicFileWrite.write(target, data);
     }
 
     /**

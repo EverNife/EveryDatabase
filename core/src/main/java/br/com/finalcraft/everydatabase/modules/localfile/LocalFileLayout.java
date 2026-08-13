@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.modules.localfile;
 
+import br.com.finalcraft.everydatabase.util.AtomicFileWrite;
+import br.com.finalcraft.everydatabase.util.DirectoryListing;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -7,15 +9,11 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.stream.Stream;
 
 /**
  * The self-description of a local-file store, persisted as {@code <base>/_schema_layout.json}.
@@ -139,18 +137,7 @@ final class LocalFileLayout {
     private void writeLayout(Document doc) {
         Path file = layoutFile();
         try {
-            Files.createDirectories(baseDirectory);
-            byte[] bytes = MAPPER.writeValueAsBytes(doc);
-            Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.write(tmp, bytes,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
-            try {
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
-            }
+            AtomicFileWrite.write(file, MAPPER.writeValueAsBytes(doc));
         } catch (IOException e) {
             throw new IllegalStateException(
                 "LocalFileStorage: failed to write the layout file '" + file + "'. It records the "
@@ -174,8 +161,8 @@ final class LocalFileLayout {
         Path directory = baseDirectory.resolve(collection);
         if (!Files.isDirectory(directory)) return null;
         Map<String, Integer> byExtension = new LinkedHashMap<>();
-        try (Stream<Path> entries = Files.list(directory)) {
-            for (Path entry : (Iterable<Path>) entries.filter(Files::isRegularFile)::iterator) {
+        try {
+            for (Path entry : DirectoryListing.regularFiles(directory)) {
                 String name = entry.getFileName().toString();
                 int dot = name.lastIndexOf('.');
                 if (dot <= 0) continue;

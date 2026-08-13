@@ -8,6 +8,30 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
+Two ways a scan and a write of the same directory could hurt each other. Neither is a corner case:
+every write publishes through a sibling `.tmp` it then renames away, so a scan running next to a
+write routinely walks entries that are disappearing.
+
+### Fixed
+
+- **A directory scan no longer escapes as a raw stream failure.** A directory stream reports a
+  mid-iteration failure as `UncheckedIOException`, and `Files.walk` adds a second source of them by
+  stat-ing every entry it hands out - so a `.tmp` vanishing between the directory read and the stat
+  raised one naming that entry. `UncheckedIOException` is not an `IOException`, so it slipped past
+  the `catch (IOException)` every scan is wrapped in and reached the caller instead of the backend's
+  own error. Listing now goes through `DirectoryListing`, which translates it back into the checked
+  failure those scans already handle. Affected every local-file scan (`count`, `all`, `scanAll`,
+  `keys`, `query`), the grouped-file key listing, both layout inferences and the change feed's
+  registration walk.
+
+- **A write no longer loses its rename to a concurrent reader on Windows.** Renaming over a file
+  another thread holds open fails there with `AccessDeniedException` - measured at roughly half of
+  the writes to a directory being scanned at the same time, and at none of them when nothing read
+  it. The blocking handle lives only as long as one read, so the rename is now retried for a few
+  milliseconds instead of being reported. POSIX never saw this and still takes the first attempt.
+  All six copies of the temp-file-plus-rename dance (both repositories, both migration ledgers,
+  both layout files) now share one `AtomicFileWrite`.
+
 ## [1.3.0] - 2026-08-12
 
 The manager registry learns to survive a live reload. A `RefRegistry` can now stay the same object
