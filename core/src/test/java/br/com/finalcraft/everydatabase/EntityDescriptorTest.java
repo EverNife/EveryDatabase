@@ -29,8 +29,8 @@ class EntityDescriptorTest {
 
         assertEquals(first.indexes().size(), second.indexes().size(),
             "both builds must produce the same index hints");
-        assertEquals(4, first.indexes().size(),
-            "AnnotatedTestPlayer declares 4 @Indexed fields");
+        assertEquals(5, first.indexes().size(),
+            "AnnotatedTestPlayer declares 5 @Indexed fields");
     }
 
     @Test

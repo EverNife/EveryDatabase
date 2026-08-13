@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Scans entity classes for {@link Indexed} annotations and produces the corresponding
@@ -66,6 +67,7 @@ final class IndexHintScanner {
             case DOUBLE:    return IndexHint.decimal(path);
             case BOOLEAN:   return IndexHint.bool(path);
             case TIMESTAMP: return IndexHint.timestamp(path);
+            case UUID:      return IndexHint.uuid(path);
             default: throw new IllegalStateException("Unknown FieldType: " + type);
         }
     }
@@ -86,13 +88,14 @@ final class IndexHintScanner {
          || javaType == double.class  || javaType == Double.class)     return IndexHint.FieldType.DOUBLE;
         if (javaType == boolean.class || javaType == Boolean.class)    return IndexHint.FieldType.BOOLEAN;
         if (javaType == Instant.class || javaType == LocalDateTime.class) return IndexHint.FieldType.TIMESTAMP;
+        if (javaType == UUID.class)                                    return IndexHint.FieldType.UUID;
 
         String location = field.getDeclaringClass().getSimpleName() + "." + field.getName();
         throw new IllegalArgumentException(
             "@Indexed on '" + location + "' (path=\"" + path + "\"): "
             + "cannot auto-detect IndexHint type for Java type '" + javaType.getName() + "'. "
             + "Supported types: String, int/Integer, long/Long, float/Float, double/Double, "
-            + "boolean/Boolean, Instant, LocalDateTime. "
+            + "boolean/Boolean, Instant, LocalDateTime, UUID. "
             + "For custom object types, specify @Indexed(type = String.class) or another "
             + "supported primitive wrapper, or declare the IndexHint manually on the "
             + "EntityDescriptor builder with .index(IndexHint.string(\"" + path + "\")).");

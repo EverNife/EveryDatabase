@@ -8,11 +8,51 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
-Two ways a scan and a write of the same directory could hurt each other. Neither is a corner case:
-every write publishes through a sibling `.tmp` it then renames away, so a scan running next to a
-write routinely walks entries that are disappearing.
+## [1.4.0] - 2026-08-13
+
+A UUID becomes something you can index, and query values stop meaning different things on different
+backends. The two are the same story: the reason a `UUID` could not be indexed is the reason a
+`UUID` handed to a query did not reach the value stored for it.
+
+### Added
+
+- **`IndexHint.FieldType.UUID`, with `IndexHint.uuid(path)` and `@Indexed` auto-detection on any
+  `java.util.UUID` field.** Until now the only indexable UUID was the entity's own key, which is
+  the primary key and needed no hint - so a *secondary* UUID (`ownerId`, `guildId`, and every
+  manager `Ref`, which serializes as its key) had no way to be declared at all. `@Indexed(type =
+  UUID.class)` is how a `Ref` field gets an index, the annotation naming the key's type rather than
+  the field's.
+
+  The value is carried as the canonical 36-character lowercase string. That is a deliberate choice
+  and the whole reason ordering agrees across backends: `java.util.UUID.compareTo` compares the two
+  longs *signed*, a different order from byte-wise, while lexicographic order over lowercase hex
+  *is* byte-wise order - which is what PostgreSQL's native `uuid` compares. Columns are `CHAR(36)`
+  on MySQL/MariaDB, the native `UUID` on PostgreSQL (16 bytes, bound as a real `java.util.UUID`),
+  and `VARCHAR(36)` on H2 - not H2's native `UUID`, which would sort by the signed longs. Mongo,
+  both file backends and InMemory hold the canonical string.
+
+  Either spelling works at the call site: `Query.eq("guildId", uuid)` and
+  `Query.eq("guildId", uuid.toString())` match the same rows, upper case included.
 
 ### Fixed
+
+- **A query value is now coerced to the indexed field's type on every backend, not only the scan
+  ones.** `IndexValueExtractor.normalizeQueryValue` was called by InMemory, LocalFile and
+  GroupedFile alone, on the reasoning that JDBC and BSON coerce natively - true of numbers, false of
+  everything else. The visible cost was on MongoDB, where a value whose BSON encoding differs from
+  the stored form matched **nothing, silently**: a `java.util.UUID` encodes as binary subtype 4 and
+  never meets a stored string, and `Query.eq("name", 42)` against a STRING index never met `"42"`.
+  SQL and Mongo now normalize as well, so one `Query` means the same thing on all seven backends.
+
+- **A range bound that cannot be converted no longer widens the range.** SQL decided which ends were
+  open by looking at the *converted* bound, so a bound that converted to `null` - an unparseable
+  timestamp, now also a value that does not spell a UUID - was read as "no bound" and quietly
+  returned more rows than asked. The open ends are now read off the condition itself; a bound that
+  fails conversion binds as `NULL` and matches nothing, which is what every other backend does.
+
+Also in this release, two ways a scan and a write of the same directory could hurt each other.
+Neither is a corner case: every write publishes through a sibling `.tmp` it then renames away, so a
+scan running next to a write routinely walks entries that are disappearing.
 
 - **A directory scan no longer escapes as a raw stream failure.** A directory stream reports a
   mid-iteration failure as `UncheckedIOException`, and `Files.walk` adds a second source of them by

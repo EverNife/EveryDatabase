@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-1.3.0-informational)
+![Version](https://img.shields.io/badge/version-1.4.0-informational)
 
 </div>
 
@@ -87,10 +87,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.3.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.3.0'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.4.0'
 }
 ```
 
@@ -98,13 +98,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.3.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.3.0') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.4.0') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -124,7 +124,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.3.0</version>
+  <version>1.4.0</version>
 </dependency>
 ```
 
@@ -437,6 +437,9 @@ public class PlayerData {
     @Indexed(order = IndexHint.Order.DESCENDING)
     private int score;
 
+    @Indexed
+    private UUID guildId;                                    // a secondary UUID
+
     @Indexed(path = "location.world", type = String.class)   // nested dot-path
     private Location location;
 
@@ -454,6 +457,7 @@ EntityDescriptor<UUID, PlayerData> PLAYERS = EntityDescriptor.builder(UUID.class
         .index(IndexHint.string("name"))
         .index(IndexHint.integer("score"))
         .index(IndexHint.timestamp("createdAt"))
+        .index(IndexHint.uuid("guildId"))
         .build();
 ```
 
@@ -470,12 +474,18 @@ repo.query(Query.in("name", "Alice", "Bob")).join();
 repo.query(Query.range("createdAt",
         Instant.now().minus(7, ChronoUnit.DAYS), Instant.now())).join();
 
+// A UUID index takes the UUID or its text, whichever the call site holds
+repo.query(Query.eq("guildId", guild.getId())).join();
+repo.query(Query.eq("guildId", "6b1e5f2c-...")).join();
+
 // AND of multiple conditions
 repo.query(Query.eq("location.world", "world")
         .and(Query.range("score", 1000, null))).join();       // world == "world" AND score >= 1000
 ```
 
-**Index type factories:** `IndexHint.string` · `integer` · `bigInt` · `decimal` · `bool` · `timestamp`.
+**Index type factories:** `IndexHint.string` · `integer` · `bigInt` · `decimal` · `bool` · `timestamp` · `uuid`.
+
+> A query value is coerced to the indexed field's type before it reaches the backend, so one `Query` means the same thing everywhere: a `Long` matches an `int` field, an `Instant` matches a timestamp one, and a `java.util.UUID` matches a UUID field just as its text does. A value that can't be coerced — a fractional number against an `int`, a word that doesn't spell a UUID — matches nothing rather than raising an error.
 
 > Querying an undeclared field throws `IllegalArgumentException` on **every** backend — including local files, which validate the declaration even though they answer with a full scan (`O(n)`, no real index). Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
 
@@ -866,8 +876,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.3.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.3.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.4.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
 ```
 
 ```java
@@ -952,9 +962,9 @@ When several instances share one backend, a write on one leaves the others' cach
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.3.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.3.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.3.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.4.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.4.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
 ```
 
 ```java

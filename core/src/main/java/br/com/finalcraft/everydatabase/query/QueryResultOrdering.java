@@ -146,6 +146,10 @@ public final class QueryResultOrdering {
             case DOUBLE:  return value instanceof Number ? ((Number) value).doubleValue(): Double.valueOf(value.toString());
             case BOOLEAN: return value instanceof Boolean ? value : Boolean.valueOf(value.toString());
             case TIMESTAMP: return IndexValueExtractor.toEpochMilli(value);
+            case UUID: {
+                String canonical = IndexValueExtractor.canonicalUuid(value);
+                return canonical != null ? canonical : value.toString();
+            }
             case STRING:
             default:      return value.toString();
         }

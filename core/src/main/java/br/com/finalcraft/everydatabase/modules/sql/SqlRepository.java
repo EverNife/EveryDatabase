@@ -136,6 +136,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             case DOUBLE:    return "DOUBLE";
             case BOOLEAN:   return "BOOLEAN";
             case TIMESTAMP: return "DATETIME(3)";   // MySQL/MariaDB native; override in dialects
+            case UUID:      return "CHAR(36)";      // the canonical form, fixed width so it indexes whole
             default: throw new IllegalArgumentException("Unknown FieldType: " + hint.fieldType());
         }
     }
@@ -197,6 +198,17 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 : null;
         }
         return value;
+    }
+
+    /**
+     * Binds a <b>query parameter</b>: coerces it to the hint's Java type first, then to the
+     * dialect's JDBC type. The extra step is what a caller-supplied value needs and a stored one
+     * does not - a call site may hold a {@code Long} for an INT index or a {@link java.util.UUID}
+     * for a UUID one, while the write path's values come straight out of
+     * {@link IndexValueExtractor#extract} already typed.
+     */
+    private Object toJdbcParam(Object value, IndexHint hint) {
+        return toJdbcValue(IndexValueExtractor.normalizeQueryValue(value, hint), hint);
     }
 
     // ------------------------------------------------------------------
@@ -1447,27 +1459,30 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         switch (c.op()) {
             case EQ:
                 where.append(column).append(" = ?");
-                params.add(toJdbcValue(c.value(), hint));
+                params.add(toJdbcParam(c.value(), hint));
                 break;
             case IN:
                 where.append(column).append(" IN (")
                     .append(repeat("?", c.inValues().size(), ","))
                     .append(')');
-                for (Object v : c.inValues()) params.add(toJdbcValue(v, hint));
+                for (Object v : c.inValues()) params.add(toJdbcParam(v, hint));
                 break;
             case RANGE:
-                Object from = toJdbcValue(c.rangeFrom(), hint);
-                Object to   = toJdbcValue(c.rangeTo(),   hint);
-                if (from != null && to != null) {
+                // Which ends are open is read off the condition, not off the converted bound: a
+                // bound that converts to NULL is one nothing can match, and treating it as an open
+                // end would silently widen the range instead.
+                boolean hasFrom = c.rangeFrom() != null;
+                boolean hasTo   = c.rangeTo()   != null;
+                if (hasFrom && hasTo) {
                     where.append(column).append(" BETWEEN ? AND ?");
-                    params.add(from);
-                    params.add(to);
-                } else if (from != null) {
+                    params.add(toJdbcParam(c.rangeFrom(), hint));
+                    params.add(toJdbcParam(c.rangeTo(),   hint));
+                } else if (hasFrom) {
                     where.append(column).append(" >= ?");
-                    params.add(from);
-                } else if (to != null) {
+                    params.add(toJdbcParam(c.rangeFrom(), hint));
+                } else if (hasTo) {
                     where.append(column).append(" <= ?");
-                    params.add(to);
+                    params.add(toJdbcParam(c.rangeTo(), hint));
                 } else {
                     where.append(column).append(" IS NOT NULL");
                 }

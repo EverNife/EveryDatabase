@@ -28,6 +28,7 @@ public class TestPlayer {
     private String  world;      // additional indexable field (e.g. "world", "world_nether")
     private boolean active;     // additional indexable field (BOOLEAN typed)
     private long    createdAt;  // epoch millis - used by TIMESTAMP index tests
+    private UUID    guildId;    // a secondary UUID - used by UUID index tests
 
     @JsonIgnore
     @EqualsAndHashCode.Exclude

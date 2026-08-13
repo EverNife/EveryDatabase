@@ -51,6 +51,10 @@ public abstract class AbstractVersionedStorageTest {
     public static final UUID UUID_BETA  = UUID.fromString("bb000000-0000-0000-0000-000000000002");
     public static final UUID UUID_CAROL = UUID.fromString("cc000000-0000-0000-0000-000000000003");
 
+    /** Guilds the annotated players belong to - the UUID-typed secondary index. */
+    public static final UUID GUILD_DIAMOND = UUID.fromString("dd000000-0000-0000-0000-00000000000a");
+    public static final UUID GUILD_GOLD    = UUID.fromString("dd000000-0000-0000-0000-00000000000b");
+
     // ------------------------------------------------------------------
     //  Versioned descriptor - activates optimistic locking
     //  @Indexed on VersionedTestPlayer.name and .score are picked up automatically
@@ -137,7 +141,7 @@ public abstract class AbstractVersionedStorageTest {
 
     AnnotatedTestPlayer aAlice() {
         return new AnnotatedTestPlayer(
-            UUID_ALPHA, "Alice", 100,
+            UUID_ALPHA, "Alice", 100, GUILD_DIAMOND,
             new AnnotatedTestPlayer.Rank("Diamond", 3),
             new AnnotatedTestPlayer.Location("world", 10.0, 64.0, -5.0),
             Arrays.asList(
@@ -149,7 +153,7 @@ public abstract class AbstractVersionedStorageTest {
 
     AnnotatedTestPlayer aBob() {
         return new AnnotatedTestPlayer(
-            UUID_BETA, "Bob", 50,
+            UUID_BETA, "Bob", 50, GUILD_GOLD,
             new AnnotatedTestPlayer.Rank("Gold", 1),
             new AnnotatedTestPlayer.Location("world_nether", 0.0, 64.0, 0.0),
             Arrays.asList(new AnnotatedTestPlayer.Badge("Newcomer", 500_000L))
@@ -158,7 +162,7 @@ public abstract class AbstractVersionedStorageTest {
 
     AnnotatedTestPlayer aCarol() {
         return new AnnotatedTestPlayer(
-            UUID_CAROL, "Carol", 200,
+            UUID_CAROL, "Carol", 200, GUILD_DIAMOND,
             new AnnotatedTestPlayer.Rank("Diamond", 5),
             new AnnotatedTestPlayer.Location("world", 99.0, 70.0, 99.0),
             Arrays.asList()
@@ -504,17 +508,18 @@ public abstract class AbstractVersionedStorageTest {
 
     @Test
     @Order(110)
-    @DisplayName("[@Indexed] AnnotatedTestPlayer: auto-detects all 4 @Indexed fields")
+    @DisplayName("[@Indexed] AnnotatedTestPlayer: auto-detects all 5 @Indexed fields")
     void annotatedTestPlayer_allIndexesAutoDetected() {
         List<IndexHint> indexes = ANNOTATED_DESCRIPTOR.indexes();
-        assertEquals(4, indexes.size(),
-            "Expected 4 indexes: name, score, rank.title, location.world");
+        assertEquals(5, indexes.size(),
+            "Expected 5 indexes: name, score, guildId, rank.title, location.world");
 
         List<String> paths = new java.util.ArrayList<>();
         for (IndexHint h : indexes) paths.add(h.fieldPath());
 
         assertTrue(paths.contains("name"),           "Index on 'name' missing");
         assertTrue(paths.contains("score"),          "Index on 'score' missing");
+        assertTrue(paths.contains("guildId"),        "Index on 'guildId' missing");
         assertTrue(paths.contains("rank.title"),     "Index on 'rank.title' missing");
         assertTrue(paths.contains("location.world"), "Index on 'location.world' missing");
     }
@@ -527,6 +532,16 @@ public abstract class AbstractVersionedStorageTest {
             .filter(h -> h.fieldPath().equals("rank.title"))
             .findFirst().orElseThrow(AssertionError::new);
         assertEquals(IndexHint.FieldType.STRING, hint.fieldType());
+    }
+
+    @Test
+    @Order(112)
+    @DisplayName("[@Indexed] AnnotatedTestPlayer: 'guildId' auto-detects to FieldType UUID")
+    void annotatedTestPlayer_guildIdIndex_isUuid() {
+        IndexHint hint = ANNOTATED_DESCRIPTOR.indexes().stream()
+            .filter(h -> h.fieldPath().equals("guildId"))
+            .findFirst().orElseThrow(AssertionError::new);
+        assertEquals(IndexHint.FieldType.UUID, hint.fieldType());
     }
 
     @Test
@@ -631,12 +646,34 @@ public abstract class AbstractVersionedStorageTest {
     }
 
     @Test
+    @Order(145)
+    @DisplayName("[@Indexed] findBy 'guildId' matches by UUID and by its text alike")
+    void annotatedRepo_findByGuildId_acceptsUuidAndText() {
+        aRepo.save(aAlice()).join(); // Diamond guild
+        aRepo.save(aBob()).join();   // Gold guild
+        aRepo.save(aCarol()).join(); // Diamond guild
+
+        List<AnnotatedTestPlayer> byUuid = aRepo.findBy("guildId", GUILD_DIAMOND).join();
+        assertEquals(2, byUuid.size(), "Alice and Carol share the Diamond guild");
+        assertTrue(byUuid.stream().anyMatch(p -> p.getUuid().equals(UUID_ALPHA)));
+        assertTrue(byUuid.stream().anyMatch(p -> p.getUuid().equals(UUID_CAROL)));
+
+        // The same query spelled as text - and in upper case, which canonicalisation folds.
+        List<AnnotatedTestPlayer> byText =
+            aRepo.findBy("guildId", GUILD_DIAMOND.toString().toUpperCase()).join();
+        assertEquals(2, byText.size(), "The text spelling must match the same rows the UUID does");
+    }
+
+    @Test
     @Order(160)
-    @DisplayName("[@Indexed] unsupported field type (UUID) without type= throws at build()")
+    @DisplayName("[@Indexed] unsupported field type without type= throws at build()")
     void build_unsupportedFieldType_throwsIllegalArgument() {
+        class Coordinates {
+            @SuppressWarnings("unused") private double x;
+        }
         class BadEntity {
             @Indexed
-            private UUID id = UUID.randomUUID();
+            private Coordinates spawn = new Coordinates();
         }
 
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
@@ -648,7 +685,7 @@ public abstract class AbstractVersionedStorageTest {
         );
         assertTrue(ex.getMessage().contains("cannot auto-detect IndexHint type"),
             "Error must mention the auto-detection failure");
-        assertTrue(ex.getMessage().contains("UUID"),
+        assertTrue(ex.getMessage().contains("Coordinates"),
             "Error must mention the unsupported type");
     }
 

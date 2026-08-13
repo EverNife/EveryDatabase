@@ -30,6 +30,7 @@ import java.util.regex.Pattern;
  * IndexHint.bigInt ("timestamp")      // BIGINT (Java long)
  * IndexHint.decimal("balance")        // DOUBLE
  * IndexHint.bool   ("active")         // BOOLEAN
+ * IndexHint.uuid   ("guildId")        // java.util.UUID
  *
  * // Nested paths (dot-separated):
  * IndexHint.string ("location.world")
@@ -68,7 +69,21 @@ public final class IndexHint {
          * The index column in SQL uses a native date type so values appear human-readable
          * in DB tools; InMemory and LocalFile use {@code Long} internally.
          */
-        TIMESTAMP
+        TIMESTAMP,
+        /**
+         * Java {@link java.util.UUID} → SQL {@code CHAR(36)} (PostgreSQL: its native
+         * {@code UUID} type), MongoDB and the file backends: the canonical 36-character
+         * lowercase string.
+         *
+         * <p>Values are canonicalised on both the write and the query side, so
+         * {@code eq}/{@code in} accept a {@link java.util.UUID} or any string spelling of one
+         * interchangeably. Ordering also agrees on every backend: lexicographic order over
+         * lowercase hex is byte-wise order over the 16 bytes, which is what PostgreSQL's
+         * native type compares. (Note {@link java.util.UUID#compareTo} is <b>not</b> that
+         * order - it compares the two longs signed - which is why the value is carried as a
+         * string, and why H2's native {@code UUID} type is deliberately not used.)
+         */
+        UUID
     }
 
     /** Sort order of the index. */
@@ -153,6 +168,25 @@ public final class IndexHint {
      */
     public static IndexHint timestamp(String fieldPath) {
         return new IndexHint(fieldPath, FieldType.TIMESTAMP, Order.ASCENDING);
+    }
+
+    /**
+     * {@link FieldType#UUID} index on {@code fieldPath}, ascending.
+     *
+     * <p>Accepts a {@link java.util.UUID} or a string spelling one in queries, whichever the
+     * call site happens to hold:
+     * <pre>{@code
+     * .index(IndexHint.uuid("guildId"))
+     *
+     * repo.query(Query.eq("guildId", guild.getId()));          // a java.util.UUID
+     * repo.query(Query.eq("guildId", "6b1e...-...-...")); // the same value as text
+     * }</pre>
+     *
+     * <p>A value that does not spell a UUID matches nothing - the same outcome a fractional
+     * value has against an {@link FieldType#INT} index - rather than raising an error.
+     */
+    public static IndexHint uuid(String fieldPath) {
+        return new IndexHint(fieldPath, FieldType.UUID, Order.ASCENDING);
     }
 
     // ------------------------------------------------------------------

@@ -19,6 +19,7 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.Collection;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -198,6 +199,9 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
         if (hint.fieldType() == IndexHint.FieldType.DOUBLE)    return "DOUBLE PRECISION";
         // PostgreSQL native timestamp with timezone (8 bytes, UTC-normalised).
         if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) return "TIMESTAMPTZ";
+        // Native uuid: 16 bytes instead of 36, and its byte-wise comparison is the same order
+        // as the lowercase canonical string the other backends compare.
+        if (hint.fieldType() == IndexHint.FieldType.UUID)      return "UUID";
         return super.sqlTypeFor(hint);
     }
 
@@ -205,6 +209,10 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
      * PostgreSQL uses {@code TIMESTAMPTZ} (an absolute instant), so bind a {@link java.sql.Timestamp}
      * - the driver stores the instant tz-safely and there is no wall-clock ambiguity. (The MySQL/H2
      * base binds a UTC {@code LocalDateTime} because their columns carry no timezone.)
+     *
+     * <p>The {@code uuid} column likewise takes a real {@link UUID} rather than its text. A value
+     * that does not spell one binds as {@code NULL}, which no comparison matches - the same "matches
+     * nothing" the text-column dialects give for the same input.
      */
     @Override
     protected Object toJdbcValue(Object value, IndexHint hint) {
@@ -212,6 +220,10 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
         if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) {
             Long epoch = IndexValueExtractor.toEpochMilli(value);
             return epoch != null ? new java.sql.Timestamp(epoch) : null;
+        }
+        if (hint.fieldType() == IndexHint.FieldType.UUID) {
+            String canonical = IndexValueExtractor.canonicalUuid(value);
+            return canonical != null ? UUID.fromString(canonical) : null;
         }
         return value;
     }

@@ -157,6 +157,11 @@ public class H2SqlStorage extends SqlStorage {
             // H2 does not support DATETIME; its native type is TIMESTAMP.
             if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP)
                 return "TIMESTAMP(3)";
+            // Deliberately VARCHAR and not H2's native UUID: that type sorts by the two longs
+            // signed, which is a different order from the canonical string every other backend
+            // stores and compares.
+            if (hint.fieldType() == IndexHint.FieldType.UUID)
+                return "VARCHAR(36)";
             return super.sqlTypeFor(hint);
         }
 

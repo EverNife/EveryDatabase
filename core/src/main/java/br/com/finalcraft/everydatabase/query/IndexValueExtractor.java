@@ -14,6 +14,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * Reads the value at an {@link IndexHint} field path from an entity, coercing it to
@@ -163,9 +164,33 @@ public final class IndexValueExtractor {
                     }
                 }
                 return null;
+            case UUID:
+                // Jackson writes a UUID as text; anything else in that slot is not a UUID.
+                return current.isTextual() ? canonicalUuid(current.asText()) : null;
             default:
                 return null;
         }
+    }
+
+    /**
+     * Returns {@code value} as the canonical 36-character lowercase UUID string, or {@code null}
+     * when it neither is a {@link UUID} nor spells one.
+     *
+     * <p>Canonicalising is what lets a {@code UUID} and its many textual spellings (uppercase,
+     * or the abbreviated groups {@link UUID#fromString} accepts) reach the same stored value on
+     * every backend, and what keeps the stored form's lexicographic order equal to the byte-wise
+     * order PostgreSQL's native {@code uuid} type compares by.
+     */
+    public static String canonicalUuid(Object value) {
+        if (value instanceof UUID) return value.toString();
+        if (value instanceof String) {
+            try {
+                return UUID.fromString((String) value).toString();
+            } catch (IllegalArgumentException notAUuid) {
+                return null;
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -219,11 +244,12 @@ public final class IndexValueExtractor {
 
     /**
      * Coerces a query parameter value to the Java type the hint's
-     * {@link IndexHint.FieldType} stores, mirroring {@link #extract}. This is what lets
-     * the map/scan backends (InMemory, LocalFile, GroupedFile) match SQL/Mongo semantics:
-     * their index lookups compare with {@code equals}, so {@code eq("score", 100L)}
-     * against an INT field must look up {@code Integer 100}, not {@code Long 100L}.
-     * (SQL and Mongo don't need this - JDBC and BSON coerce natively.)
+     * {@link IndexHint.FieldType} stores, mirroring {@link #extract}. Every backend runs its
+     * query values through this, which is what makes one {@link Query} mean the same thing on
+     * all of them: the map/scan backends (InMemory, LocalFile, GroupedFile) look up their
+     * buckets with {@code equals}, so {@code eq("score", 100L)} against an INT field must look
+     * up {@code Integer 100}, not {@code Long 100L}; SQL and Mongo hand the value to a driver
+     * that coerces numbers natively but not, say, a {@link UUID} against a stored string.
      *
      * <p>TIMESTAMP accepts {@link Instant}, {@link LocalDateTime} (treated as UTC), any
      * {@link Number}, or an ISO-8601 {@link String}, and converts to epoch-milliseconds.
@@ -234,7 +260,11 @@ public final class IndexValueExtractor {
      * (so e.g. an upper bound wider than {@code int} still correctly matches every stored
      * value), mirroring SQL's {@code BETWEEN}.
      *
-     * <p>A value that cannot be coerced is returned unchanged, never {@code null}ed.
+     * <p>UUID accepts a {@link UUID} or any string spelling of one, canonicalised by
+     * {@link #canonicalUuid} so it meets the equally canonicalised stored form.
+     *
+     * <p>A value that cannot be coerced is returned unchanged, never {@code null}ed - it then
+     * simply matches nothing, on every backend.
      */
     public static Object normalizeQueryValue(Object value, IndexHint hint) {
         if (value == null) return null;
@@ -271,6 +301,10 @@ public final class IndexValueExtractor {
                     if ("false".equalsIgnoreCase(s)) return Boolean.FALSE;
                 }
                 return value;
+            }
+            case UUID: {
+                String canonical = canonicalUuid(value);
+                return canonical != null ? canonical : value;
             }
             case STRING:
                 return value instanceof String ? value : String.valueOf(value);

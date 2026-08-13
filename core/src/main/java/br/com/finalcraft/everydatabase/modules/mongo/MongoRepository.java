@@ -916,16 +916,16 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         String column = hint.indexColumnName();
         switch (c.op()) {
             case EQ:
-                return Filters.eq(column, toMongoValue(c.value(), hint));
+                return Filters.eq(column, toMongoParam(c.value(), hint));
             case IN: {
                 List<Object> values = new ArrayList<>(c.inValues().size());
-                for (Object v : c.inValues()) values.add(toMongoValue(v, hint));
+                for (Object v : c.inValues()) values.add(toMongoParam(v, hint));
                 return Filters.in(column, values);
             }
             case RANGE:
                 List<Bson> parts = new ArrayList<>(2);
-                if (c.rangeFrom() != null) parts.add(Filters.gte(column, toMongoValue(c.rangeFrom(), hint)));
-                if (c.rangeTo()   != null) parts.add(Filters.lte(column, toMongoValue(c.rangeTo(),   hint)));
+                if (c.rangeFrom() != null) parts.add(Filters.gte(column, toMongoParam(c.rangeFrom(), hint)));
+                if (c.rangeTo()   != null) parts.add(Filters.lte(column, toMongoParam(c.rangeTo(),   hint)));
                 if (parts.isEmpty()) return Filters.exists(column);
                 return parts.size() == 1 ? parts.get(0) : Filters.and(parts);
             default:
@@ -943,6 +943,16 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         if (value == null || hint.fieldType() != IndexHint.FieldType.TIMESTAMP) return value;
         Long epoch = IndexValueExtractor.toEpochMilli(value);
         return epoch != null ? new java.util.Date(epoch) : null;
+    }
+
+    /**
+     * Converts a <b>query parameter</b>: coerces it to the hint's Java type first, then to the BSON
+     * type the stored field holds. The extra step is what a caller-supplied value needs and a stored
+     * one does not - a call site may hold a {@link java.util.UUID} for a UUID index, which BSON would
+     * otherwise encode as a binary subtype and never meet the canonical string on the document.
+     */
+    private static Object toMongoParam(Object value, IndexHint hint) {
+        return toMongoValue(IndexValueExtractor.normalizeQueryValue(value, hint), hint);
     }
 
     // ------------------------------------------------------------------

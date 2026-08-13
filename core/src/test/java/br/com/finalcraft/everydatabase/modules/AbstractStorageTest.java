@@ -60,6 +60,13 @@ public abstract class AbstractStorageTest {
     public static final UUID UUID_CAROL = UUID.fromString("00000000-0000-0000-0000-000000000003");
     public static final UUID UUID_GHOST = UUID.fromString("00000000-0000-0000-0000-000000000099");
 
+    /**
+     * Guilds the seeded players belong to - the UUID-typed secondary index. RED sorts before BLUE
+     * in the canonical form, which is what the ordering test asserts every backend agrees on.
+     */
+    public static final UUID GUILD_RED  = UUID.fromString("11111111-1111-1111-1111-111111111111");
+    public static final UUID GUILD_BLUE = UUID.fromString("22222222-2222-2222-2222-222222222222");
+
     /** Shared descriptor - all tests use this collection. */
     public static final EntityDescriptor<UUID, TestPlayer> DESCRIPTOR =
         EntityDescriptor.builder(UUID.class, TestPlayer.class)
@@ -71,6 +78,7 @@ public abstract class AbstractStorageTest {
             .index(IndexHint.string("world"))
             .index(IndexHint.bool("active"))
             .index(IndexHint.timestamp("createdAt"))
+            .index(IndexHint.uuid("guildId"))
             .build();
 
     /**
@@ -476,16 +484,18 @@ public abstract class AbstractStorageTest {
     //  findBy / query  (secondary-index contract)
     // ------------------------------------------------------------------
 
-    /** Populate three players with distinct worlds and active flags. */
+    /** Populate three players with distinct worlds, active flags and guilds. */
     private void seedIndexData() {
-        // alice  - world="world",       score=100, active=true
-        // bob    - world="world_nether", score=50,  active=true
-        // carol  - world="world",       score=200, active=false
-        repo.saveAll(Arrays.asList(
-            new TestPlayer(UUID_ALICE, "Alice", 100, "world",        true),
-            new TestPlayer(UUID_BOB,   "Bob",    50, "world_nether", true),
-            new TestPlayer(UUID_CAROL, "Carol", 200, "world",        false)
-        )).join();
+        // alice  - world="world",        score=100, active=true,  guild=RED
+        // bob    - world="world_nether", score=50,  active=true,  guild=BLUE
+        // carol  - world="world",        score=200, active=false, guild=RED
+        TestPlayer alice = new TestPlayer(UUID_ALICE, "Alice", 100, "world",        true);
+        TestPlayer bob   = new TestPlayer(UUID_BOB,   "Bob",    50, "world_nether", true);
+        TestPlayer carol = new TestPlayer(UUID_CAROL, "Carol", 200, "world",        false);
+        alice.setGuildId(GUILD_RED);
+        bob.setGuildId(GUILD_BLUE);
+        carol.setGuildId(GUILD_RED);
+        repo.saveAll(Arrays.asList(alice, bob, carol)).join();
     }
 
     @Test
@@ -598,6 +608,58 @@ public abstract class AbstractStorageTest {
         // A fractional value can never equal an INT-indexed value: no match, no error.
         assertTrue(repo.query(Query.eq("score", 100.5)).join().isEmpty(),
             "a fractional eq value must match nothing on an INT index");
+    }
+
+    @Test
+    @Order(98)
+    @DisplayName("[base] query(eq('guildId', ...)) accepts a UUID and its text spelling alike")
+    void query_eq_uuid_acceptsUuidObjectAndText() {
+        seedIndexData();   // Alice and Carol are RED, Bob is BLUE
+
+        List<UUID> byUuid = ids(repo.query(Query.eq("guildId", GUILD_RED)).join());
+        assertEquals(2, byUuid.size(), "eq with a UUID against a UUID index must match");
+        assertTrue(byUuid.contains(UUID_ALICE));
+        assertTrue(byUuid.contains(UUID_CAROL));
+
+        // A call site holding the value as text must reach the same rows - and upper case,
+        // which is a legal spelling the canonical form folds down.
+        List<UUID> byText = ids(repo.query(Query.eq("guildId", GUILD_RED.toString())).join());
+        assertEquals(byUuid, byText, "the text spelling must match exactly what the UUID matches");
+
+        List<UUID> byUpper = ids(repo.query(Query.eq("guildId", GUILD_RED.toString().toUpperCase())).join());
+        assertEquals(byUuid, byUpper, "an upper-case spelling must match the same rows");
+    }
+
+    @Test
+    @Order(98)
+    @DisplayName("[base] query(in('guildId', red, blue)) -> returns all three players")
+    void query_in_uuid_returnsEveryGuild() {
+        seedIndexData();
+        List<UUID> found = ids(repo.query(Query.in("guildId", GUILD_RED, GUILD_BLUE)).join());
+        assertEquals(3, found.size(), "every seeded player belongs to one of the two guilds");
+    }
+
+    @Test
+    @Order(98)
+    @DisplayName("[base] a value that is not a UUID matches nothing on a UUID index (no error)")
+    void query_eq_uuid_nonUuidValue_matchesNothing() {
+        seedIndexData();
+        assertTrue(repo.query(Query.eq("guildId", "not-a-uuid")).join().isEmpty(),
+            "a non-UUID value must match nothing, the same way a fractional value does on an INT index");
+        assertTrue(repo.query(Query.eq("guildId", UUID_GHOST)).join().isEmpty(),
+            "a well-formed UUID nobody belongs to must match nothing");
+    }
+
+    @Test
+    @Order(98)
+    @DisplayName("[base] ordering by a UUID index follows the canonical string order")
+    void query_orderBy_uuid_isCanonicalOrder() {
+        seedIndexData();
+        // RED (1111...) before BLUE (2222...); within RED the total order falls back to the key,
+        // so Alice (...01) precedes Carol (...03). Every backend must agree on this exact list.
+        List<UUID> ordered = ids(repo.query(Query.all(),
+            QueryOptions.builder().ascending("guildId").build()).join());
+        assertEquals(Arrays.asList(UUID_ALICE, UUID_CAROL, UUID_BOB), ordered);
     }
 
     @Test

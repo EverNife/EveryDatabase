@@ -23,6 +23,7 @@ import java.lang.annotation.Target;
  *   <li>{@code float/Float} / {@code double/Double} → {@link IndexHint.FieldType#DOUBLE}</li>
  *   <li>{@code boolean} / {@code Boolean}           → {@link IndexHint.FieldType#BOOLEAN}</li>
  *   <li>{@code Instant} / {@code LocalDateTime}     → {@link IndexHint.FieldType#TIMESTAMP}</li>
+ *   <li>{@code java.util.UUID}                      → {@link IndexHint.FieldType#UUID}</li>
  * </ul>
  * Any other type throws {@link IllegalArgumentException} at
  * {@link EntityDescriptor.Builder#build()} time
@@ -91,7 +92,12 @@ public @interface Indexed {
      * <p>Accepted values: {@code String.class}, {@code Integer.class}/{@code int.class},
      * {@code Long.class}/{@code long.class}, {@code Double.class}/{@code double.class},
      * {@code Boolean.class}/{@code boolean.class},
-     * {@code java.time.Instant.class}, {@code java.time.LocalDateTime.class}.
+     * {@code java.time.Instant.class}, {@code java.time.LocalDateTime.class},
+     * {@code java.util.UUID.class}.
+     *
+     * <p>{@code UUID.class} is also how a typed reference that serialises as its key - such as
+     * the manager add-on's {@code Ref} - gets indexed: the stored form is the key, so the
+     * annotation declares the key's type rather than the field's.
      */
     Class<?> type() default void.class;
 

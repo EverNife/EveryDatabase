@@ -35,6 +35,10 @@ public class AnnotatedTestPlayer {
     @Indexed
     private int score;
 
+    /** Indexed with no {@code type} override - a {@code UUID} field auto-detects to FieldType UUID. */
+    @Indexed
+    private UUID guildId;
+
     /**
      * Indexed via the nested {@code rank.title} path.
      * {@code type = String.class} is required because the field's Java type ({@link Rank})
@@ -57,11 +61,12 @@ public class AnnotatedTestPlayer {
      */
     private List<Badge> badges;
 
-    public AnnotatedTestPlayer(UUID uuid, String name, int score,
+    public AnnotatedTestPlayer(UUID uuid, String name, int score, UUID guildId,
                                Rank rank, Location location, List<Badge> badges) {
         this.uuid     = uuid;
         this.name     = name;
         this.score    = score;
+        this.guildId  = guildId;
         this.rank     = rank;
         this.location = location;
         this.badges   = badges;
