@@ -526,7 +526,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     private JsonNode payloadTree(byte[] data) throws IOException {
         Codec<V> codec = descriptor.codec();
         if (!(codec instanceof ObjectMapperAware) && !codec.isJsonCodec()) return null;
-        return IndexValueExtractor.mapperFor(codec).readTree(data);
+        return IndexValueExtractor.readTree(data, codec);
     }
 
     @Override

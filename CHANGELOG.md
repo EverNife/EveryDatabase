@@ -8,6 +8,119 @@ Versions are published as `everydatabase-core`, `everydatabase-libby`,
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-30
+
+The types a plugin actually reaches for stop being second-class.
+
+`java.math.BigDecimal` started it: accepted everywhere and returned intact almost nowhere. The number
+came back rounded on MongoDB, stripped of its scale on InMemory and GroupedFile, and the only index
+it could take was a `double` one that folded distinct amounts together. For a plugin holding
+balances, that is the one Java type that must not drift.
+
+Surveying the rest of the standard library the same way found the same shape of loss in the temporal
+types - a `ZonedDateTime` came back as UTC, its zone gone - and a "cannot auto-detect" wall in front
+of everything from an `enum` to a `LocalDate`.
+
+### Added
+
+- **`IndexHint.FieldType.DECIMAL`, with `IndexHint.bigDecimal(path)` and `@Indexed` auto-detection on
+  any `java.math.BigDecimal` field.** The comparison is decimal rather than binary, so two amounts
+  that differ past the 17th significant digit are two values instead of one, and `2.50`, `2.5` and
+  `"2.5"` are three spellings the query accepts for the same row. Ordering and ranges compare
+  numerically on all seven backends (a string index would sort `10.25` before `2.50`).
+
+  Columns are `NUMERIC` on PostgreSQL and H2 (unbounded), `DECIMAL(65,30)` on MySQL/MariaDB - the
+  widest their engine has, so the *index* there rounds past 30 decimal places and the server refuses
+  more than 35 integer digits - and BSON `Decimal128` on MongoDB. InMemory and both file backends
+  hold the `BigDecimal` itself, canonicalised so `2.50` and `2.5` land in one bucket the way a
+  numeric column compares them.
+
+  Before this, `@Indexed` on a `BigDecimal` field threw at `build()`, and the only option was
+  `IndexHint.decimal` - a `double` index that rounds every value on the way in.
+
+- **`IndexHint.FieldType.DATE`, with `IndexHint.date(path)` and `@Indexed` auto-detection on a
+  `java.time.LocalDate` field.** A day is not a moment, and the difference is not pedantry: turning
+  one into the other takes a time zone the value does not carry, and two processes in different
+  zones would then disagree about which day a row is on. The column is a native SQL `DATE`; MongoDB
+  and the map/scan backends hold the canonical ISO text, which sorts chronologically, so ordering
+  agrees everywhere. A query takes a `LocalDate`, anything carrying one in a zone of its own
+  (`LocalDateTime`, `ZonedDateTime`, `OffsetDateTime`), or an ISO string - and deliberately not an
+  `Instant`, whose day is a guess without a zone.
+
+- **`@Indexed` auto-detects the rest of the standard library.** `char`/`Character` and any `enum`
+  index as text; `byte` and `short` as INT; `BigInteger` as the exact DECIMAL; `ZonedDateTime`,
+  `OffsetDateTime` and `java.util.Date` as TIMESTAMP; `LocalDate` as DATE. Each of these threw
+  "cannot auto-detect IndexHint type" before, and the message now names both ways out (an explicit
+  `type =` for a text-shaped type like `URI`/`Currency`/`Duration`, and `path =` for a value inside
+  a nested object) instead of only the first.
+
+- **A `TIMESTAMP` query takes any spelling of the moment** - `Instant`, `LocalDateTime`,
+  `ZonedDateTime`, `OffsetDateTime`, `java.util.Date`, epoch millis or ISO text. It accepted the
+  first two.
+
+### Fixed
+
+- **`@Indexed(type = ...)` that names a temporal type the field cannot produce now fails at
+  `build()`.** `@Indexed(type = Instant.class)` on a `LocalDate` compiled, saved, and indexed `null`
+  on every row: the query it existed for returned nothing, forever, with no error anywhere to
+  explain it. The check is deliberately narrow - only a date-ish field against a date-ish index it
+  can never fill - so a `String` indexed as INT (it may hold digits) and a `BigDecimal` indexed as
+  DOUBLE (a deliberate, documented downgrade) both still build.
+
+- **A `ZonedDateTime` keeps its zone, and an `OffsetDateTime` its offset.** Jackson writes only the
+  offset by default and rewrites every offset date to UTC on read, so `10:15+02:00[Europe/Paris]`
+  came back as `08:15Z` - the same instant, and a different value: the local time and the zone are
+  usually the reason the type was chosen over `Instant`. `storageSafe` now writes the zone id and
+  `baseReadContract` stops adjusting to the context zone. Data written before this keeps its offset
+  and loses only the zone id it never carried.
+
+- **An undeclared number decodes as a `BigDecimal`, on every backend.** A fractional value in a
+  field typed `Object` or a `Map<String, Object>` came back as a `Double` from LocalFile, the SQL
+  dialects and MongoDB, but as a `BigDecimal` from InMemory and GroupedFile, which route the entity
+  through a tree - the same collection, two different Java types depending on where it lived.
+  `USE_BIG_DECIMAL_FOR_FLOATS` is now part of the read contract, which settles it as the lossless
+  one. **Breaking for a caller that casts:** `(Double) map.get("amount")` on an untyped map now
+  throws `ClassCastException` - read it as a `Number` (`((Number) v).doubleValue()`) instead. Fields
+  with a declared type are untouched.
+
+- **A `BigDecimal` keeps every digit and its scale on all seven backends.** Three separate ways of
+  losing it, all of them silent:
+
+  MongoDB stored the payload through `Document.parse`, whose JSON reader turns every fractional
+  number into a `double`: `1234567890123456789012.123456789` came back as `1.2345678901234567E+21`,
+  a *different amount*, and `2.50` as `2.5`. (An integer beyond `long` range did not even parse -
+  the save died with a raw `NumberFormatException` from the driver's scanner.) The payload now goes
+  through `BsonTrees`, which maps a decimal to BSON `Decimal128` - exact, scale-preserving, and the
+  type MongoDB itself compares and indexes - and reads it back as a plain JSON number. BSON's 34
+  significant digits are a real ceiling: a wider value now **fails its save with a message naming
+  the field**, instead of being rounded into the collection. Rows already in a collection are read
+  back as they were stored - a number rounded by the old path stays rounded, since the digits it
+  lost were never written down; the next save of that entity stores it exactly.
+
+  InMemory and GroupedFile route the entity through a Jackson tree, and Jackson strips a
+  `BigDecimal`'s trailing zeros when it builds a node - so a price of `2.50` was persisted as `2.5`
+  and `100` as `1E+2`. `JacksonConfig.baseReadContract` now pins the exact node factory, which every
+  codec profile inherits.
+
+  Parsing a stored document back into a tree - the aggregate file store, a scan backend filtering
+  before it decodes - read numbers as `double` for the same reason. Those paths now use
+  `JacksonConfig.exactTreeReader`, a per-call override that leaves the codec's own binding contract
+  untouched (a field declared `Object` still deserialises a fractional number to `Double`).
+
+- **PostgreSQL no longer skips the base dialect's JDBC conversions.** Its `toJdbcValue` returned the
+  value unchanged for every type it did not handle itself instead of deferring to `super`, so a
+  conversion added to the base dialect silently did not apply there. Surfaced by the new numeric
+  column: a query value that does not spell a number reached the driver as a string and raised
+  `operator does not exist: numeric = character varying` - where every other backend matches nothing.
+  A `NULL` bound against a numeric column now carries its SQL type, which PostgreSQL needs to compare
+  it at all.
+
+- **A range bound of a type the stored value cannot be compared with matches nothing, instead of
+  raising `ClassCastException` on the scan backends.** `normalizeQueryValue` documents that an
+  uncoercible value "matches nothing, on every backend" - true of SQL and Mongo, but a scan compared
+  it with `Comparable.compareTo` and threw.
+
+
 ## [1.4.0] - 2026-08-13
 
 A UUID becomes something you can index, and query values stop meaning different things on different

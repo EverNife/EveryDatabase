@@ -8,10 +8,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.Date;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -134,6 +141,8 @@ public final class IndexValueExtractor {
             case DOUBLE:
                 return current.isNumber() ? Double.valueOf(current.asDouble())
                                           : tryParseDouble(current.asText());
+            case DECIMAL:
+                return canonicalDecimal(current.isNumber() ? current.decimalValue() : current.asText());
             case BOOLEAN:
                 if (current.isBoolean()) return current.asBoolean();
                 String s = current.asText();
@@ -164,6 +173,9 @@ public final class IndexValueExtractor {
                     }
                 }
                 return null;
+            case DATE:
+                // Jackson writes a LocalDate as ISO text; a number in that slot names no day.
+                return current.isTextual() ? canonicalDate(current.asText()) : null;
             case UUID:
                 // Jackson writes a UUID as text; anything else in that slot is not a UUID.
                 return current.isTextual() ? canonicalUuid(current.asText()) : null;
@@ -191,6 +203,95 @@ public final class IndexValueExtractor {
             }
         }
         return null;
+    }
+
+    /**
+     * Returns {@code value} as the canonical ISO-8601 day ({@code "2026-08-29"}) a
+     * {@link IndexHint.FieldType#DATE} index stores, or {@code null} when it names no day.
+     *
+     * <p>Accepts a {@link LocalDate}, anything that carries one in a zone of its own
+     * ({@link LocalDateTime}, {@link ZonedDateTime}, {@link OffsetDateTime}), and a string spelling
+     * an ISO date or date-time. An {@link Instant} and a {@link Date} are deliberately refused: the
+     * day they fall on depends on a zone they do not carry, and picking one here would silently
+     * shift a row by a day for half the world.
+     */
+    public static String canonicalDate(Object value) {
+        if (value instanceof LocalDate)      return value.toString();
+        if (value instanceof LocalDateTime)  return ((LocalDateTime) value).toLocalDate().toString();
+        if (value instanceof ZonedDateTime)  return ((ZonedDateTime) value).toLocalDate().toString();
+        if (value instanceof OffsetDateTime) return ((OffsetDateTime) value).toLocalDate().toString();
+        if (value instanceof String) {
+            String text = ((String) value).trim();
+            try {
+                return LocalDate.parse(text).toString();
+            } catch (DateTimeParseException notADate) {
+                // A date-time in that slot names a day too - the entity may have been written when
+                // the field still held one.
+                try {
+                    return LocalDateTime.parse(text).toLocalDate().toString();
+                } catch (DateTimeParseException notADateTime) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns {@code value} as the canonical {@link BigDecimal} every backend stores and compares a
+     * {@link IndexHint.FieldType#DECIMAL} index by, or {@code null} when it neither is a number nor
+     * spells one.
+     *
+     * <p>Canonical means trailing zeros stripped ({@code 2.50} and {@code 2.5} become one value,
+     * zero collapses to {@link BigDecimal#ZERO}), which is what makes the map/scan backends - whose
+     * buckets are keyed by {@code equals} - agree with the SQL and Mongo numeric columns, where
+     * {@code 2.50 = 2.5} holds by definition. The <em>entity</em> keeps the scale it was saved with;
+     * this canonical form exists only inside the index.
+     *
+     * <p>A {@code double} converts through its shortest decimal rendering ({@code 0.1} stays
+     * {@code 0.1}, not the exact binary expansion), so a DECIMAL index answers a query written with
+     * a {@code double} literal the way the caller reads it.
+     */
+    public static BigDecimal canonicalDecimal(Object value) {
+        if (value instanceof BigDecimal) return stripZeros((BigDecimal) value);
+        if (value instanceof BigInteger) return stripZeros(new BigDecimal((BigInteger) value));
+        if (value instanceof Double || value instanceof Float) {
+            double d = ((Number) value).doubleValue();
+            if (Double.isNaN(d) || Double.isInfinite(d)) return null;
+            return stripZeros(BigDecimal.valueOf(d));
+        }
+        // Any other Number - Integer, Long, AtomicLong, a custom one - through its own text, so a
+        // fractional type this method does not know by name is not truncated to its long value.
+        if (value instanceof Number) return parseOrNull(value.toString());
+        if (value instanceof String) return parseOrNull((String) value);
+        return null;
+    }
+
+    /** {@code text} as a canonical decimal, or {@code null} when it does not spell a number. */
+    private static BigDecimal parseOrNull(String text) {
+        try {
+            return stripZeros(new BigDecimal(text.trim()));
+        } catch (NumberFormatException notANumber) {
+            return null;
+        }
+    }
+
+    /** {@code stripTrailingZeros} with the zero case pinned, so {@code 0.00} and {@code 0} are one value. */
+    private static BigDecimal stripZeros(BigDecimal value) {
+        return value.signum() == 0 ? BigDecimal.ZERO : value.stripTrailingZeros();
+    }
+
+    /**
+     * Parses stored JSON into the tree {@code codec} wrote, keeping every digit of a decimal number
+     * (see {@link JacksonConfig#exactTreeReader(ObjectMapper)}).
+     *
+     * <p>The scan backends filter and order on this tree instead of on the decoded entity. Parsing
+     * it the default way would answer a {@link IndexHint.FieldType#DECIMAL} query from a number
+     * rounded to a {@code double}, while SQL and Mongo answer from the exact one - the same query
+     * returning different rows depending on where the collection happens to live.
+     */
+    public static JsonNode readTree(byte[] json, Codec<?> codec) throws IOException {
+        return JacksonConfig.exactTreeReader(mapperFor(codec)).readTree(json);
     }
 
     // ------------------------------------------------------------------
@@ -251,8 +352,10 @@ public final class IndexValueExtractor {
      * up {@code Integer 100}, not {@code Long 100L}; SQL and Mongo hand the value to a driver
      * that coerces numbers natively but not, say, a {@link UUID} against a stored string.
      *
-     * <p>TIMESTAMP accepts {@link Instant}, {@link LocalDateTime} (treated as UTC), any
-     * {@link Number}, or an ISO-8601 {@link String}, and converts to epoch-milliseconds.
+     * <p>TIMESTAMP accepts {@link Instant}, {@link LocalDateTime} (treated as UTC),
+     * {@link ZonedDateTime}, {@link OffsetDateTime}, {@link Date}, any {@link Number}, or an
+     * ISO-8601 {@link String}, and converts to epoch-milliseconds. DATE accepts a {@link LocalDate}
+     * or anything carrying one in a zone of its own, canonicalised by {@link #canonicalDate}.
      * INT/LONG only convert when the conversion is lossless: for {@code eq}/{@code in} a
      * fractional or out-of-range number can never equal a stored integral value, so it is
      * returned unchanged and simply matches nothing - the same result SQL produces. For
@@ -261,7 +364,9 @@ public final class IndexValueExtractor {
      * value), mirroring SQL's {@code BETWEEN}.
      *
      * <p>UUID accepts a {@link UUID} or any string spelling of one, canonicalised by
-     * {@link #canonicalUuid} so it meets the equally canonicalised stored form.
+     * {@link #canonicalUuid} so it meets the equally canonicalised stored form. DECIMAL likewise
+     * accepts any {@link Number} or a string spelling one, canonicalised by
+     * {@link #canonicalDecimal}, so {@code eq("balance", 2.5)} finds a stored {@code 2.50}.
      *
      * <p>A value that cannot be coerced is returned unchanged, never {@code null}ed - it then
      * simply matches nothing, on every backend.
@@ -293,6 +398,10 @@ public final class IndexValueExtractor {
                 }
                 return value;
             }
+            case DECIMAL: {
+                BigDecimal canonical = canonicalDecimal(value);
+                return canonical != null ? canonical : value;
+            }
             case BOOLEAN: {
                 if (value instanceof Boolean) return value;
                 if (value instanceof String) {
@@ -301,6 +410,10 @@ public final class IndexValueExtractor {
                     if ("false".equalsIgnoreCase(s)) return Boolean.FALSE;
                 }
                 return value;
+            }
+            case DATE: {
+                String canonical = canonicalDate(value);
+                return canonical != null ? canonical : value;
             }
             case UUID: {
                 String canonical = canonicalUuid(value);
@@ -319,28 +432,47 @@ public final class IndexValueExtractor {
      * are normalised query bounds ({@code null} = open end).
      *
      * <p>When a value and a bound are both {@link Number}s of <b>different boxed types</b> - e.g. a
-     * stored {@code Integer} against a {@code Long} bound wider than the {@code int} range - they are
-     * compared <b>numerically</b> instead of through {@code Comparable.compareTo}, which throws a
-     * {@code ClassCastException} on mismatched boxed types (the SQL path never hits this because JDBC
-     * compares numerically). A non-{@link Comparable} value matches nothing.
+     * stored {@code Integer} against a {@code Long} bound wider than the {@code int} range, or a
+     * {@link BigDecimal} against a plain {@code double} bound - they are compared <b>numerically</b>
+     * instead of through {@code Comparable.compareTo}, which throws a {@code ClassCastException} on
+     * mismatched boxed types (the SQL path never hits this because JDBC compares numerically). A
+     * value that is not {@link Comparable}, and a bound of a type the value cannot be compared with
+     * at all, both match nothing.
      */
-    @SuppressWarnings({"unchecked", "rawtypes"})
     public static boolean rangeContains(Object value, Object from, Object to) {
         if (!(value instanceof Comparable)) return false;
-        if (from != null && compareForRange(value, from) < 0) return false;
-        if (to   != null && compareForRange(value, to)   > 0) return false;
+        if (from != null) {
+            Integer c = compareForRange(value, from);
+            if (c == null || c < 0) return false;
+        }
+        if (to != null) {
+            Integer c = compareForRange(value, to);
+            if (c == null || c > 0) return false;
+        }
         return true;
     }
 
+    /**
+     * Compares a stored value with a range bound, or {@code null} when the two cannot be compared at
+     * all - a bound that did not coerce to the hint's type (an unparseable string against a numeric
+     * index, say). The caller reads that as "no match", which is what {@link #normalizeQueryValue}
+     * promises such a value everywhere: SQL binds it as {@code NULL} and Mongo meets no document, so
+     * a scan raising {@code ClassCastException} would be the one backend to answer differently.
+     */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private static int compareForRange(Object value, Object bound) {
+    private static Integer compareForRange(Object value, Object bound) {
         if (value instanceof Number && bound instanceof Number && value.getClass() != bound.getClass()) {
             Number a = (Number) value, b = (Number) bound;
+            if (a instanceof BigDecimal || b instanceof BigDecimal) {
+                BigDecimal x = canonicalDecimal(a), y = canonicalDecimal(b);
+                return (x == null || y == null) ? null : x.compareTo(y);
+            }
             boolean floating = a instanceof Double || a instanceof Float
                     || b instanceof Double || b instanceof Float;
             return floating ? Double.compare(a.doubleValue(), b.doubleValue())
                             : Long.compare(a.longValue(), b.longValue());
         }
+        if (!value.getClass().isInstance(bound)) return null;
         return ((Comparable) value).compareTo(bound);
     }
 
@@ -373,6 +505,9 @@ public final class IndexValueExtractor {
         if (value instanceof Long)       return (Long) value;
         if (value instanceof Instant)    return ((Instant) value).toEpochMilli();
         if (value instanceof LocalDateTime) return ((LocalDateTime) value).toInstant(ZoneOffset.UTC).toEpochMilli();
+        if (value instanceof ZonedDateTime)  return ((ZonedDateTime) value).toInstant().toEpochMilli();
+        if (value instanceof OffsetDateTime) return ((OffsetDateTime) value).toInstant().toEpochMilli();
+        if (value instanceof Date)       return ((Date) value).getTime();
         if (value instanceof Number)     return ((Number) value).longValue();
         if (value instanceof String)     return tryParseTimestamp((String) value);
         return null;
@@ -380,8 +515,11 @@ public final class IndexValueExtractor {
 
     private static Long tryParseTimestamp(String s) {
         if (s == null || s.isEmpty()) return null;
-        // Try Instant (has 'Z' or offset) first, then bare LocalDateTime (no offset = UTC assumed).
+        // Try Instant (has 'Z' or offset) first, then a zoned/offset date-time - which is what a
+        // ZonedDateTime field looks like, zone id and all - then bare LocalDateTime (UTC assumed).
         try { return Instant.parse(s).toEpochMilli(); }
+        catch (DateTimeParseException ignored) {}
+        try { return ZonedDateTime.parse(s).toInstant().toEpochMilli(); }
         catch (DateTimeParseException ignored) {}
         try { return LocalDateTime.parse(s).toInstant(ZoneOffset.UTC).toEpochMilli(); }
         catch (DateTimeParseException ignored) {}

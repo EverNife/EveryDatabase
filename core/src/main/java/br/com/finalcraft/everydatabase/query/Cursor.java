@@ -1,5 +1,6 @@
 package br.com.finalcraft.everydatabase.query;
 
+import br.com.finalcraft.everydatabase.codec.JacksonConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -90,12 +91,14 @@ public final class Cursor {
     }
 
     /**
-     * Rebuilds a cursor from {@link #encode()}. Numeric values come back as {@code Long}/{@code Double};
+     * Rebuilds a cursor from {@link #encode()}. Numeric values come back as {@code Long}/{@code BigDecimal};
      * the repository coerces them to the order field's type before comparing, so the drift is harmless.
+     * A fractional value is read as a {@code BigDecimal} rather than a {@code double} so a cursor over a
+     * {@link IndexHint.FieldType#DECIMAL} index resumes at the exact row it left off.
      */
     public static Cursor decode(String token) {
         try {
-            JsonNode n = MAPPER.readTree(Base64.getUrlDecoder().decode(token));
+            JsonNode n = JacksonConfig.exactTreeReader(MAPPER).readTree(Base64.getUrlDecoder().decode(token));
             String f = n.get("f").asText();
             IndexHint.Order d = IndexHint.Order.valueOf(n.get("d").asText());
             if (n.get("s").asBoolean()) {
@@ -103,7 +106,7 @@ public final class Cursor {
             }
             JsonNode v = n.get("v");
             Object value = (v == null || v.isNull()) ? null
-                : v.isNumber() ? (v.isIntegralNumber() ? (Object) v.asLong() : (Object) v.asDouble())
+                : v.isNumber() ? (v.isIntegralNumber() ? (Object) v.asLong() : (Object) v.decimalValue())
                 : v.isBoolean() ? (Object) v.asBoolean()
                 : v.asText();
             JsonNode k = n.get("k");

@@ -3,7 +3,10 @@ package br.com.finalcraft.everydatabase.codec;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
@@ -20,6 +23,22 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  * frozen <b>read contract</b> - the {@code java.time} ({@link JavaTimeModule}) and
  * {@code Optional} ({@link Jdk8Module}) datatype modules, plus tolerance of unknown
  * properties.
+ *
+ * <h2>Numbers keep the shape they were written with</h2>
+ *
+ * <p>No profile rounds a number: a {@link java.math.BigDecimal} keeps its scale, an undeclared
+ * number (a field typed {@code Object}, a {@code Map} value) is read as a {@code BigDecimal} rather
+ * than a {@code double}, and {@link #exactTreeReader(ObjectMapper)} parses one back without a detour
+ * through {@code double} even under a caller's own mapper. A number's scale is data as often as a
+ * map's order is - {@code 2.50} is a price, {@code 2.5} is a measurement - and nothing persists the
+ * original alongside a rounded copy.
+ *
+ * <h2>Dates keep their zone</h2>
+ *
+ * <p>A {@link java.time.ZonedDateTime} is written with its zone id and read back in that zone; an
+ * {@link java.time.OffsetDateTime} keeps its offset. Jackson's defaults rewrite both to UTC on read
+ * - the same instant, a different local time - which loses the half of the value that is usually the
+ * reason the type was chosen over {@link java.time.Instant}.
  *
  * <h2>Map entries keep their insertion order</h2>
  *
@@ -62,8 +81,10 @@ public final class JacksonConfig {
      * {@link DeserializationFeature#FAIL_ON_UNKNOWN_PROPERTIES} so data written by an
      * older schema (carrying since-removed fields) still deserialises.
      *
-     * <p>It sets no write-side option: in particular it does not reorder {@code Map}
-     * entries, so every profile preserves a map's iteration (insertion) order.
+     * <p>It also fixes the fidelity invariants every profile inherits: {@code Map} entries are never
+     * reordered, a {@link java.math.BigDecimal} never loses its scale, an undeclared number is read
+     * as a {@code BigDecimal} rather than a {@code double}, and a date keeps the zone it was written
+     * in instead of being rewritten to UTC.
      *
      * @param mapper the mapper to configure (mutated in place)
      * @return the same {@code mapper}, for chaining
@@ -72,15 +93,49 @@ public final class JacksonConfig {
         mapper.registerModule(new JavaTimeModule());
         mapper.registerModule(new Jdk8Module());
         mapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+        // A BigDecimal keeps the scale it was built with: 2.50 stays 2.50, not 2.5, and 100 stays
+        // 100, not 1E+2. Jackson strips those zeros when it builds a tree node, and the tree is what
+        // the index extractor reads and what the aggregate-file and in-memory backends store - so
+        // leaving it on rewrites the number on its way to disk. (The node factory, rather than
+        // JsonNodeFeature: the feature can only be set while the mapper is being built.)
+        mapper.setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
+        // A number with no declared Java type to land in - a field typed Object, a Map value - is
+        // read as a BigDecimal instead of a double, so it survives the same way a declared one does.
+        mapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+        // A date keeps the zone it was written in. Jackson's default rewrites every offset date to
+        // the context zone (UTC) on read, which turns 10:15-03:00 into 13:15Z: the same instant, a
+        // different local time - and the local time is usually the reason the type was chosen.
+        mapper.disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
         return mapper;
+    }
+
+    /**
+     * A reader over {@code mapper} that parses JSON numbers <b>losslessly</b> into a tree: a
+     * fractional number becomes a {@code DecimalNode} carrying every digit it was written with,
+     * instead of the {@code double} Jackson parses by default (which caps a number at ~17
+     * significant digits and cannot hold {@code 2.50} apart from {@code 2.5}).
+     *
+     * <p>The profiles here already set both on the mappers they build; this exists for the mapper
+     * they did not build - a caller's own, passed to {@code new JacksonJsonCodec<>(Type.class,
+     * mapper)}. The paths that hop through an intermediate tree (the aggregate file store, the Mongo
+     * document bridge, a scan backend filtering before it decodes) read through this, so a custom
+     * mapper cannot silently put a {@code double} where the caller saved an exact number.
+     *
+     * @param mapper the mapper whose modules and configuration the reader inherits
+     * @return a reader for tree parsing; the mapper itself is not modified
+     */
+    public static ObjectReader exactTreeReader(ObjectMapper mapper) {
+        return mapper.reader()
+            .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+            .without(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES);
     }
 
     /**
      * The default profile: round-trip fidelity and schema-evolution tolerance. On top of
      * {@link #baseReadContract(ObjectMapper)}, dates and durations serialise as ISO-8601
-     * text (not numeric arrays/epochs), so the output is portable and human-readable.
-     * Null properties are kept, and {@code Map} entries keep their insertion order, so a
-     * decoded entity re-encodes to the same bytes it was read from.
+     * text (not numeric arrays/epochs) with the zone id where the type carries one, so the output is
+     * portable and human-readable. Null properties are kept, and {@code Map} entries keep their
+     * insertion order, so a decoded entity re-encodes to the same bytes it was read from.
      *
      * <p>This is the mapper used by {@link JacksonJsonCodec} and {@link JacksonYamlCodec}
      * when the caller supplies no custom mapper.
@@ -92,6 +147,12 @@ public final class JacksonConfig {
         baseReadContract(mapper);
         mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         mapper.disable(SerializationFeature.WRITE_DURATIONS_AS_TIMESTAMPS);
+        // A ZonedDateTime writes its zone id ("...-03:00[America/Sao_Paulo]"), not just the offset
+        // it happened to have that day. Without the id the zone cannot be recovered, and a value
+        // saved in a zone with daylight saving reads back as a fixed offset - right for that
+        // instant, wrong for arithmetic on any other. An OffsetDateTime is unaffected: its offset
+        // is all there is to it.
+        mapper.enable(SerializationFeature.WRITE_DATES_WITH_ZONE_ID);
         return mapper;
     }
 

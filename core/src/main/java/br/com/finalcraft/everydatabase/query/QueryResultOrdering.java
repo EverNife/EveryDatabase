@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.query;
 
 import br.com.finalcraft.everydatabase.codec.Codec;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -144,8 +145,16 @@ public final class QueryResultOrdering {
             case INT:     return value instanceof Number ? ((Number) value).intValue()  : Integer.valueOf(value.toString());
             case LONG:    return value instanceof Number ? ((Number) value).longValue() : Long.valueOf(value.toString());
             case DOUBLE:  return value instanceof Number ? ((Number) value).doubleValue(): Double.valueOf(value.toString());
+            case DECIMAL: {
+                BigDecimal canonical = IndexValueExtractor.canonicalDecimal(value);
+                return canonical != null ? canonical : value.toString();
+            }
             case BOOLEAN: return value instanceof Boolean ? value : Boolean.valueOf(value.toString());
             case TIMESTAMP: return IndexValueExtractor.toEpochMilli(value);
+            case DATE: {
+                String canonical = IndexValueExtractor.canonicalDate(value);
+                return canonical != null ? canonical : value.toString();
+            }
             case UUID: {
                 String canonical = IndexValueExtractor.canonicalUuid(value);
                 return canonical != null ? canonical : value.toString();

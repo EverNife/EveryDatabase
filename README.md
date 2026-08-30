@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-1.4.0-informational)
+![Version](https://img.shields.io/badge/version-1.5.0-informational)
 
 </div>
 
@@ -46,7 +46,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 - **🔌 One interface, many engines.** `Storage` + `Repository<K, V>` is the entire surface you code against.
 - **⚡ Async-first.** Every I/O call returns a `CompletableFuture` — block with `.join()` or compose. Virtual threads on Java 21+.
 - **🧩 Capabilities are interfaces, not flags.** Transactions, schema migrations and queries are *optional* interfaces a backend may implement, checked with `instanceof`. No backend pretends to support something it can't.
-- **🗂️ Declarative indexes.** Annotate a field with `@Indexed` (or declare an `IndexHint`) and the backend builds a real secondary index — a SQL column + B-tree, a Mongo index, or an in-memory map.
+- **🗂️ Declarative indexes.** Annotate a field with `@Indexed` (or declare an `IndexHint`) and the backend builds a real secondary index — a SQL column + B-tree, a Mongo index, or an in-memory map. `String`, the integer types, `double`, `BigDecimal`, `boolean`, `Instant`/`LocalDateTime` and `UUID` are all indexable, and a `BigDecimal` keeps every digit and its scale on every backend.
 - **🔁 Built-in data transfer.** `StorageTransfer.builder()` copies entities between *any* two backends, read-only on the source, with batching, progress and verification.
 - **☕ Java 8 runtime.** Java 8 bytecode authored in modern Java, with a Java-8-clean default dependency set — **every backend runs on a Java 8 JVM** (see [Java version requirements](#java-version-requirements)).
 
@@ -87,10 +87,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.5.0'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.4.0'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.5.0'
 }
 ```
 
@@ -98,13 +98,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.5.0'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.4.0') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.5.0') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -124,7 +124,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.4.0</version>
+  <version>1.5.0</version>
 </dependency>
 ```
 
@@ -483,9 +483,73 @@ repo.query(Query.eq("location.world", "world")
         .and(Query.range("score", 1000, null))).join();       // world == "world" AND score >= 1000
 ```
 
-**Index type factories:** `IndexHint.string` · `integer` · `bigInt` · `decimal` · `bool` · `timestamp` · `uuid`.
+**Index type factories:** `IndexHint.string` · `integer` · `bigInt` · `decimal` (`double`/`float`) · `bigDecimal` · `bool` · `timestamp` · `date` · `uuid`.
+
+**`@Indexed` auto-detects** `String`, `char`/`Character`, any `enum`, `byte`/`short`/`int`, `long`, `float`/`double`, `BigDecimal`, `BigInteger`, `boolean`, `Instant`/`LocalDateTime`/`ZonedDateTime`/`OffsetDateTime`/`java.util.Date`, `LocalDate` and `UUID`. Anything else needs `@Indexed(type = ...)` — a type that serialises as text (`URI`, `Currency`, `Locale`, `ZoneId`, `YearMonth`, `Year`, `LocalTime`) works with `type = String.class`. Equality is exact either way; **ordering** follows the text, which is chronological for the ISO date/time shapes (`2026-08` < `2026-12`, `09:30` < `10:15`) but not for a `Duration` (`"PT1H"` sorts before `"PT30M"`) — index a duration's `toMillis()` as a `long` if you need to order or range by it.
 
 > A query value is coerced to the indexed field's type before it reaches the backend, so one `Query` means the same thing everywhere: a `Long` matches an `int` field, an `Instant` matches a timestamp one, and a `java.util.UUID` matches a UUID field just as its text does. A value that can't be coerced — a fractional number against an `int`, a word that doesn't spell a UUID — matches nothing rather than raising an error.
+
+### Money and `BigDecimal`
+
+A `BigDecimal` is stored **exactly**: the value and its scale come back as they were saved, so a price of `2.50` reads back `2.50` and not `2.5`. It works everywhere a number does — as a plain field, nested in an object, inside a `List`, and as an index:
+
+```java
+public class Wallet {
+    private UUID uuid;
+
+    @Indexed                      // auto-detected: a BigDecimal field indexes as DECIMAL
+    private BigDecimal balance;
+
+    private BigDecimal pending;   // not indexed — stored just as exactly
+}
+
+// ...or declared manually
+.index(IndexHint.bigDecimal("balance"))
+
+// Comparisons are decimal, not binary: 2.5, 2.50 and "2.50" are one number, and one row
+repo.query(Query.eq("balance", new BigDecimal("2.5"))).join();
+repo.query(Query.range("balance", new BigDecimal("10.00"), null)).join();
+repo.query(Query.all(), QueryOptions.builder().descending("balance").limit(10).build()).join();
+```
+
+Use `IndexHint.bigDecimal` (not `IndexHint.decimal`, which is the `double`/`float` index) for a `BigDecimal` field: a `double` index rounds every value to ~17 significant digits first, so two amounts that differ past that digit collapse into one index entry.
+
+The **entity** keeps every digit on every backend. Each backend's numeric type bounds only its **index column**, and only MongoDB has a ceiling on the payload:
+
+| Backend | Index column | Ceiling |
+|---|---|---|
+| PostgreSQL, H2 | `NUMERIC` | none |
+| MySQL / MariaDB | `DECIMAL(65,30)` | index rounds past 30 decimal places; more than 35 integer digits is rejected by the server |
+| MongoDB | BSON `Decimal128` | **34 significant digits, payload included** — a wider value fails the `save` with a message naming the field, rather than being silently rounded |
+| InMemory, LocalFile, GroupedFile | in-memory `BigDecimal` / full scan | none |
+
+> Comparing two amounts in your own code: `BigDecimal.equals` is true only when the scale matches too (`2.50` ≠ `2.5`), which is exactly why the scale is preserved here. Use `compareTo(other) == 0` when you mean numeric equality.
+
+> **Untyped values are exact too.** A fractional number with no declared Java type to land in — a field typed `Object`, a `Map<String, Object>` value — decodes as a `BigDecimal` on every backend rather than a `Double`. If you read such a value back, take it as a `Number` (`((Number) map.get("amount")).doubleValue()`); a direct `(Double)` cast throws. Fields with a declared type are unaffected.
+
+### Dates: a day is not a moment
+
+Both are indexable, and they are different types on purpose:
+
+```java
+@Indexed private LocalDate     releasedOn;   // DATE      — a calendar day, no time, no zone
+@Indexed private ZonedDateTime startsAt;     // TIMESTAMP — a moment, in a named zone
+@Indexed private Instant       seenAt;       // TIMESTAMP
+@Indexed private Date          archivedAt;   // TIMESTAMP — the legacy type still works
+
+repo.query(Query.range("releasedOn", LocalDate.of(2026, 1, 1), LocalDate.of(2026, 6, 30)));
+repo.query(Query.eq("startsAt", zonedDateTime));   // or an Instant, OffsetDateTime, or Date
+```
+
+A `DATE` index is a native `DATE` column on SQL and the canonical `2026-08-29` text elsewhere — ISO text sorts chronologically, so ordering agrees on all seven backends. It deliberately refuses an `Instant`: which day an instant falls on depends on a zone it does not carry, so the conversion belongs at your call site (`instant.atZone(zone).toLocalDate()`), where the right zone is known.
+
+Declaring the wrong one **fails at `build()`** instead of indexing `null` on every row:
+
+```java
+@Indexed(type = Instant.class) private LocalDate releasedOn;   // IllegalArgumentException
+```
+
+**A `ZonedDateTime` keeps its zone.** It is written with its zone id and read back in that zone, so `10:15+02:00[Europe/Paris]` does not come back as `08:15Z` — the same instant, but a local time and a zone the caller never asked to lose. An `OffsetDateTime` keeps its offset the same way.
 
 > Querying an undeclared field throws `IllegalArgumentException` on **every** backend — including local files, which validate the declaration even though they answer with a full scan (`O(n)`, no real index). Indexes added or removed later are reconciled automatically (column/index created, backfilled, or dropped) the next time the repository is opened.
 
@@ -876,8 +940,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.4.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.5.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.5.0'
 ```
 
 ```java
@@ -962,9 +1026,9 @@ When several instances share one backend, a write on one leaves the others' cach
 
 ```groovy
 // optional add-on; pulls in Jedis. Declare it alongside manager + core:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.4.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.4.0'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.4.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.5.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.5.0'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.5.0'
 ```
 
 ```java

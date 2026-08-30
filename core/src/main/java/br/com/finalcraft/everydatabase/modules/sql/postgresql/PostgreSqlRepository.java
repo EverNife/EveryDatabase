@@ -197,6 +197,9 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
     protected String sqlTypeFor(IndexHint hint) {
         // PostgreSQL rejects bare DOUBLE; use the SQL-standard keyword.
         if (hint.fieldType() == IndexHint.FieldType.DOUBLE)    return "DOUBLE PRECISION";
+        // Unconstrained NUMERIC: arbitrary precision and scale, so the index holds whatever the
+        // entity holds (MySQL/MariaDB have to cap theirs at DECIMAL(65,30)).
+        if (hint.fieldType() == IndexHint.FieldType.DECIMAL)   return "NUMERIC";
         // PostgreSQL native timestamp with timezone (8 bytes, UTC-normalised).
         if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) return "TIMESTAMPTZ";
         // Native uuid: 16 bytes instead of 36, and its byte-wise comparison is the same order
@@ -213,6 +216,9 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
      * <p>The {@code uuid} column likewise takes a real {@link UUID} rather than its text. A value
      * that does not spell one binds as {@code NULL}, which no comparison matches - the same "matches
      * nothing" the text-column dialects give for the same input.
+     *
+     * <p>Everything else defers to the base dialect, so a type it handles - the typed {@code NULL} a
+     * {@code numeric} column needs, above all - is not silently skipped here.
      */
     @Override
     protected Object toJdbcValue(Object value, IndexHint hint) {
@@ -225,7 +231,7 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
             String canonical = IndexValueExtractor.canonicalUuid(value);
             return canonical != null ? UUID.fromString(canonical) : null;
         }
-        return value;
+        return super.toJdbcValue(value, hint);
     }
 
     @Override

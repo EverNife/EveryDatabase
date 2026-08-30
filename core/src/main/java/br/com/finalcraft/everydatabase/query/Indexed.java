@@ -17,17 +17,29 @@ import java.lang.annotation.Target;
  * <h3>Type auto-detection</h3>
  * The {@link IndexHint.FieldType} is derived from the declared Java type of the annotated field:
  * <ul>
- *   <li>{@code String}                              → {@link IndexHint.FieldType#STRING}</li>
- *   <li>{@code int} / {@code Integer}               → {@link IndexHint.FieldType#INT}</li>
+ *   <li>{@code String}, {@code char}/{@code Character}, any {@code enum}
+ *                                                   → {@link IndexHint.FieldType#STRING}</li>
+ *   <li>{@code byte} / {@code short} / {@code int} (and their wrappers)
+ *                                                   → {@link IndexHint.FieldType#INT}</li>
  *   <li>{@code long} / {@code Long}                 → {@link IndexHint.FieldType#LONG}</li>
  *   <li>{@code float/Float} / {@code double/Double} → {@link IndexHint.FieldType#DOUBLE}</li>
+ *   <li>{@code BigDecimal} / {@code BigInteger}     → {@link IndexHint.FieldType#DECIMAL}</li>
  *   <li>{@code boolean} / {@code Boolean}           → {@link IndexHint.FieldType#BOOLEAN}</li>
- *   <li>{@code Instant} / {@code LocalDateTime}     → {@link IndexHint.FieldType#TIMESTAMP}</li>
+ *   <li>{@code Instant} / {@code LocalDateTime} / {@code ZonedDateTime} / {@code OffsetDateTime} /
+ *       {@code java.util.Date}                      → {@link IndexHint.FieldType#TIMESTAMP}</li>
+ *   <li>{@code LocalDate}                           → {@link IndexHint.FieldType#DATE}</li>
  *   <li>{@code java.util.UUID}                      → {@link IndexHint.FieldType#UUID}</li>
  * </ul>
  * Any other type throws {@link IllegalArgumentException} at
  * {@link EntityDescriptor.Builder#build()} time
- * unless {@link #type()} is set explicitly.
+ * unless {@link #type()} is set explicitly. A type that serialises as text - {@code URI},
+ * {@code Currency}, {@code Locale}, {@code ZoneId}, {@code Duration}, {@code YearMonth} - is
+ * indexable with {@code @Indexed(type = String.class)}.
+ *
+ * <p>An explicit {@link #type()} that the field can never produce a value for is refused at
+ * {@code build()} rather than indexing {@code null} on every row: a {@code LocalDate} declared
+ * {@code type = Instant.class} names no moment, and the query it was meant to serve would have
+ * matched nothing, forever, with no error to explain why.
  *
  * <h3>Nested paths</h3>
  * Use {@link #path()} with dot-notation to index a nested field. Because the annotated

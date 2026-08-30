@@ -1,7 +1,9 @@
 package br.com.finalcraft.everydatabase.modules.groupedfile;
 
 import br.com.finalcraft.everydatabase.codec.Codec;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
@@ -94,11 +96,23 @@ final class ContainerFormat {
 
     private static ObjectMapper newJsonMapper() {
         // Local files are meant to be human-inspectable - keep the aggregate document indented.
-        return JsonMapper.builder().enable(SerializationFeature.INDENT_OUTPUT).build();
+        return exactNumbers(JsonMapper.builder().enable(SerializationFeature.INDENT_OUTPUT).build());
     }
 
     private static ObjectMapper newYamlMapper() {
         // Drop the leading "---" document-start marker so files read like a plain config.
-        return YAMLMapper.builder().disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER).build();
+        return exactNumbers(YAMLMapper.builder().disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER).build());
+    }
+
+    /**
+     * The aggregate document is a tree, and every value in it makes a round trip through that tree on
+     * its way to and from the file. Parsing a decimal the default way (as a {@code double}) would
+     * rewrite the number the entity was saved with - so this mapper reads every fractional number as
+     * a {@code BigDecimal}, scale included. It never binds a POJO, so nothing else is affected.
+     */
+    private static ObjectMapper exactNumbers(ObjectMapper mapper) {
+        mapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+        mapper.setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
+        return mapper;
     }
 }

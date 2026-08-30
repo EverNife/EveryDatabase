@@ -28,7 +28,8 @@ import java.util.regex.Pattern;
  * IndexHint.string ("type")           // VARCHAR field, ascending
  * IndexHint.integer("level")          // INT field
  * IndexHint.bigInt ("timestamp")      // BIGINT (Java long)
- * IndexHint.decimal("balance")        // DOUBLE
+ * IndexHint.decimal("ratio")          // DOUBLE (double/float)
+ * IndexHint.bigDecimal("balance")     // NUMERIC (java.math.BigDecimal, exact)
  * IndexHint.bool   ("active")         // BOOLEAN
  * IndexHint.uuid   ("guildId")        // java.util.UUID
  *
@@ -60,16 +61,50 @@ public final class IndexHint {
         LONG,
         /** Java {@code float}/{@code Float}/{@code double}/{@code Double} → SQL {@code DOUBLE}. */
         DOUBLE,
+        /**
+         * Java {@link java.math.BigDecimal} → SQL {@code NUMERIC} (MySQL/MariaDB:
+         * {@code DECIMAL(65,30)}, the widest their engine offers), MongoDB BSON
+         * {@code Decimal128}, and a {@code BigDecimal} in the map/scan backends.
+         *
+         * <p>The whole point over {@link #DOUBLE} is that the comparison is decimal, not binary:
+         * {@code 0.1 + 0.2} equals {@code 0.3} here, and two amounts that differ in the 20th digit
+         * are two different values instead of one. Values are compared numerically, so a stored
+         * {@code 2.50} is matched by a query for {@code 2.5} - trailing zeros are a rendering of
+         * the same number, on every backend.
+         *
+         * <p>Each backend's numeric type bounds the <em>index</em>, never the stored entity:
+         * MySQL/MariaDB round the index column to 30 decimal places and reject more than 35 integer
+         * digits, MongoDB's {@code Decimal128} holds 34 significant digits, PostgreSQL and H2 are
+         * unbounded. A value the backend cannot index fails its {@code save} with a message naming
+         * the field, never a silently different number.
+         */
+        DECIMAL,
         /** Java {@code boolean}/{@code Boolean} → SQL {@code BOOLEAN}. */
         BOOLEAN,
         /**
-         * Java {@link java.time.Instant} or {@link java.time.LocalDateTime} → SQL
-         * {@code DATETIME(3)}/{@code TIMESTAMPTZ}, MongoDB BSON {@code Date}.
-         * Stored and compared as epoch-milliseconds ({@code long}) in every backend.
-         * The index column in SQL uses a native date type so values appear human-readable
+         * A moment in time - Java {@link java.time.Instant}, {@link java.time.LocalDateTime},
+         * {@link java.time.ZonedDateTime}, {@link java.time.OffsetDateTime}, {@link java.util.Date}
+         * or a {@code long} of epoch millis → SQL {@code DATETIME(3)}/{@code TIMESTAMPTZ}, MongoDB
+         * BSON {@code Date}. Stored and compared as epoch-milliseconds ({@code long}) in every
+         * backend. The index column in SQL uses a native date type so values appear human-readable
          * in DB tools; InMemory and LocalFile use {@code Long} internally.
+         *
+         * <p>A {@link java.time.LocalDate} is <b>not</b> one of these: it names a day, not a moment,
+         * and turning it into one requires inventing a time zone. Use {@link #DATE}.
          */
         TIMESTAMP,
+        /**
+         * A calendar day with no time and no zone - Java {@link java.time.LocalDate} → SQL
+         * {@code DATE}, and the canonical ISO-8601 text ({@code "2026-08-29"}) on MongoDB and the
+         * map/scan backends.
+         *
+         * <p>Text on those backends rather than a number for the same reason {@link #UUID} is text:
+         * ISO-8601 dates sort lexicographically in chronological order, so ordering agrees with the
+         * native {@code DATE} columns on all seven backends. Storing a day as an instant would need
+         * a zone, and the value has none - two processes in different zones would disagree about
+         * which day a row is on.
+         */
+        DATE,
         /**
          * Java {@link java.util.UUID} → SQL {@code CHAR(36)} (PostgreSQL: its native
          * {@code UUID} type), MongoDB and the file backends: the canonical 36-character
@@ -136,9 +171,37 @@ public final class IndexHint {
         return new IndexHint(fieldPath, FieldType.LONG, Order.ASCENDING);
     }
 
-    /** {@link FieldType#DOUBLE} index on {@code fieldPath}, ascending. */
+    /**
+     * {@link FieldType#DOUBLE} index on {@code fieldPath}, ascending - a binary floating-point
+     * index for {@code double}/{@code float} fields.
+     *
+     * <p>For a {@link java.math.BigDecimal} field use {@link #bigDecimal(String)} instead: this one
+     * would round every value through a {@code double} first, so two amounts differing beyond the
+     * 17th digit collapse into one index entry.
+     */
     public static IndexHint decimal(String fieldPath) {
         return new IndexHint(fieldPath, FieldType.DOUBLE, Order.ASCENDING);
+    }
+
+    /**
+     * {@link FieldType#DECIMAL} index on {@code fieldPath}, ascending - the exact decimal index
+     * for {@link java.math.BigDecimal} fields (money, balances, weights).
+     *
+     * <p>Accepts a {@link java.math.BigDecimal}, any other {@link Number}, or a string spelling a
+     * number in queries, whichever the call site happens to hold:
+     * <pre>{@code
+     * .index(IndexHint.bigDecimal("balance"))
+     *
+     * repo.query(Query.eq("balance", new BigDecimal("2.50")));
+     * repo.query(Query.eq("balance", "2.5"));                    // the same value
+     * repo.query(Query.range("balance", new BigDecimal("10"), null));
+     * }</pre>
+     *
+     * <p>A value that does not spell a number matches nothing - the same outcome a fractional value
+     * has against an {@link FieldType#INT} index - rather than raising an error.
+     */
+    public static IndexHint bigDecimal(String fieldPath) {
+        return new IndexHint(fieldPath, FieldType.DECIMAL, Order.ASCENDING);
     }
 
     /** {@link FieldType#BOOLEAN} index on {@code fieldPath}, ascending. */
@@ -168,6 +231,30 @@ public final class IndexHint {
      */
     public static IndexHint timestamp(String fieldPath) {
         return new IndexHint(fieldPath, FieldType.TIMESTAMP, Order.ASCENDING);
+    }
+
+    /**
+     * {@link FieldType#DATE} index on {@code fieldPath}, ascending - a calendar day, for a
+     * {@link java.time.LocalDate} field.
+     *
+     * <p>Accepts a {@link java.time.LocalDate}, any date-time that carries one
+     * ({@link java.time.LocalDateTime}, {@link java.time.ZonedDateTime},
+     * {@link java.time.OffsetDateTime} - each read in its own zone, never a guessed one), or an
+     * ISO-8601 string:
+     * <pre>{@code
+     * .index(IndexHint.date("releasedOn"))
+     *
+     * repo.query(Query.eq("releasedOn", LocalDate.of(2026, 8, 29)));
+     * repo.query(Query.range("releasedOn", LocalDate.of(2026, 1, 1), LocalDate.of(2026, 12, 31)));
+     * }</pre>
+     *
+     * <p>A value that does not spell a date matches nothing rather than raising an error. An
+     * {@link java.time.Instant} is such a value on purpose: which day it falls on depends on a zone
+     * it does not carry, so converting it here would be a guess - do it at the call site
+     * ({@code instant.atZone(zone).toLocalDate()}) where the right zone is known.
+     */
+    public static IndexHint date(String fieldPath) {
+        return new IndexHint(fieldPath, FieldType.DATE, Order.ASCENDING);
     }
 
     /**

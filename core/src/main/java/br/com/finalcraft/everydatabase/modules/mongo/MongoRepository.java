@@ -6,6 +6,7 @@ import br.com.finalcraft.everydatabase.StorageExecutors;
 import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.CodecException;
+import br.com.finalcraft.everydatabase.codec.JacksonConfig;
 import br.com.finalcraft.everydatabase.log.StorageLog;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
@@ -31,7 +32,9 @@ import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriterSettings;
+import org.bson.types.Decimal128;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -76,10 +79,26 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      * back to a JSON string for the codec. Relaxed mode outputs plain JSON numbers and dates
      * instead of MongoDB extended-JSON wrappers ({@code $numberLong}, {@code $date}, etc.),
      * which is what Jackson expects.
+     *
+     * <p>Relaxed mode still wraps a {@link Decimal128} as {@code {"$numberDecimal": "..."}} - an
+     * object where the entity declares a number - so the converter below writes it as the bare
+     * decimal literal it was saved from, scale included. A non-finite one (only reachable from a
+     * document written outside this library, since {@link BsonTrees} never produces one) has no JSON
+     * number to be and is written as {@code null}.
      */
     private static final JsonWriterSettings RELAXED_JSON = JsonWriterSettings.builder()
         .outputMode(JsonMode.RELAXED)
+        .decimal128Converter((value, writer) -> writer.writeRaw(jsonNumber(value)))
         .build();
+
+    /** A {@link Decimal128} as the JSON number literal the codec reads back, or {@code null}. */
+    private static String jsonNumber(Decimal128 value) {
+        if (value == null || value.isNaN() || value.isInfinite()) return "null";
+        // BigDecimal.toString, not toPlainString: it is the spelling the codec wrote in the first
+        // place, and the only one that survives a negative scale - toPlainString turns 1E+2 into
+        // 100, which reads back as a different BigDecimal (scale 0 instead of -2).
+        return value.bigDecimalValue().toString();
+    }
 
     private final EntityDescriptor<K, V> descriptor;
     private final MongoCollection<Document> collection;
@@ -936,13 +955,35 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     /**
      * Converts a value to the appropriate MongoDB/BSON type for the given hint.
      * {@link IndexHint.FieldType#TIMESTAMP} values are stored and queried as BSON
-     * {@code Date} ({@link java.util.Date}) so MongoDB Compass shows human-readable dates.
-     * All other types are passed through as-is.
+     * {@code Date} ({@link java.util.Date}) so MongoDB Compass shows human-readable dates;
+     * {@link IndexHint.FieldType#DECIMAL} values as BSON {@link Decimal128}, the only BSON type
+     * that compares decimals exactly (a {@code double} column would collapse two amounts that
+     * differ past the 17th digit into one). All other types are passed through as-is.
+     *
+     * <p>A decimal too wide for {@code Decimal128} raises the same error the entity payload would
+     * (see {@link BsonTrees}), naming the field - the index never silently disagrees with the row.
      */
     private static Object toMongoValue(Object value, IndexHint hint) {
-        if (value == null || hint.fieldType() != IndexHint.FieldType.TIMESTAMP) return value;
-        Long epoch = IndexValueExtractor.toEpochMilli(value);
-        return epoch != null ? new java.util.Date(epoch) : null;
+        if (value == null) return null;
+        if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP) {
+            Long epoch = IndexValueExtractor.toEpochMilli(value);
+            return epoch != null ? new java.util.Date(epoch) : null;
+        }
+        if (hint.fieldType() == IndexHint.FieldType.DECIMAL) {
+            BigDecimal decimal = IndexValueExtractor.canonicalDecimal(value);
+            // Not a number: hand it over untouched so it meets no stored Decimal128. Mapping it to
+            // null instead would match every document whose field is null or absent.
+            if (decimal == null) return value;
+            try {
+                return new Decimal128(decimal);
+            } catch (NumberFormatException tooWide) {
+                throw new IllegalArgumentException(
+                    "Mongo: the value " + decimal.toPlainString() + " for the index on '" + hint.fieldPath()
+                    + "' needs more than the 34 significant digits of BSON Decimal128. Round it before "
+                    + "saving, or index the field as a String instead.", tooWide);
+            }
+        }
+        return value;
     }
 
     /**
@@ -978,13 +1019,27 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
     /**
      * Encodes the entity bytes produced by the codec into a native BSON {@link Document}
-     * for storage in the {@link #COL_DATA} sub-document field.
+     * for storage in the {@link #COL_DATA} sub-document field, so Mongo stores a proper object
+     * (not an escaped string) that its own queries and tooling can read.
      *
-     * <p>The codec always produces UTF-8 JSON; {@link Document#parse} turns that JSON into
-     * a BSON document so Mongo stores it as a proper object (not an escaped string).
+     * <p>The JSON is parsed with decimal fidelity and converted by {@link BsonTrees} rather than by
+     * {@code Document.parse}, which reads every fractional number as a {@code double}: that is what
+     * used to round a {@code BigDecimal} field on its way in, and it could not parse an integer
+     * beyond {@code long} range at all.
+     *
+     * @throws IllegalArgumentException if a value cannot be stored in BSON without rounding
      */
-    private Document toDataDoc(byte[] encodedEntity) {
-        return Document.parse(new String(encodedEntity, StandardCharsets.UTF_8));
+    private Document toDataDoc(byte[] encodedEntity) throws CodecException {
+        JsonNode tree;
+        try {
+            tree = JacksonConfig.exactTreeReader(IndexValueExtractor.mapperFor(descriptor.codec()))
+                .readTree(encodedEntity);
+        } catch (Exception notJson) {
+            throw new CodecException(
+                "Mongo: collection '" + descriptor.collection() + "' produced bytes that are not JSON. "
+                + "MongoStorage requires a JSON codec so the entity can be stored as a document.", notJson);
+        }
+        return BsonTrees.toDocument(tree, descriptor.collection());
     }
 
     /**

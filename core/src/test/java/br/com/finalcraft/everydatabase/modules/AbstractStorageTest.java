@@ -9,6 +9,8 @@ import br.com.finalcraft.everydatabase.SyncParticipation;
 import br.com.finalcraft.everydatabase.WriteMode;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.data.TestPlayer;
+import br.com.finalcraft.everydatabase.data.TestSchedule;
+import br.com.finalcraft.everydatabase.data.TestWallet;
 import br.com.finalcraft.everydatabase.log.StorageLogEvent;
 import br.com.finalcraft.everydatabase.log.StorageLogLevel;
 import br.com.finalcraft.everydatabase.log.StorageOp;
@@ -24,8 +26,12 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.function.Executable;
 
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.CompletionException;
@@ -92,6 +98,51 @@ public abstract class AbstractStorageTest {
             .keyExtractor(TestPlayer::getUuid)
             .codec(new JacksonJsonCodec<>(TestPlayer.class))
             .build();
+
+    /**
+     * The {@link BigDecimal} contract's collection. Both of its indexes come from {@code @Indexed}
+     * annotations on {@link TestWallet}, so building it is already half the proof: a
+     * {@code BigDecimal} field resolves to the DECIMAL index type without an explicit override.
+     */
+    public static final EntityDescriptor<UUID, TestWallet> WALLET_DESCRIPTOR =
+        EntityDescriptor.builder(UUID.class, TestWallet.class)
+            .collection("test_wallets")
+            .keyExtractor(TestWallet::getUuid)
+            .codec(new JacksonJsonCodec<>(TestWallet.class))
+            .build();
+
+    /**
+     * Decimals every backend must return exactly as they were saved - same value, same scale.
+     * Each one is a distinct way of losing a number: a trailing zero, a value no {@code double}
+     * spells exactly, more significant digits than a {@code double} holds, a negative scale, and
+     * the zero whose scale is the easiest of all to drop on the way through.
+     */
+    public static final List<String> EXACT_DECIMALS = Collections.unmodifiableList(Arrays.asList(
+        "2.50",
+        "19.99",
+        "0.1",
+        "-7.125",
+        "1234567890123456789012.123456789",
+        "1E+2",
+        "0.00"
+    ));
+
+    /**
+     * The temporal and auto-detection contract's collection. Like {@link #WALLET_DESCRIPTOR}, every
+     * index on it comes from an {@code @Indexed} with no {@code type} override.
+     */
+    public static final EntityDescriptor<UUID, TestSchedule> SCHEDULE_DESCRIPTOR =
+        EntityDescriptor.builder(UUID.class, TestSchedule.class)
+            .collection("test_schedules")
+            .keyExtractor(TestSchedule::getUuid)
+            .codec(new JacksonJsonCodec<>(TestSchedule.class))
+            .build();
+
+    /**
+     * A zone whose offset changes twice a year: keeping only the offset a value happened to have
+     * would be right for that instant and wrong for arithmetic on any other day of the year.
+     */
+    public static final ZoneId ZONE_WITH_DST = ZoneId.of("Europe/Paris");
 
     // ------------------------------------------------------------------
     //  Lifecycle
@@ -1524,5 +1575,279 @@ public abstract class AbstractStorageTest {
             "a config that did not opt into a participation must report the RECOMMENDED default");
         assertEquals(storage.isMachineLocalIdentity(), storage.isMachineLocalIdentity(),
             "machine-local classification must not change between calls - it gates transport publishing");
+    }
+
+    // ------------------------------------------------------------------
+    //  BigDecimal
+    // ------------------------------------------------------------------
+
+    /** A wallet whose every decimal field carries {@code amount}. */
+    private TestWallet wallet(UUID uuid, String amount) {
+        return new TestWallet(uuid, new BigDecimal(amount));
+    }
+
+    @Test
+    @Order(340)
+    @DisplayName("[base] decimal: a BigDecimal reads back with the same value AND the same scale")
+    void decimal_roundTripsWithoutLosingADigit() {
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+
+        for (String amount : EXACT_DECIMALS) {
+            UUID key = UUID.nameUUIDFromBytes(amount.getBytes(StandardCharsets.UTF_8));
+            BigDecimal saved = new BigDecimal(amount);
+            wallets.save(new TestWallet(key, saved)).join();
+
+            TestWallet loaded = wallets.find(key).join().orElseThrow(AssertionError::new);
+            // equals(), not compareTo(): the scale is data. A price of 2.50 that reads back as 2.5
+            // has lost the cents column, and nothing anywhere records that it once had one.
+            assertEquals(saved, loaded.getExact(),
+                "an unindexed BigDecimal must read back identical, scale included: " + amount);
+            assertEquals(saved, loaded.getBalance(),
+                "an indexed BigDecimal must read back identical too - the index never rewrites the row: " + amount);
+            assertEquals(saved, loaded.getLedger().getTotal(),
+                "a BigDecimal nested in an object must read back identical: " + amount);
+        }
+    }
+
+    @Test
+    @Order(341)
+    @DisplayName("[base] decimal: a list of BigDecimals round-trips element by element")
+    void decimal_insideAContainer_roundTrips() {
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+
+        List<BigDecimal> history = new ArrayList<>();
+        for (String amount : EXACT_DECIMALS) history.add(new BigDecimal(amount));
+
+        TestWallet wallet = wallet(UUID_ALICE, "1.00");
+        wallet.setHistory(history);
+        wallets.save(wallet).join();
+
+        assertEquals(history, wallets.find(UUID_ALICE).join().orElseThrow(AssertionError::new).getHistory(),
+            "every element of a decimal list must survive the trip, scale included");
+    }
+
+    @Test
+    @Order(342)
+    @DisplayName("[base] decimal: eq() matches by numeric value, whatever the caller holds")
+    void decimal_equalityIsNumeric() {
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+        wallets.save(wallet(UUID_ALICE, "2.50")).join();
+        wallets.save(wallet(UUID_BOB,   "10.25")).join();
+
+        // 2.5, 2.50 and "2.50" are three spellings of one number - and of one row.
+        for (Object spelling : Arrays.asList(new BigDecimal("2.5"), new BigDecimal("2.50"), "2.50", 2.5d)) {
+            List<TestWallet> found = wallets.query(Query.eq("balance", spelling)).join();
+            assertEquals(1, found.size(), "eq must match a stored 2.50 when asked with " + spelling);
+            assertEquals(UUID_ALICE, found.get(0).getUuid());
+        }
+
+        assertTrue(wallets.query(Query.eq("balance", "not-a-number")).join().isEmpty(),
+            "a value that does not spell a number must match nothing, not raise");
+        assertEquals(1, wallets.query(Query.eq("ledger.total", new BigDecimal("10.25"))).join().size(),
+            "a nested decimal path must be queryable like a top-level one");
+    }
+
+    @Test
+    @Order(343)
+    @DisplayName("[base] decimal: two amounts differing past the 17th digit stay two rows")
+    void decimal_keepsPrecisionADoubleWouldLose() {
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+        // The same double (both round to 1.2345678901234568E21), two different decimals.
+        BigDecimal low  = new BigDecimal("1234567890123456789012.111111111");
+        BigDecimal high = new BigDecimal("1234567890123456789012.999999999");
+        wallets.save(new TestWallet(UUID_ALICE, low)).join();
+        wallets.save(new TestWallet(UUID_BOB,   high)).join();
+
+        assertEquals(low,  wallets.find(UUID_ALICE).join().orElseThrow(AssertionError::new).getExact());
+        assertEquals(high, wallets.find(UUID_BOB).join().orElseThrow(AssertionError::new).getExact());
+
+        List<TestWallet> found = wallets.query(Query.eq("balance", low)).join();
+        assertEquals(1, found.size(), "the DECIMAL index must tell the two amounts apart, as a DOUBLE one could not");
+        assertEquals(UUID_ALICE, found.get(0).getUuid());
+    }
+
+    @Test
+    @Order(344)
+    @DisplayName("[base] decimal: an absent amount stores as NULL and matches no value")
+    void decimal_nullAmount_isStorableAndMatchesNothing() {
+        // A nullable money column is the common case (no balance yet), and it reaches the backend
+        // through the same bind as a real amount - on a numeric column that null needs its type.
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+        TestWallet empty = new TestWallet();
+        empty.setUuid(UUID_ALICE);
+        wallets.save(empty).join();
+        wallets.save(wallet(UUID_BOB, "5.00")).join();
+
+        TestWallet loaded = wallets.find(UUID_ALICE).join().orElseThrow(AssertionError::new);
+        assertNull(loaded.getBalance(), "an absent amount must read back absent, not zero");
+
+        assertTrue(wallets.query(Query.eq("balance", new BigDecimal("0"))).join().isEmpty(),
+            "a null amount is not zero - eq(0) must not find it");
+        List<TestWallet> ranged = wallets.query(
+            Query.range("balance", new BigDecimal("-999"), new BigDecimal("999"))).join();
+        assertEquals(1, ranged.size(), "a null amount is outside every range");
+        assertEquals(UUID_BOB, ranged.get(0).getUuid());
+    }
+
+    @Test
+    @Order(345)
+    @DisplayName("[base] decimal: range and ordering compare numerically, not as text")
+    void decimal_rangeAndOrderAreNumeric() {
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+        wallets.save(wallet(UUID_ALICE, "2.50")).join();
+        wallets.save(wallet(UUID_BOB,   "10.25")).join();
+        wallets.save(wallet(UUID_CAROL, "-3.75")).join();
+
+        List<TestWallet> inRange = wallets.query(
+            Query.range("balance", new BigDecimal("0"), new BigDecimal("5"))).join();
+        assertEquals(1, inRange.size(), "the range must hold 2.50 alone");
+        assertEquals(UUID_ALICE, inRange.get(0).getUuid());
+
+        List<UUID> ascending = wallets
+            .query(Query.range("balance", null, null),
+                   QueryOptions.builder().orderBy("balance", IndexHint.Order.ASCENDING).build())
+            .join().stream().map(TestWallet::getUuid).collect(Collectors.toList());
+        // Text order would put "-3.75" first, then "10.25" before "2.50"; numeric order does not.
+        assertEquals(Arrays.asList(UUID_CAROL, UUID_ALICE, UUID_BOB), ascending,
+            "a decimal index must order by value: -3.75 < 2.50 < 10.25");
+    }
+
+    @Test
+    @Order(346)
+    @DisplayName("[base] decimal: keyset pages resume at the exact amount, through the cursor token")
+    void decimal_keysetPagesResumeExactly() {
+        Repository<UUID, TestWallet> wallets = storage.repository(WALLET_DESCRIPTOR);
+        // Three amounts a double cannot tell apart: the cursor has to carry the decimal itself, and
+        // it travels as text through an encode/decode round trip between pages.
+        wallets.save(new TestWallet(UUID_ALICE, new BigDecimal("1234567890123456789012.111111111"))).join();
+        wallets.save(new TestWallet(UUID_BOB,   new BigDecimal("1234567890123456789012.222222222"))).join();
+        wallets.save(new TestWallet(UUID_CAROL, new BigDecimal("1234567890123456789012.333333333"))).join();
+
+        List<UUID> seen = new ArrayList<>();
+        Cursor cursor = Cursor.start("balance", IndexHint.Order.ASCENDING);
+        int guard = 0;
+        while (true) {
+            Slice<TestWallet> page = wallets.queryAfter(Query.all(), cursor, 1).join();
+            for (TestWallet w : page.content()) seen.add(w.getUuid());
+            if (!page.hasNext()) break;
+            // Round-trip the token the way a caller would hand it back over an HTTP boundary.
+            cursor = Cursor.decode(page.nextCursor().orElseThrow(AssertionError::new).encode());
+            if (++guard > 10) fail("keyset pagination over a decimal index did not terminate");
+        }
+        assertEquals(Arrays.asList(UUID_ALICE, UUID_BOB, UUID_CAROL), seen,
+            "each page must resume after the exact amount, with no row seen twice or skipped");
+    }
+
+    // ------------------------------------------------------------------
+    //  Temporal types and @Indexed auto-detection
+    // ------------------------------------------------------------------
+
+    private TestSchedule schedule(UUID uuid, String day, int hour) {
+        return new TestSchedule(uuid, LocalDate.parse(day),
+            ZonedDateTime.of(LocalDate.parse(day).atTime(hour, 15, 30, 123456789), ZONE_WITH_DST));
+    }
+
+    @Test
+    @Order(350)
+    @DisplayName("[base] temporal: a ZonedDateTime reads back in the zone it was saved in")
+    void temporal_zonedDateTimeKeepsItsZone() {
+        Repository<UUID, TestSchedule> schedules = storage.repository(SCHEDULE_DESCRIPTOR);
+        TestSchedule saved = schedule(UUID_ALICE, "2026-08-29", 10);
+        schedules.save(saved).join();
+
+        TestSchedule loaded = schedules.find(UUID_ALICE).join().orElseThrow(AssertionError::new);
+        // equals() on a ZonedDateTime compares the local time and the zone, not just the instant -
+        // which is the point: 10:15 in Paris and 08:15 UTC are the same moment and different values,
+        // and the one the caller saved is the one that has to come back.
+        assertEquals(saved.getStartsAt(), loaded.getStartsAt(),
+            "a ZonedDateTime must keep its zone and local time, not be rewritten to UTC");
+        assertEquals(saved.getEndsAt(), loaded.getEndsAt(), "an OffsetDateTime must keep its offset");
+        assertEquals(saved.getArchivedAt(), loaded.getArchivedAt());
+        assertEquals(saved.getReleasedOn(), loaded.getReleasedOn());
+        assertEquals(saved, loaded, "every other auto-detected field must round-trip too");
+    }
+
+    @Test
+    @Order(351)
+    @DisplayName("[base] temporal: a LocalDate indexes as a day - eq, range and order by calendar")
+    void temporal_dateIndexIsACalendarDay() {
+        Repository<UUID, TestSchedule> schedules = storage.repository(SCHEDULE_DESCRIPTOR);
+        schedules.save(schedule(UUID_ALICE, "2026-08-29", 10)).join();
+        schedules.save(schedule(UUID_BOB,   "2026-01-05", 10)).join();
+        schedules.save(schedule(UUID_CAROL, "2026-12-31", 10)).join();
+
+        for (Object spelling : Arrays.asList(LocalDate.parse("2026-08-29"), "2026-08-29")) {
+            List<TestSchedule> found = schedules.query(Query.eq("releasedOn", spelling)).join();
+            assertEquals(1, found.size(), "eq on a DATE index must match when asked with " + spelling);
+            assertEquals(UUID_ALICE, found.get(0).getUuid());
+        }
+
+        List<TestSchedule> firstHalf = schedules.query(Query.range("releasedOn",
+            LocalDate.parse("2026-01-01"), LocalDate.parse("2026-06-30"))).join();
+        assertEquals(1, firstHalf.size(), "the range must hold the January day alone");
+        assertEquals(UUID_BOB, firstHalf.get(0).getUuid());
+
+        List<UUID> chronological = schedules
+            .query(Query.all(), QueryOptions.builder().orderBy("releasedOn", IndexHint.Order.ASCENDING).build())
+            .join().stream().map(TestSchedule::getUuid).collect(Collectors.toList());
+        assertEquals(Arrays.asList(UUID_BOB, UUID_ALICE, UUID_CAROL), chronological,
+            "a DATE index must order by calendar: 2026-01-05 < 2026-08-29 < 2026-12-31");
+
+        assertTrue(schedules.query(Query.eq("releasedOn", "not-a-day")).join().isEmpty(),
+            "a value that names no day must match nothing, not raise");
+        assertTrue(schedules.query(Query.eq("releasedOn", Instant.now())).join().isEmpty(),
+            "an Instant names no day without a zone, so it must match nothing rather than guess one");
+    }
+
+    @Test
+    @Order(352)
+    @DisplayName("[base] temporal: a TIMESTAMP index takes any spelling of the same moment")
+    void temporal_timestampIndexTakesEveryMomentType() {
+        Repository<UUID, TestSchedule> schedules = storage.repository(SCHEDULE_DESCRIPTOR);
+        TestSchedule saved = schedule(UUID_ALICE, "2026-08-29", 10);
+        schedules.save(saved).join();
+        schedules.save(schedule(UUID_BOB, "2026-08-30", 10)).join();
+
+        ZonedDateTime moment = saved.getStartsAt();
+        // The same instant, spelled four ways a call site might hold it.
+        for (Object spelling : Arrays.asList(moment,
+                                             moment.toOffsetDateTime(),
+                                             moment.toInstant(),
+                                             java.util.Date.from(moment.toInstant()))) {
+            List<TestSchedule> found = schedules.query(Query.eq("startsAt", spelling)).join();
+            assertEquals(1, found.size(), "eq on a TIMESTAMP index must match when asked with "
+                + spelling.getClass().getSimpleName());
+            assertEquals(UUID_ALICE, found.get(0).getUuid());
+        }
+
+        assertEquals(1, schedules.query(Query.range("startsAt",
+            moment.minusHours(1), moment.plusHours(1))).join().size(),
+            "a range around the moment must hold that row alone");
+    }
+
+    @Test
+    @Order(353)
+    @DisplayName("[base] temporal: enum, BigInteger and the narrow integers index without a type override")
+    void autoDetected_enumBigIntegerAndNarrowInts_areQueryable() {
+        Repository<UUID, TestSchedule> schedules = storage.repository(SCHEDULE_DESCRIPTOR);
+        TestSchedule saved = schedule(UUID_ALICE, "2026-08-29", 10);
+        schedules.save(saved).join();
+
+        assertEquals(1, schedules.query(Query.eq("rarity", TestSchedule.Rarity.EPIC)).join().size(),
+            "an enum index must match the enum constant");
+        assertEquals(1, schedules.query(Query.eq("rarity", "EPIC")).join().size(),
+            "and its name, which is what is stored");
+        assertTrue(schedules.query(Query.eq("rarity", TestSchedule.Rarity.COMMON)).join().isEmpty());
+
+        assertEquals(1, schedules.query(Query.eq("supply", saved.getSupply())).join().size(),
+            "a BigInteger index must match the exact integer, past what a double could hold");
+        assertEquals(1, schedules.query(Query.eq("supply", new java.math.BigDecimal(saved.getSupply()))).join().size(),
+            "and the same value spelled as a BigDecimal");
+        assertTrue(schedules.query(Query.eq("supply", saved.getSupply().add(java.math.BigInteger.ONE))).join().isEmpty(),
+            "one unit apart, 30 digits in, is a different row");
+
+        assertEquals(1, schedules.query(Query.eq("slot", 7)).join().size(), "a short indexes as an int");
+        assertEquals(1, schedules.query(Query.eq("tier", 3)).join().size(), "a byte indexes as an int");
+        assertEquals(1, schedules.query(Query.eq("grade", "A")).join().size(), "a Character indexes as text");
     }
 }

@@ -4,6 +4,7 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
+import br.com.finalcraft.everydatabase.data.TestWallet;
 import br.com.finalcraft.everydatabase.data.VersionedTestPlayer;
 import br.com.finalcraft.everydatabase.modules.AbstractStorageTest;
 import br.com.finalcraft.everydatabase.modules.AbstractTransactionalStorageTest;
@@ -16,9 +17,11 @@ import br.com.finalcraft.everydatabase.tx.TransactionalStorage;
 import com.mongodb.client.MongoDatabase;
 import org.junit.jupiter.api.*;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -279,6 +282,36 @@ class MongoStorageTest extends AbstractTransactionalStorageTest {
                 .orElseThrow(() -> new AssertionError("Missing after commit: " + p.getUuid()));
             assertEquals(0L, loaded.getLockVersion(), "Stored version must be 0 for a fresh insert");
         }
+    }
+
+
+    // ------------------------------------------------------------------
+    //  Mongo-only: the BSON decimal ceiling
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("a decimal wider than BSON Decimal128 is refused by name, not rounded into the collection")
+    void decimalWiderThanDecimal128_failsTheSaveNamingTheField() {
+        // BSON's exact number type holds 34 significant digits; this one has 40. The other backends
+        // store it (their columns are text or unbounded numerics), so Mongo is the one place where
+        // the value has to be refused - and refusing loudly is the whole point: rounding it here
+        // would hand back a different amount than the caller saved, with nothing to notice it by.
+        Repository<UUID, TestWallet> wallets = storage.repository(AbstractStorageTest.WALLET_DESCRIPTOR);
+        BigDecimal tooWide = new BigDecimal("1234567890123456789012345678901234567890.5");
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+            () -> wallets.save(new TestWallet(AbstractStorageTest.UUID_ALICE, tooWide)).join());
+
+        Throwable cause = thrown.getCause();
+        assertTrue(cause instanceof IllegalArgumentException,
+            "an unstorable value is the caller's input, not a storage failure: " + cause);
+        assertTrue(cause.getMessage().contains("balance") || cause.getMessage().contains("exact"),
+            "the message must name the field holding the value: " + cause.getMessage());
+        assertTrue(cause.getMessage().contains("34"),
+            "the message must say what the limit is: " + cause.getMessage());
+
+        assertFalse(wallets.find(AbstractStorageTest.UUID_ALICE).join().isPresent(),
+            "a refused save must leave nothing behind");
     }
 
     // ------------------------------------------------------------------

@@ -154,6 +154,10 @@ public class H2SqlStorage extends SqlStorage {
             // The storage_data column stays TEXT - it is never indexed.
             if (hint.fieldType() == IndexHint.FieldType.STRING)
                 return "VARCHAR";
+            // Unconstrained NUMERIC, like PostgreSQL: H2's bare DECIMAL is arbitrary-precision too,
+            // but NUMERIC is the spelling both dialects share.
+            if (hint.fieldType() == IndexHint.FieldType.DECIMAL)
+                return "NUMERIC";
             // H2 does not support DATETIME; its native type is TIMESTAMP.
             if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP)
                 return "TIMESTAMP(3)";

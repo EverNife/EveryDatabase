@@ -22,9 +22,11 @@ import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.sql.DataSource;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
@@ -127,6 +129,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     /**
      * Maps an {@link IndexHint} to a SQL column type for the backing index column.
      * Default: portable choices for MySQL/MariaDB.
+     *
+     * <p>The column bounds the <b>index</b>, never the stored entity - the payload keeps every digit
+     * regardless. {@code DECIMAL(65,30)} is the widest this dialect has: a value with more than 30
+     * decimal places is rounded to 30 in the index column (queries bind through the same rounding,
+     * so they still meet), and one with more than 35 integer digits is rejected by the server rather
+     * than silently wrapped.
      */
     protected String sqlTypeFor(IndexHint hint) {
         switch (hint.fieldType()) {
@@ -134,8 +142,13 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             case INT:       return "INT";
             case LONG:      return "BIGINT";
             case DOUBLE:    return "DOUBLE";
+            // The widest fixed-point MySQL/MariaDB offer: 65 digits total, 30 of them fractional.
+            // Their DECIMAL always takes an explicit precision (a bare one means DECIMAL(10,0),
+            // an integer), so unlike PostgreSQL and H2 the index column here has a ceiling.
+            case DECIMAL:   return "DECIMAL(65,30)";
             case BOOLEAN:   return "BOOLEAN";
             case TIMESTAMP: return "DATETIME(3)";   // MySQL/MariaDB native; override in dialects
+            case DATE:      return "DATE";          // the same keyword on all three dialects
             case UUID:      return "CHAR(36)";      // the canonical form, fixed width so it indexes whole
             default: throw new IllegalArgumentException("Unknown FieldType: " + hint.fieldType());
         }
@@ -187,7 +200,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      * driver timezone conversion, so the stored value is always the UTC wall-clock regardless of the
      * JVM's default timezone - two processes in different zones then agree on range comparisons and
      * the column reads as human-readable UTC. (PostgreSQL uses {@code TIMESTAMPTZ} and overrides this
-     * to bind an absolute {@link java.sql.Timestamp}.) All other types are returned as-is.
+     * to bind an absolute {@link java.sql.Timestamp}.)
+     *
+     * <p>{@link IndexHint.FieldType#DATE} binds a {@link LocalDate} into a native {@code DATE}
+     * column, and {@link IndexHint.FieldType#DECIMAL} a {@link java.math.BigDecimal}. Either binds
+     * a typed {@code NULL} when the value does not spell one - see the note in the body. All other
+     * types are returned as-is.
      */
     protected Object toJdbcValue(Object value, IndexHint hint) {
         if (value == null) return null;
@@ -197,7 +215,47 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 ? LocalDateTime.ofInstant(Instant.ofEpochMilli(epoch), ZoneOffset.UTC)
                 : null;
         }
+        if (hint.fieldType() == IndexHint.FieldType.DATE) {
+            // A LocalDate binds straight into a DATE column (JDBC 4.2), with no java.sql.Date detour
+            // through the JVM's default zone - which is the whole reason a day is not a timestamp.
+            String canonical = IndexValueExtractor.canonicalDate(value);
+            return canonical != null ? LocalDate.parse(canonical) : TypedNull.DATE;
+        }
+        if (hint.fieldType() == IndexHint.FieldType.DECIMAL) {
+            // A numeric column rejects a value that does not spell a number: binding NULL makes the
+            // comparison match nothing, which is what a caller asking for a non-number is owed on
+            // every backend - not a driver-specific conversion error. The null carries its column
+            // type because PostgreSQL infers 'character varying' for an untyped one and then refuses
+            // to compare it with a numeric column.
+            BigDecimal decimal = IndexValueExtractor.canonicalDecimal(value);
+            return decimal != null ? decimal : TypedNull.NUMERIC;
+        }
         return value;
+    }
+
+    /**
+     * A {@code NULL} bind that carries the SQL type of the column it is compared with, for a driver
+     * that will not infer one. Only {@link #toJdbcValue} produces it, and only
+     * {@link #bindParam(PreparedStatement, int, Object)} consumes it - it never reaches a caller.
+     */
+    static final class TypedNull {
+        static final TypedNull NUMERIC = new TypedNull(Types.NUMERIC);
+        static final TypedNull DATE    = new TypedNull(Types.DATE);
+
+        private final int sqlType;
+
+        private TypedNull(int sqlType) {
+            this.sqlType = sqlType;
+        }
+    }
+
+    /** Binds one index value, honouring a {@link TypedNull}. Every index bind goes through here. */
+    static void bindParam(PreparedStatement ps, int slot, Object value) throws SQLException {
+        if (value instanceof TypedNull) {
+            ps.setNull(slot, ((TypedNull) value).sqlType);
+        } else {
+            ps.setObject(slot, value);
+        }
     }
 
     /**
@@ -511,7 +569,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 int slot = 1;
                 for (IndexHint hint : newHints) {
-                    ps.setObject(slot++, toJdbcValue(IndexValueExtractor.extract(tree, hint), hint));
+                    bindParam(ps, slot++, toJdbcValue(IndexValueExtractor.extract(tree, hint), hint));
                 }
                 ps.setString(slot, key);
                 ps.addBatch();
@@ -873,7 +931,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 for (IndexHint hint : indexes) {
                     Object value = IndexValueExtractor.extract(tree, hint);
-                    ps.setObject(slot++, toJdbcValue(value, hint));
+                    bindParam(ps, slot++, toJdbcValue(value, hint));
                 }
             }
             ps.executeUpdate();
@@ -906,7 +964,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 for (IndexHint hint : indexes) {
                     Object value = IndexValueExtractor.extract(tree, hint);
-                    ps.setObject(slot++, toJdbcValue(value, hint));
+                    bindParam(ps, slot++, toJdbcValue(value, hint));
                 }
             }
             ps.setString(slot++, key.toString());
@@ -1074,7 +1132,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
             for (IndexHint hint : indexes) {
                 Object value = IndexValueExtractor.extract(tree, hint);
-                ps.setObject(slot++, toJdbcValue(value, hint));
+                bindParam(ps, slot++, toJdbcValue(value, hint));
             }
         }
         ps.setString(slot, key.toString());
@@ -1125,7 +1183,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             int slot = 3;
             for (IndexHint hint : indexes) {
                 Object value = IndexValueExtractor.extract(tree, hint);
-                ps.setObject(slot++, toJdbcValue(value, hint));
+                bindParam(ps, slot++, toJdbcValue(value, hint));
             }
         }
     }
@@ -1188,7 +1246,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         if (where.length() > 0) sql.append(" WHERE ").append(where);
         return withConnection(StorageOp.COUNT, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                for (int i = 0; i < params.size(); i++) bindParam(ps, i + 1, params.get(i));
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? rs.getLong(1) : 0L;
                 }
@@ -1222,7 +1280,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         params.add(probe);
         return withConnection(StorageOp.SCAN_ALL, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                for (int i = 0; i < params.size(); i++) bindParam(ps, i + 1, params.get(i));
                 List<ScanRow<V>> rows = new ArrayList<>();
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
@@ -1260,7 +1318,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         params.add(probe);
         return withConnection(StorageOp.SCAN_ALL, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                for (int i = 0; i < params.size(); i++) bindParam(ps, i + 1, params.get(i));
                 List<String> found = new ArrayList<>();
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) found.add(rs.getString(1));
@@ -1329,7 +1387,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
         return withConnection(StorageOp.QUERY, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                for (int i = 0; i < params.size(); i++) bindParam(ps, i + 1, params.get(i));
                 List<V> result = readEntities(ps);
                 log.queried(tableName(), query, result.size(), System.currentTimeMillis() - startMs);
                 return result;
@@ -1407,7 +1465,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         long startMs = System.currentTimeMillis();
         return withConnection(StorageOp.QUERY, conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+                for (int i = 0; i < params.size(); i++) bindParam(ps, i + 1, params.get(i));
                 List<V> rows = readEntities(ps);
                 boolean hasNext = rows.size() > limit;
                 List<V> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
